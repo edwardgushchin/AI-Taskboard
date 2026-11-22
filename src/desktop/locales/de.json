@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Abgebrochene Karten archivieren",
+  "archive.cancelled.count": "Archivierte Karten: {count}",
+  "archive.cancelled.issues": "Fehler:",
   "about.base_commit": "Basis-Commit",
   "about.local_changes": "lokale Änderungen",
   "about.version": "Version",

@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "Archivia schede annullate",
+  "archive.cancelled.count": "Schede archiviate: {count}",
+  "archive.cancelled.issues": "Errori:",
   "about.base_commit": "Commit di base",
   "about.local_changes": "modifiche locali",
   "about.version": "Versione",

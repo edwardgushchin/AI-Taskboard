@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { addChatMessage, readTask } from "../src/cli/archive.ts";
+import { sendTeamMessage } from "../src/cli/expert-team.ts";
 import { TaskboardError } from "../src/cli/model.ts";
 import { BoardStore, initializeBoard, validateCard } from "../src/cli/storage.ts";
+import { managerInbox } from "../src/cli/task-messages.ts";
 import { createTask } from "../src/cli/tasks.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8");
@@ -15,8 +17,64 @@ const start = source.indexOf("export function replyToTask(");
 const end = source.indexOf("\nexport async function requestExecutorAccess", start);
 assert.ok(start >= 0 && end > start);
 
-function providerResult(result: object, initial = false, onActivity?: (items: any[]) => void, draft = false) {
+test("draft manager replies are linked, persisted once, and survive a concurrent discussion", t => {
+  const root = mkdtempSync(join(tmpdir(), "draft-manager-reply-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  const store = initializeBoard(location, store => store);
+  const id = "T-0001";
+  const read = () => readTask(store, id);
+  store.create({
+    ...createTask(id, { title: "Publication format" }),
+    draftDiscussion: { phase: "running" },
+    awaitingAnswer: true,
+  });
+
+  const ask = (to: string, text: string) => sendTeamMessage(store, id, id, { to, text, kind: "question" });
+  const format = ask("manager", "Which format is used?");
+  const owner = ask("owner", "Who signs off?");
+  assert.deepEqual(managerInbox([read()]).filter(mail => mail.draftQuestion).map(mail => mail.sequence), [format.sequence]);
+
+  const answer = { to: id, text: "Use CSV.", replyTo: format.sequence };
+  for (const replyTo of [String(format.sequence), "2x", "0x2", null, 0]) {
+    assert.throws(() => sendTeamMessage(store, id, "manager", { ...answer, replyTo }), { code: "INVALID_INPUT" });
+  }
+  assert.equal(read().draftDiscussion?.managerReply, undefined);
+  sendTeamMessage(store, id, "manager", { ...answer, to: "team" });
+  assert.equal(read().draftDiscussion?.managerReply, undefined);
+  const first = sendTeamMessage(store, id, "manager", answer);
+  assert.deepEqual(sendTeamMessage(store, id, "manager", answer), first);
+  assert.deepEqual(readTask(new BoardStore(location), id).draftDiscussion, { phase: "running", managerReply: first.sequence });
+  assert.equal(managerInbox([read()]).some(mail => mail.sequence === format.sequence), false);
+  assert.equal(managerInbox([read()]).some(mail => mail.sequence === owner.sequence), true);
+
+  const finish = (text: string, awaitingAnswer: boolean, managerReply?: number) => addChatMessage(store, read(), {
+    model: "fixture", effort: "low", actor: "agent", draftDiscussion: true,
+    revision: read().revision, text, awaitingAnswer, managerReply,
+  });
+  assert.deepEqual(finish("Waiting for clarifications.", true).draftDiscussion, { phase: "queued", managerReply: first.sequence });
+  store.save({ ...read(), draftDiscussion: { phase: "running", managerReply: first.sequence } });
+  const delimiter = ask("manager", "Which delimiter?");
+  const second = sendTeamMessage(store, id, "manager", { to: id, replyTo: delimiter.sequence, text: "Use comma." });
+  const partial = finish("The owner still needs to confirm who signs off.", true, first.sequence);
+  assert.equal(partial.draftManagerReplyThrough, first.sequence);
+  assert.deepEqual(partial.draftDiscussion, { phase: "queued", managerReply: second.sequence });
+
+  store.save({ ...read(), draftDiscussion: { phase: "running", managerReply: second.sequence } });
+  assert.throws(() => finish("Duplicate response.", false, first.sequence), { code: "CHAT_CHANGED" });
+  assert.throws(() => finish("Unlinked response.", false, delimiter.sequence), { code: "CHAT_CHANGED" });
+  sendTeamMessage(store, id, "owner", { to: id, replyTo: owner.sequence, text: "The owner signs off." });
+  const ready = finish("The draft is ready for approval.", false, second.sequence);
+  assert.equal(ready.status, "draft");
+  assert.equal(ready.awaitingAnswer, false);
+  assert.equal(ready.draftConfirmed, true);
+  assert.equal(ready.draftManagerReplyThrough, second.sequence);
+  assert.equal(ready.draftDiscussion, undefined);
+});
+
+function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false) {
   let options: any;
+  let tools: { name: string }[] = [];
   const replyToTask = runInNewContext(stripTypeScriptTypes(source.slice(start, end).replace("export ", "")) + "\nreplyToTask", {
     boardWorklog: () => ({}),
     readBoardSettings: () => ({}),
@@ -24,24 +82,27 @@ function providerResult(result: object, initial = false, onActivity?: (items: an
     boardAgentInstructions: (_role: string, instructions: string) => instructions,
     manualContext: () => "",
     chatTools: [],
-    executorExpertTools: [],
+    executorExpertTools: ["team_inbox", "team_message", "expert_stage", "expert_list"].map(name => ({ name })),
     worklogTool: {},
     githubReadTool: {},
     reviewModeInstruction: "",
-    withBoardMcp: (_tools: unknown, _action: unknown, run: Function) => run({}, {}),
+    withBoardMcp: (available: typeof tools, _action: unknown, run: Function) => {
+      tools = available;
+      return run({}, {});
+    },
     reply: async (...args: any[]) => {
       options = args.at(-1);
       return result;
     },
   });
   const pending = replyToTask("profile", "project", {}, "{}", [], () => {}, () => {}, "scratch", 1024,
-    undefined, undefined, undefined, "T-0001", onActivity, initial ? "initial" : undefined, false, false, draft);
-  return { pending, options: () => options };
+    undefined, undefined, undefined, "T-0001", onActivity, mode, false, false, draft);
+  return { pending, options: () => options, tools: () => tools.map(tool => tool.name).filter(Boolean) };
 }
 
 test("both discussion modes return explicit question state without parsing punctuation", async () => {
   for (const questions of ["Which format and destination?", ""]) {
-    const f = providerResult({ text: JSON.stringify({ questions }), commentary: ["hidden"] }, true);
+    const f = providerResult({ text: JSON.stringify({ questions }), commentary: ["hidden"] }, "initial");
     const result = await f.pending;
     assert.equal(result.text, questions);
     assert.equal(result.awaitingAnswer, Boolean(questions));
@@ -65,17 +126,30 @@ test("draft dialogue requires explicit confirmation independently of open questi
   const response = { text: "Hello!", awaitingAnswer: false };
   for (const variant of [response, { ...response, confirmsDraft: "true" },
     { ...response, awaitingAnswer: true, confirmsDraft: true }]) {
-    const malformed = providerResult({ text: JSON.stringify(variant) }, false, undefined, true);
+    const malformed = providerResult({ text: JSON.stringify(variant) }, undefined, undefined, true);
     await assert.rejects(malformed.pending, /invalid task discussion result/);
   }
 
-  const neutral = providerResult({ text: JSON.stringify({ ...response, confirmsDraft: false }) }, false, undefined, true);
+  const neutral = providerResult({ text: JSON.stringify({ ...response, confirmsDraft: false }) }, undefined, undefined, true);
   assert.equal((await neutral.pending).confirmsDraft, false);
   assert.ok(neutral.options().finalAnswerSchema.required.includes("confirmsDraft"));
   const confirmed = providerResult({
     text: JSON.stringify({ text: "The draft is ready for approval.", awaitingAnswer: false, confirmsDraft: true }),
-  }, false, undefined, true);
+  }, undefined, undefined, true);
   assert.equal((await confirmed.pending).confirmsDraft, true);
+});
+
+test("automatic discussion modes can use team mail and require a concrete handoff reply", async () => {
+  const initial = providerResult({ text: '{"questions":""}' }, "initial");
+  const handoff = providerResult({ text: '{"text":"Ready for approval.","awaitingAnswer":false}' }, "handoff");
+  await initial.pending;
+  assert.equal((await handoff.pending).awaitingAnswer, false);
+  for (const session of [initial, handoff]) {
+    assert.deepEqual(Array.from(session.tools()), ["team_inbox", "team_message"]);
+    assert.equal(session.options().tools.length, 0);
+  }
+  await assert.rejects(providerResult({ text: '{"text":" ","awaitingAnswer":true}' }, "handoff").pending,
+    /invalid task discussion result/);
 });
 
 test("discussion streaming decodes JSON strings and saves the first reply timestamp", async () => {
@@ -83,7 +157,7 @@ test("discussion streaming decodes JSON strings and saves the first reply timest
   let visible: any[] = [];
   const text = 'Принято: "узкое окно".\nПуть C:\\temp\\new, цвет #FFFFFF.';
   const encoded = JSON.stringify({ text, awaitingAnswer: false });
-  const f = providerResult({ text: encoded }, false, items => { visible = items; });
+  const f = providerResult({ text: encoded }, undefined, items => { visible = items; });
   const publish = (value: string) => f.options().onActivity([
     { id: "reply", type: "agentMessage", phase: "final_answer", text: value, at, status: "inProgress" },
   ]);
@@ -124,7 +198,7 @@ test("agent reply timestamps reject malformed input before saving and accept a c
 
 test("invalid or interrupted provider results cannot silently close a question", async () => {
   for (const questions of [undefined, null, 0, {}, []]) {
-    await assert.rejects(providerResult({ text: JSON.stringify({ questions }) }, true).pending,
+    await assert.rejects(providerResult({ text: JSON.stringify({ questions }) }, "initial").pending,
       /invalid draft discussion result/);
   }
   for (const value of [undefined, "false", 0, null]) {
@@ -134,7 +208,7 @@ test("invalid or interrupted provider results cannot silently close a question",
   const result = await providerResult({ interrupted: true }).pending;
   assert.equal(result.interrupted, true);
   assert.equal(result.awaitingAnswer, undefined);
-  const initial = await providerResult({ interrupted: true }, true).pending;
+  const initial = await providerResult({ interrupted: true }, "initial").pending;
   assert.equal(initial.interrupted, true);
   assert.equal(initial.text, undefined);
 });

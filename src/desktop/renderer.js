@@ -618,7 +618,8 @@ function mountAppMenu() {
     }
     if (action === "archive-view") {
       archiveView = !archiveView;
-      byId("filters").open = false;
+      const filters = byId("filters");
+      if (filters) filters.open = false;
       render();
       return;
     }
@@ -1492,6 +1493,27 @@ function laneTools(state, title, tasks, total, count, content) {
   options.append(priorityLabel);
   options.append(...tagChoices([...boardTags].sort(([, a], [, b]) => a.name.localeCompare(b.name)), selected));
   options.append(reset);
+  if (state === "cancelled" && !manualBoard()) {
+    const archive = button(() => t("archive.cancelled.action"), async () => {
+      filter.open = false;
+      summary.focus();
+      archive.disabled = true;
+      try {
+        const result = await command("archive-cancelled");
+        if (!result) return;
+        const count = t("archive.cancelled.count", { count: result.count });
+        if (result.issues.length) {
+          const issues = result.issues.map(({ id, problem }) => id + " — " + problem);
+          notice(t("archive.cancelled.issues") + " " + issues.join(" · "), count);
+        } else {
+          notice(count, t("archive.cancelled.action"));
+        }
+      } finally {
+        archive.disabled = false;
+      }
+    }, "quiet");
+    options.append(archive);
+  }
   filter.append(summary, options);
   options.addEventListener("change", () => {
     selected.clear();

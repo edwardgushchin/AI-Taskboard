@@ -26,7 +26,10 @@ const profile = join(scratch, "profile");
 const restarted = process.argv.includes("--restart");
 const idsFile = join(scratch, "ids.json");
 const objective = "Пополнить очередь экспериментальной доски";
-const checkpoint = "Следующий шаг — дождаться завершения зависимости.";
+const firstFinal = "Подготовил одну карточку. Следующий шаг — проверить зависимость.";
+const checkpoint = "Проверка зависимости завершена. Для запуска нужно дождаться её результата.";
+const secondFinal = "Пополнение пока невозможно. Следующая проверка — при изменении очереди.";
+const completedReport = "Цель достигнута, очередь проверена.";
 const goalQuestion = "Вопрос от карточки цели";
 const ordinaryQuestion = "Вопрос от карточки вне цели";
 const ownerInstruction = "Указание владельца активной цели";
@@ -38,7 +41,7 @@ const auto = "#auto-mode-switch";
 const iterativeHint = "#iterative-goal-hint";
 let ids;
 let window;
-let releaseExecutor;
+const releaseExecutors = [];
 
 function cliReply(args, input) {
   const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, [
@@ -155,11 +158,14 @@ const panelOpen = () => read(panel, ".matches(':popover-open')");
 const hintText = () => read(iterativeHint, ".textContent.trim()");
 
 async function capture(name) {
-  await until(() => read(panel, ".matches(':popover-open') && getComputedStyle(document.querySelector('#auto-mode-panel')).opacity === '1'"),
-    "popover paint");
+  await until(() => read(".board-chat", "?.checkVisibility({ opacityProperty: true }) && getComputedStyle(document.querySelector('.board-chat')).opacity === '1'"),
+    "goal activity has finished opening");
+  await evaluate(`Array.from(document.querySelectorAll(".board-work-timeline *"))
+    .findLast(entry => entry.textContent.trim() === ${JSON.stringify(firstFinal)})
+    .scrollIntoView({ block: "center", behavior: "instant" })`);
   await evaluate("document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))");
   const image = await window.webContents.capturePage();
-  assert.deepEqual(image.getSize(), { width: 1280, height: 800 });
+  assert.deepEqual(image.getSize(), { width: 1280, height: 900 });
   const bytes = image.toPNG();
   assert.ok(bytes.length < 4 * 1024 * 1024);
   writeFileSync(join(artifacts, name), bytes);
@@ -247,12 +253,25 @@ globalThis.fixtureManager = async (_profile, cwd, prompt, _images, action, _tool
   assert.equal(session.id, ids.thread);
   assert.equal(session.iterativeGoal, true);
   assert.match(instructions, new RegExp(objective));
+  assert.match(instructions, /next concrete step or waiting condition in the final answer/);
+  assert.doesNotMatch(instructions, /Use goal_report with the next concrete step/);
   assert.ok(!prompt.includes(ordinaryQuestion));
   const context = JSON.parse(prompt.slice(prompt.indexOf("{")));
-  assert.equal(context.target, 4);
-  assert.equal(context.ready, 3);
-  assert.equal(context.workingOrQueued, 2);
+  const previousTurns = count();
+  if (previousTurns === 0) {
+    assert.equal(context.target, 4);
+    assert.equal(context.ready, 3);
+    assert.equal(context.freeExecutorSlots, 0);
+  }
   if (count() === 0 && refuseOnce("prepare")) throw new Error("Fixture: failed to prepare provider before sending");
+  if (previousTurns === 0) {
+    assert.deepEqual(context.reasons.map(reason => reason.kind), ["reserve", "instructions"]);
+  } else if (previousTurns === 1) {
+    assert.deepEqual(context.reasons.map(reason => reason.kind), ["reserve"]);
+    assert.equal(context.nextStep, firstFinal);
+  } else if (previousTurns === 2) {
+    assert.equal(context.nextStep, secondFinal);
+  }
   assert.equal(typeof session.onTurnStarting, "function");
   assert.equal(typeof session.onTurnRejected, "function");
   if (count() === 2) assert.match(prompt, new RegExp(goalQuestion));
@@ -261,25 +280,64 @@ globalThis.fixtureManager = async (_profile, cwd, prompt, _images, action, _tool
     session.onTurnRejected();
     throw new Error("Fixture: provider explicitly rejected starting the turn");
   }
-  if (count() === 3) {
+  if (previousTurns === 3) {
     const inbox = await action("goal_inbox", {});
     assert.equal(inbox.ok, true, JSON.stringify(inbox));
     assert.ok(inbox.data.some(message => message.text === ownerInstruction));
   }
   assert.equal(runtimeEntries(project).filter(entry => entry.task === "manager:context").length, 1);
   appendFileSync(launches, JSON.stringify({ prompt, at: Date.now() }) + "\n");
+  session.onGoalControl(async action => {
+    assert.equal(action.kind, "complete");
+    session.onGoal({ objective, status: "complete" });
+  });
   session.onGoal({ objective, status: "active" });
-  if (count() === 1) {
+  if (previousTurns === 0) {
     ids.refill = createReady("Карточка, подготовленная коротким ходом");
     writeFileSync(idsFile, JSON.stringify(ids));
+    return { text: firstFinal, model: "QA fixture", goalStatus: "active" };
   }
-  const report = await action("goal_report", { text: checkpoint });
-  assert.equal(report.ok, true, JSON.stringify(report));
-  return { text: checkpoint, model: "QA fixture", goalStatus: "active" };
+  if (previousTurns === 1) {
+    const report = await action("goal_report", { text: checkpoint });
+    assert.equal(report.ok, true, JSON.stringify(report));
+    await delay(10);
+    return { text: secondFinal, model: "QA fixture", goalStatus: "active" };
+  }
+  if (previousTurns === 4) {
+    const report = await action("goal_report", { text: completedReport, complete: true });
+    assert.equal(report.ok, true, JSON.stringify(report));
+    return { text: "Готово.", model: "QA fixture", goalStatus: "complete" };
+  }
+  return { text: "Ожидаю следующее изменение очереди.", model: "QA fixture", goalStatus: "active" };
 };
+
+async function assertHistory(expected) {
+  const reply = await evaluate(`window.taskboard.boardHistory(${JSON.stringify(project)}, null, "work")`);
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  const events = reply.data.turns.flatMap(turn => turn.items.map(item => ({ ...item, lane: turn.lane, goalId: turn.goalId })));
+  const selected = events.filter(item => expected.some(([text]) => text === item.text));
+  assert.deepEqual(selected.map(({ text, lane, phase }) => ({ text, lane, phase })), expected.map(
+    ([text, lane]) => ({ text, lane, phase: "final_answer" }),
+  ));
+  assert.ok(selected.every(item => item.goalId === ids.goal));
+  assert.deepEqual(selected.map(item => item.at), selected.map(item => item.at).sort());
+}
+
+async function assertVisibleHistory(...entries) {
+  const timeline = ".board-work:not([hidden]) .board-work-timeline";
+  await until(async () => {
+    const visible = await read(timeline, "?.innerText");
+    return visible && entries.every(text => visible.includes(text));
+  }, "goal activity renders saved entries");
+  const visible = await read(timeline, ".innerText");
+  for (const text of entries) assert.equal(visible.split(text).length - 1, 1);
+  const positions = entries.map(text => visible.indexOf(text));
+  assert.deepEqual(positions, positions.toSorted((a, b) => a - b));
+}
 
 function writeReport() {
   const paths = [
+    "docs/reference/board.md",
     "scripts/check-iterative-goal.mjs", "scripts/electron-check.mjs", "src/cli/main.ts",
     "src/cli/manager-goal.ts", "src/desktop/auto-queue.ts", "src/desktop/codex-chat.ts",
     "src/desktop/index.html", "src/desktop/iterative-goal.ts", "src/desktop/locales/ru.json",
@@ -290,21 +348,21 @@ function writeReport() {
     const digest = createHash("sha256").update(bytes(path)).digest("hex");
     return `- \`${digest}\` \`${path}\``;
   });
-  writeFileSync(join(artifacts, "iterative-goal-check.md"), [
+  writeFileSync(join(artifacts, "goal-iteration-report.txt"), [
     "# Проверка итеративной цели",
     "",
     "Два процесса используют одну изолированную доску и профиль. Проверены реальный интерфейс Electron, IPC, команды CLI, хранилище и планировщик. Ответы модели детерминированы. Исполнительский запуск удерживается на границе диспетчера, чтобы проверять запас карточек без вызова внешнего провайдера.",
     "",
     "Профиль: " + [process.platform, process.arch, "Electron " + process.versions.electron,
       "Chromium " + process.versions.chrome, "Node " + process.versions.node].join(", ") +
-      ". Viewport 1280×800, масштаб 100%, Chromium sandbox включён. Linux и macOS не запускались.",
+      ". Viewport 1280×900, масштаб 100%, Chromium sandbox включён. Linux и macOS не запускались.",
     "",
     readFileSync(observations, "utf8").trimEnd(),
     "",
     "Команда",
     "",
     "```powershell",
-    "node scripts/check-iterative-goal.mjs --artifacts .tasks/qa",
+    "node scripts/check-iterative-goal.mjs --artifacts .tasks/qa/T-0315",
     "```",
     "",
     "HEAD проверенной копии: " + revision + ". SHA-256 байтов checkout перед инструментированием:",
@@ -320,11 +378,14 @@ function writeReport() {
 
 async function run() {
   prepare();
-  releaseExecutor = registerRuntime(project, { kind: "slot", role: "executor", task: ids.dependency });
-  assert.ok(releaseExecutor);
+  for (const task of [ids.dependency, ids.ordinary]) {
+    const release = registerRuntime(project, { kind: "slot", role: "executor", task });
+    assert.ok(release);
+    releaseExecutors.push(release);
+  }
   await app.whenReady();
   window = await until(() => BrowserWindow.getAllWindows()[0], "startup window");
-  window.setContentSize(1280, 800);
+  window.setContentSize(1280, 900);
   window.focus();
   window.webContents.focus();
   try {
@@ -348,10 +409,14 @@ async function run() {
     await delay(6200);
     assert.equal(count(), 4, "Restart must not retry handled triggers.");
     assert.deepEqual(failureRecords().map(entry => entry.reason), ["prepare", "rejected"]);
+    await assertHistory([[firstFinal, "work"], [checkpoint, "notice"], [secondFinal, "work"]]);
     log("Реальный перезапуск при сохранённых условии, вопросе и указании: +0 запусков, всего 4.");
     await click("#board-draft textarea[name=request]");
     await until(async () => await read(".board-goal-status", "?.textContent") === "Цель ждёт работы",
       "visible waiting status");
+    await evaluate(`document.querySelector('.board-work-toggle[aria-pressed="false"]')?.click()`);
+    await assertVisibleHistory(firstFinal, checkpoint, secondFinal);
+    await capture("goal-iteration-final.png");
     await read(".board-goal", ".open = true");
     const pause = ".board-goal-actions > button:nth-child(2)";
     await until(() => read(pause, ".checkVisibility() && !document.querySelector(" + JSON.stringify(pause) + ").disabled"),
@@ -364,19 +429,23 @@ async function run() {
     cli(["message", ids.dependency], { text: "Вопрос на паузе", kind: "question" });
     await unchanged(4, "paused goal");
     log("При ручной паузе новый вопрос дал +0 итеративных запусков. Повтор сохранения отклонён.");
-    writeGoal("complete");
+    writeGoal("active");
     globalThis.fixtureGoal(project);
+    await settled(5, "complete through goal_report");
+    assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal.status, "complete");
+    await assertHistory([[firstFinal, "work"], [checkpoint, "notice"], [secondFinal, "work"], [completedReport, "notice"]]);
+    await assertVisibleHistory(firstFinal, checkpoint, secondFinal, completedReport);
     await until(async () => await hintText() === hint, "completion restores the hint");
     assert.equal(cliReply(["settings"], { iterativeGoal: ids.goal }).error.code, "ACTIVE_GOAL_REQUIRED");
-    await unchanged(4, "completed goal");
+    await unchanged(5, "completed goal");
     writeGoal("paused");
     globalThis.fixtureGoal(project);
     await until(async () => (await hintText()).includes("ручной паузе"), "restored paused goal");
     assert.equal((await evaluate('window.taskboard.boardGoal("clear")')).ok, true);
     assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal, null);
     await until(async () => await hintText() === hint, "clearing a paused goal restores the hint");
-    await unchanged(4, "cleared goal");
-    log("Завершение и снятие возвращают подсказку в блоке цели, +0 итеративных запусков.");
+    await unchanged(5, "cleared goal");
+    log("Ход после паузы завершил цель через goal_report с complete: true. Записи сохранились в хронологическом порядке. Завершение и снятие вернули подсказку, +0 запусков.");
     cli(["settings"], { iterativeGoal: false, autoMode: false });
     writeGoal("active");
     globalThis.fixtureGoal(project);
@@ -384,9 +453,13 @@ async function run() {
     assert.equal(resumed.ok, true, JSON.stringify(resumed));
     assert.equal(ordinaryResumes, 1);
     assert.equal(cli(["auto-queue"]).held.length, 1);
-    const history = await evaluate(`window.taskboard.boardHistory(${JSON.stringify(project)}, null, "work")`);
-    assert.match(JSON.stringify(history), new RegExp(checkpoint));
+    await assertHistory([[firstFinal, "work"], [checkpoint, "notice"], [secondFinal, "work"], [completedReport, "notice"]]);
     log("После выключения выполняется обычное ручное продолжение в том же чате. Журнал и удержание карточки сохранились.");
+    const reference = readFileSync(join(root, "docs/reference/board.md"), "utf8");
+    assert.match(reference, /итог и следующий шаг или условие ожидания в финальном ответе/);
+    assert.match(reference, /Для отдельного промежуточного результата или решения менеджер может вызвать `goal_report`/);
+    assert.match(reference, /завершает её через `goal_report` с `complete: true`/);
+    log("Справка docs/reference/board.md сверена: обычный итог и следующий шаг в финале, отдельный промежуточный отчёт, завершение всей цели через complete: true.");
     writeReport();
     return;
   }
@@ -416,23 +489,28 @@ async function run() {
   cli(["settings"], { iterativeGoal: ids.goal });
   globalThis.fixtureGoal(project);
   await until(async () => (await read("#iterative-goal-rule", ".textContent")).includes("Пополнение очереди"), "legacy queue rule visible");
-  await capture("iterative-goal-active.png");
   await unchanged(0, "sufficient stock");
   log("Для сохранённой настройки без интервала действует пополнение очереди. Два слота, четыре готовые карточки и две в работе, одна ожидает запуска: 0 итераций.");
   cli(["cancel", ids.ready[1]], { reason: "Создать нехватку готовых карточек." });
+  await until(() => failureRecords().some(entry => entry.reason === "prepare"), "first provider preparation failed");
+  sendGoalMessage(project, ids.goal, "Подготовь следующую карточку и проверь зависимость.");
   await retried(1, "prepare");
   log("Дефицит: ошибка подготовки провайдера до отправки, 0 ходов. Через пять секунд состоялся один повтор с запуском.");
   const pending = cli(["list", "--compact"]).tasks;
   assert.equal(pending.find(task => task.id === ids.refill).status, "ready");
-  const history = await evaluate(`window.taskboard.boardHistory(${JSON.stringify(project)}, null, "work")`);
-  assert.match(JSON.stringify(history), new RegExp(checkpoint));
+  await assertHistory([[firstFinal, "work"]]);
+  await click("#board-draft textarea[name=request]");
+  await click(".board-work-toggle");
+  await assertVisibleHistory(firstFinal);
   await unchanged(1, "after replenishment");
-  log("Нехватка при наличии зависимой и удерживаемой карточек: +1 короткий ход, добавлена одна готовая карточка, следующий шаг сохранён, контекст освобождён.");
+  log("Итерация запустилась по reserve и instructions при целевом запасе 4, готовых 3 и свободных слотах 0. Финал без goal_report появился в «Ходе цели» один раз, контекст освободился.");
   cli(["cancel", ids.refill], { reason: "Проверить сохранение условия ожидания." });
   await settled(2, "no further work to prepare");
+  await assertHistory([[firstFinal, "work"], [checkpoint, "notice"], [secondFinal, "work"]]);
+  await assertVisibleHistory(firstFinal, checkpoint, secondFinal);
   cli(["progress", ids.dependency], { summary: "Обычный прогресс", nextStep: "Продолжить" });
   await unchanged(2, "repeated events and unchanged dependency");
-  log("Следующая нехватка: +1 ход, затем обычный прогресс незавершённой зависимости и повторные события дали +0 запусков.");
+  log("Следующая нехватка запустила ход с контекстом первого финала. Самостоятельный промежуточный отчёт появился перед отличающимся финалом. Обычный прогресс зависимости и повторные события дали +0 запусков.");
   cli(["message", ids.dependency], { kind: "question", text: goalQuestion });
   await retried(3, "rejected");
   log("Вопрос по карточке цели: провайдер явно отклонил отправку хода, 0 запусков. Через пять секунд состоялся один повтор с запуском.");
@@ -448,7 +526,9 @@ async function run() {
   log("Указание владельца: +1 ход, текст доступен через goal_inbox, повторное событие дало +0.");
 }
 
-void run().finally(() => releaseExecutor?.()).then(
+void run().finally(() => {
+  for (const release of releaseExecutors) release();
+}).then(
   () => app.exit(0),
   error => {
     console.error(error);

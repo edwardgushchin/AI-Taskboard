@@ -270,13 +270,13 @@ export function replyToTask(
   signal?: AbortSignal,
   taskId?: string,
   onActivity?: (items: RunActivity[]) => void,
-  mode?: "initial",
+  mode?: "initial" | "handoff",
   reviewCard = false,
   closedCard = false,
   draft = false,
 ) {
   const worklog = boardWorklog(project, "executor", taskId);
-  const draftDialogue = draft && mode !== "initial";
+  const draftDialogue = draft && mode === undefined;
   const manual = readBoardSettings(locateBoard(project)).boardType === "manual";
   let replyAt: string | undefined;
   const discussionActivity = (items: RunActivity[]) => {
@@ -290,13 +290,18 @@ export function replyToTask(
     }));
   };
   const options = {
-    settings, tools: mode === "initial" ? [] : chatTools.filter(tool => (tool.name !== "task_request_changes" || (reviewCard && !manual)) &&
+    settings, tools: mode ? [] : chatTools.filter(tool => (tool.name !== "task_request_changes" || (reviewCard && !manual)) &&
       (tool.name !== "task_set_review_mode" || (!manual && !closedCard))), webSearch: true,
     instructions: boardAgentInstructions("executor", [
       mode === "initial" ? "Review the saved draft automatically. There is no latest user message. Read all card fields, discussion history, dependency context and milestone. Inspect applicable project instructions and relevant files using read-only commands. Check path existence before reading. Treat inputs from unfinished dependencies as planned outputs. If the first scoped listing of a new project finds no tracked files, continue with the supplied context. Avoid broader searches or looking outside the project for optional files. Inspect every attachment using its unique ID and supplied path. Continue if a source is inaccessible or changed. Return only concrete questions about material gaps that these sources cannot resolve, in the language of the draft. Include an inaccessible or changed source by exact filename if it prevents resolving a material gap. Set questions to an empty string when no user input is needed. Do not include a readiness confirmation, recap or progress update. Do not update, approve, start or implement the task." :
+        mode === "handoff" ? "Continue this draft using the linked managerReplies, previous questions and card context. There is no latest user message. If the replies resolve the last material gap, briefly say the draft is ready for approval and set awaitingAnswer to false. If a material gap remains, state exactly what is missing and who can answer. Keep approval a separate user action. Do not update, approve, start or implement the task." :
         "You are the agent in an AI Taskboard task discussion. Answer the latest user message in their language. When continuing a draft discussion, use the previous questions, the user's answers and the project and attachment context. Ask only about remaining material gaps. When the user's answer resolves the last material gap in a draft, briefly say the task is ready for approval without recapping its description or criteria. Approval remains a separate user action; do not approve or start the task.",
       "Use the supplied card and conversation as context. Ask unresolved questions in your reply when needed.",
-      "For a normal reply, return text and awaitingAnswer. Set awaitingAnswer to true only when your reply asks the owner for a concrete clarification needed for this task or an existing marked question still needs an answer.",
+      ...(!manual ? [
+        "For a draft, use team_message with to manager and kind question for a material gap the manager can resolve from board context. Ask the owner directly in the draft dialogue when only the owner can decide or provide the information. Do not ask the owner to relay team mail.",
+        "If you send a manager question, briefly state the concrete gap you are waiting on. Include it in questions in the initial review, or set awaitingAnswer to true in a normal reply. Do not resend a question already waiting for the manager.",
+      ] : []),
+      "For a normal reply, return text and awaitingAnswer. Set awaitingAnswer to true when a concrete clarification from the owner or manager is still needed.",
       "Keep it true if any such question remains, including a follow-up after a partial answer. Set it false when the clarification is sufficient or you explicitly close the last question as no longer needed. Reading the chat or receiving a user message alone does not close a question.",
       ...(draftDialogue ? [
         "Also return confirmsDraft. Set it to true only after reviewing the current saved brief and explicitly confirming it is ready for approval. Set it to false for greetings, acknowledgements, unrelated replies, and whenever you still need clarification. Absence of a question does not establish readiness.",
@@ -309,7 +314,7 @@ export function replyToTask(
       "Merge new information into the appropriate fields. Preserve existing requirements, references and list entries unless the user clearly corrects them. If statements conflict or allow materially different interpretations, ask a specific question before saving the disputed change.",
       "For a review card, use task_request_changes when the user requests correction or their feedback establishes a confirmed defect. Include every necessary correction from the discussion in reason. This acts only on this card and preserves its history and worktree. No separate manager confirmation is needed. Other status changes and acceptance remain with the user. Never accept on their behalf.",
       "Confirm a return only from a successful operation result. executorState waiting_for_discussion means the return is queued and waits for this discussion to end and an executor slot to become available. Finish your reply after the handoff. On an error report it without claiming a transition; refresh the card before retrying a revision conflict.",
-      ...(!manual && mode !== "initial" ? [reviewModeInstruction, "In this chat the tool applies only to the current card."] : []),
+      ...(!manual && !mode ? [reviewModeInstruction, "In this chat the tool applies only to the current card."] : []),
       "Keep submitted and completed requirements intact.",
       "After a successful write, briefly describe what changed. If the information is already recorded, leave the card as it is. If task_update fails, report the error and do not claim an update. On revision conflict, do not replay stale field replacements; ask the user to refresh and retry.",
       "Use github_read for GitHub checks, including run-failed-log for Actions logs. The board uses its host login. Try the tool before asking the user to copy a log.",
@@ -332,7 +337,8 @@ export function replyToTask(
       additionalProperties: false,
     },
   };
-  const specialistTools = mode === "initial" ? [] :
+  const specialistTools = mode ? (manual || !taskId ? [] :
+    executorExpertTools.filter(tool => tool.name === "team_inbox" || tool.name === "team_message")) :
     executorExpertTools.filter(tool => !["expert_stage", "expert_verify_skills"].includes(tool.name) &&
       (taskId || !tool.name.startsWith("team_")));
   // sendChat owns the board writer through preparation, this turn and saving the reply.
@@ -356,6 +362,7 @@ export function replyToTask(
       return { ...result, text, awaitingAnswer: Boolean(text), commentary: [] };
     }
     if (typeof output?.text !== "string" || typeof output.awaitingAnswer !== "boolean" ||
+        (mode === "handoff" && !output.text.trim()) ||
         (draftDialogue && (typeof output.confirmsDraft !== "boolean" || (output.confirmsDraft && output.awaitingAnswer)))) {
       throw new Error("Codex returned an invalid task discussion result.");
     }

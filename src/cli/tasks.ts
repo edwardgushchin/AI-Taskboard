@@ -238,7 +238,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
   switch (action) {
     case "approve": {
       requireState(task, ["draft"]);
-      if (task.awaitingAnswer === true) {
+      if (task.awaitingAnswer === true || task.draftDiscussion?.managerReply !== undefined) {
         throw new TaskboardError("TASK_AWAITING_ANSWER", "Finish the clarification in the task dialogue before approving the draft.");
       }
       if (boardActor(input, "user") !== "user" &&

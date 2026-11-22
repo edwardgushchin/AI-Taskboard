@@ -211,7 +211,8 @@ export interface Task {
   awaitingAnswer?: boolean;
   draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
-  draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
+  draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
+  draftManagerReplyThrough?: number;
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
   expertStage?: { parentId: string; key: string; inputs: string[]; outputs: string[] };
@@ -407,7 +408,9 @@ export function invalidateDraftDiscussion(task: Task): Task {
     ...task,
     draftConfirmed: false,
     awaitingAnswer: undefined,
-    draftDiscussion: task.draftDiscussion?.phase === "running" ? task.draftDiscussion : { phase: "queued" },
+    draftDiscussion: task.draftDiscussion?.phase === "running"
+      ? task.draftDiscussion
+      : { phase: "queued", managerReply: task.draftDiscussion?.managerReply },
   };
 }
 

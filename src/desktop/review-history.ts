@@ -21,7 +21,7 @@ export function readReviewReports(profile: string, project: string): Map<string,
     return new Map(stored.flatMap(entry => {
       if (!Array.isArray(entry) || typeof entry[0] !== "string" || !taskIdPattern.test(entry[0])) return [];
       const [, report] = entry as [string, ReviewedSubmission | null];
-      if (!report || typeof report.submitted !== "string" || typeof report.description !== "string" ||
+      if (!report || (typeof report.submitted !== "string" && !report.pendingDecision) || typeof report.description !== "string" ||
           !Array.isArray(report.criteria) || !Array.isArray(report.artifacts) || !report.report) return [];
       // Recheck current evidence after a restart, including evidence outside Git.
       return [[entry[0], { ...report, snapshot: undefined }]];
@@ -33,7 +33,7 @@ export function readReviewReports(profile: string, project: string): Map<string,
 
 export function saveReviewReports(project: string, reports: ReadonlyMap<string, ReviewedSubmission>) {
   const entries = [...reports].flatMap(([id, report]) => {
-    if (!report.submitted) return [];
+    if (!report.submitted && !report.pendingDecision) return [];
     const { snapshot: _snapshot, ...previous } = report;
     return [[id, previous] as const];
   });

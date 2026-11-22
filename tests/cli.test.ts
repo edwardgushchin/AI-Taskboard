@@ -4556,6 +4556,51 @@ test("sweep archives only due tasks and reads gzip and ZIP by their original IDs
   assert.equal(cli(root, ["create"], { title: "Next" }).id, "T-0004");
 });
 
+test("manual cancellation archive ignores age and retries individual failures", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  cli(root, ["settings"], { archiveAfterDays: null });
+  const archive = () => cli(root, ["archive", "cancelled"]);
+  assert.deepEqual(archive(), { count: 0, archived: [], issues: [] });
+
+  const cancel = (title: string) => {
+    const task = cli(root, ["create"], { title });
+    return cli(root, ["cancel", task.id], { reason: "Archive fixture" });
+  };
+  const old = cancel("Old cancellation");
+  const fresh = cancel("Recent cancellation");
+  const retry = cancel("Cancellation with an attachment error");
+  const reopened = cancel("Reopened before transfer");
+  cli(root, ["return-to-draft", reopened.id], { revision: reopened.revision });
+  const oldPath = join(root, ".tasks", "tasks", old.id + ".json");
+  const oldCard = JSON.parse(readFileSync(oldPath, "utf8"));
+  oldCard.closedAt = "2000-01-01T00:00:00.000Z";
+  writeFileSync(oldPath, JSON.stringify(oldCard));
+
+  const retryFolder = join(root, ".tasks", "attachments", retry.id);
+  mkdirSync(retryFolder, { recursive: true });
+  const unindexed = join(retryFolder, "unindexed.txt");
+  writeFileSync(unindexed, "Unexpected file");
+  const partial = archive();
+  assert.equal(partial.count, 2);
+  assert.deepEqual(partial.archived, [old.id, fresh.id]);
+  assert.deepEqual(partial.issues, [{
+    id: retry.id,
+    problem: "A local attachment is missing from the task index.",
+  }]);
+  assert.equal(cli(root, ["show", reopened.id]).status, "draft");
+  assert.equal(cli(root, ["show", old.id]).history.at(-1).action, "cancel");
+  assert.equal(readFileSync(unindexed, "utf8"), "Unexpected file");
+
+  rmSync(unindexed);
+  assert.deepEqual(archive(), { count: 1, archived: [retry.id], issues: [] });
+  assert.deepEqual(archive(), { count: 0, archived: [], issues: [] });
+  const snapshot = cli(root, ["list"]);
+  assert.deepEqual(snapshot.archived.map((entry: { id: string }) => entry.id), [old.id, fresh.id, retry.id]);
+  assert.deepEqual(snapshot.tasks.map((entry: { id: string }) => entry.id), [reopened.id]);
+  assert.equal(snapshot.settings.archiveAfterDays, null);
+});
+
 test("doctor recovers archive cleanup after an index switch and preserves changed originals", t => {
   const root = fixture(t);
   cli(root, ["init"]);

@@ -1,4 +1,7 @@
 {
+  "archive.cancelled.action": "キャンセル済みカードをアーカイブ",
+  "archive.cancelled.count": "アーカイブしたカード: {count}",
+  "archive.cancelled.issues": "エラー:",
   "about.base_commit": "ベースコミット",
   "about.local_changes": "ローカル変更あり",
   "about.version": "バージョン",

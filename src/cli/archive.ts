@@ -9,7 +9,7 @@ import { imageAttachmentPattern, invalidateDraftDiscussion, maxAttachmentBytes, 
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
-import { managerInbox } from "./task-messages.ts";
+import { linkedDraftManagerReply, managerInbox } from "./task-messages.ts";
 import { actorFor, parseRunEntries, withoutVerification } from "./tasks.ts";
 
 const maxCard = 16 * 1024 * 1024;
@@ -64,7 +64,8 @@ function openArchive(store: BoardStore, id: string, link: ArchiveLink): Archived
     if (!card) throw new Error("Archive has no readable task.json.");
     const bytes = Buffer.from(card);
     const task = validateCard(JSON.parse(bytes.toString("utf8")), id);
-    if (task.status !== link.status || task.title !== link.title || closedAt(task) !== link.closedAt ||
+    const closure = closedAt(task) ?? (task.status === "cancelled" ? task.updatedAt : undefined);
+    if (task.status !== link.status || task.title !== link.title || closure !== link.closedAt ||
         (link.tags !== undefined && JSON.stringify(link.tags) !== JSON.stringify(task.tags)) ||
         zipped !== (task.attachments.length > 0) ||
         task.attachments.reduce((total, entry) => total + (entry.link ? 0 : entry.bytes), 0) > maxAttachmentBytes) {
@@ -226,6 +227,9 @@ function withNewAttachments(
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   const draftDiscussion = input.draftDiscussion === true;
   const actor = actorFor(input, "user");
+  const pendingManagerReply = task.draftDiscussion?.managerReply;
+  const managerReply = draftDiscussion && input.managerReply !== undefined
+    ? number(input.managerReply, "managerReply") : undefined;
   if (draftDiscussion) {
     if (actor !== "agent" || task.status !== "draft" || task.draftDiscussion?.phase !== "running") {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer awaiting a reply.");
@@ -233,7 +237,14 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     const revision = number(input.revision, "revision");
     if (revision < task.revision) {
       // Discard the answer and requeue under the same board lock.
-      return store.save(record({ ...task, draftDiscussion: { phase: "queued" } }, "draft-discussion-queued", "agent"));
+      return store.save(record({
+        ...task, draftConfirmed: false, draftDiscussion: { phase: "queued", managerReply: pendingManagerReply },
+      }, "draft-discussion-queued", "agent"));
+    }
+    if (managerReply !== undefined && (managerReply > (pendingManagerReply ?? 0) ||
+        managerReply <= (task.draftManagerReplyThrough ?? 0) ||
+        !linkedDraftManagerReply(task, task.history[managerReply - 1]))) {
+      throw new TaskboardError("CHAT_CHANGED", "The manager reply is no longer awaiting discussion.");
     }
   }
   requireRevision(task, input.revision, draftDiscussion);
@@ -274,7 +285,6 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     ...(commentary.length ? { commentary } : {}),
     ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
   };
-
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
     const current = attachments.length
@@ -283,13 +293,19 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     if (actor === "user" && task.status === "draft") {
       current.awaitingAnswer = task.awaitingAnswer === true ? true : undefined;
       current.draftConfirmed = false;
-      current.draftDiscussion = task.draftDiscussion?.phase === "failed" ? task.draftDiscussion : undefined;
+      if (pendingManagerReply === undefined && task.draftDiscussion?.phase !== "failed") {
+        current.draftDiscussion = undefined;
+      }
     }
     if (typeof input.awaitingAnswer === "boolean") current.awaitingAnswer = input.awaitingAnswer;
     if (draftReply) {
       current.draftConfirmed = confirmsDraft;
-      if (draftDiscussion || (input.revision !== undefined &&
-          (confirmsDraft || input.awaitingAnswer === true) && current.draftDiscussion?.phase !== "running")) {
+      if (draftDiscussion) {
+        current.draftDiscussion = pendingManagerReply === managerReply
+          ? undefined : { phase: "queued", managerReply: pendingManagerReply };
+        if (managerReply !== undefined) current.draftManagerReplyThrough = managerReply;
+      } else if (pendingManagerReply === undefined && input.revision !== undefined &&
+          (confirmsDraft || input.awaitingAnswer === true) && current.draftDiscussion?.phase !== "running") {
         current.draftDiscussion = undefined;
       }
     }
@@ -435,9 +451,16 @@ function archiveTask(store: BoardStore, task: Task, now: Date, closure: string):
     if (!archive.card.equals(card)) throw new TaskboardError("ARCHIVE_CORRUPT", "The archived JSON differs from the original.");
     archivedBytes(archive, archive.task.attachments);
 
+    const activeLink = store.index.tasks[task.id];
     delete store.index.tasks[task.id];
     store.index.archive[task.id] = link;
-    store.saveIndex();
+    try {
+      store.saveIndex();
+    } catch (error) {
+      store.index.tasks[task.id] = activeLink;
+      delete store.index.archive[task.id];
+      throw error;
+    }
     removeOriginals(store, archive);
     finish("archived; original card removed after verification");
   } catch (error) { finish("failed; inspect archive recovery state"); throw error; }
@@ -485,4 +508,22 @@ export function sweepArchives(store: BoardStore, now = new Date()) {
     }
   }
   return { archived, cleaned, issues };
+}
+
+// The CLI opens the store under the board lock before reading candidate cards.
+export function archiveCancelled(store: BoardStore, now = new Date()) {
+  const archived: string[] = [];
+  const issues: { id: string; problem: string }[] = [];
+  for (const id of Object.keys(store.index.tasks)) {
+    try {
+      const task = store.card(id);
+      if (task.status !== "cancelled") continue;
+      archiveTask(store, task, now, closedAt(task) ?? task.updatedAt);
+    } catch (error) {
+      issues.push({ id, problem: (error as Error).message });
+    }
+    // The move is visible once the index is saved, even if original cleanup fails.
+    if (store.index.archive[id]) archived.push(id);
+  }
+  return { count: archived.length, archived, issues };
 }

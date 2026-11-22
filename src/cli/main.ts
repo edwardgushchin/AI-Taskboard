@@ -12,7 +12,7 @@ import { isDeepStrictEqual, parseArgs } from "node:util";
 import { applyAcceptance, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
-  addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
+  addAttachment, addChatMessage, archiveCancelled, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
 import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, hasDraftConfirmation, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
@@ -51,7 +51,7 @@ const help = [
   "Commands: init, list, show, create, update, comment, approve, return-to-draft, start, progress,",
   "          pause, block, resume, unblock, preview, submit, review, accept, restore-changes, request-changes, cancel, cleanup, cleanup-status, settings, watch, doctor",
   "          auto-queue (read controls), auto-queue --stdin (revision, paused, order, hold, release, replaceHold)",
-  "          list --archived, archive sweep, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
+  "          list --archived, archive sweep, archive cancelled, chat TASK-ID, attachment add TASK-ID, attachment read TASK-ID",
   "          review-artifact TASK-ID --stdin (revision, source, sha256 and optional offset)",
   "          review-queue (Git status and submission time for tasks in review)",
   "          attachment cover TASK-ID --stdin (file and revision)",
@@ -564,8 +564,9 @@ function run(
     return tag;
   }
   if (command === "archive") {
-    if (id !== "sweep") throw new TaskboardError("INVALID_INPUT", "Use archive sweep.");
-    return sweepArchives(store);
+    if (id === "sweep") return sweepArchives(store);
+    if (id === "cancelled") return archiveCancelled(store);
+    throw new TaskboardError("INVALID_INPUT", "Use archive sweep or archive cancelled.");
   }
   if (command === "attachment") {
     if (!extra || !id || !["add", "read", "cover", "restore-reply"].includes(id)) {
@@ -737,7 +738,8 @@ function run(
       usesIndependentReviewer(mode) ? "reviewer" : mode;
     if (actor !== decisionActor || (input.reviewMode !== undefined && input.reviewMode !== mode) ||
         (command !== "accept" && (input.reviewModeVersion !== undefined || (actor === "reviewer" && mode === "reviewer-human")) &&
-          input.reviewModeVersion !== taskReviewModeVersion(task, store.index.settings))) {
+          (input.reviewModeVersion === null ? undefined : input.reviewModeVersion) !==
+            taskReviewModeVersion(task, store.index.settings))) {
       throw new TaskboardError("REVIEW_MODE_CHANGED", "The board's review mode changed. Review the submission again.");
     }
     if (command === "accept" && mode === "reviewer" && task.status === "review") {
@@ -749,6 +751,10 @@ function run(
     }
     if (command === "request-changes" || reviewerReport) {
       requireRevision(task, input.revision, true);
+      const decision = reviewDecisionSequence(task);
+      if (actor === "reviewer" && input.reviewDecision !== undefined && input.reviewDecision !== decision) {
+        throw new TaskboardError("REVISION_CONFLICT", "The owner provided a decision. Review the submission again.");
+      }
       const verificationStarted = performance.now();
       const targetHead = verifyReviewDecision(store, task, input.targetHead);
       decisionTiming = { lockWaitMs, verificationMs: Math.round(performance.now() - verificationStarted) };
@@ -778,10 +784,6 @@ function run(
           approved.history.at(-1)!.reviewApproval = { revision: task.revision, targetHead, evidence, reviewModeVersion: version };
           const saved = store.save(withReviewerUsage({ ...approved, revision: task.revision }));
           return filters.compact ? taskReceipt(saved) : saved;
-        }
-        const decision = reviewDecisionSequence(task);
-        if (input.reviewDecision !== undefined && input.reviewDecision !== decision) {
-          throw new TaskboardError("REVISION_CONFLICT", "The owner provided a decision. Review the submission again.");
         }
         const version = taskReviewModeVersion(task, store.index.settings);
         const previous = task.history.findLast(event => event.actor === "reviewer" && event.action === "review-note");
@@ -833,15 +835,17 @@ function run(
   if (command === "draft-discussion") {
     requireRevision(task, input.revision, true);
     const phase = task.draftDiscussion?.phase;
-    if (isManual(store.index.settings) || task.status !== "draft" ||
-        !(input.phase === "running" && (phase === "queued" || phase === "failed" ||
-          phase === undefined && task.awaitingAnswer !== true && !hasDraftConfirmation(task)) ||
-          (input.phase === "failed" || input.phase === "completed") && phase === "running")) {
+    const managerReply = task.draftDiscussion?.managerReply;
+    const canStart = input.phase === "running" && (phase === "queued" || phase === "failed" ||
+      (phase === undefined && task.awaitingAnswer !== true && !hasDraftConfirmation(task)));
+    const canFinish = phase === "running" && (input.phase === "failed" || input.phase === "completed" ||
+      (input.phase === "queued" && managerReply !== undefined));
+    if (isManual(store.index.settings) || task.status !== "draft" || !(canStart || canFinish)) {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
     }
     const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
-      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500) }
-      : input.phase === "running" ? { phase: "running" } : undefined;
+      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500), managerReply }
+      : input.phase === "running" || input.phase === "queued" ? { phase: input.phase, managerReply } : undefined;
     return store.save(record({ ...task, draftDiscussion, draftConfirmed: false }, "draft-discussion-" + input.phase, "agent"));
   }
   if (command === "run-log") {
