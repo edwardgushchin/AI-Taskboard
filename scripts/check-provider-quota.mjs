@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "provider-quota", 240_000,
@@ -132,6 +132,7 @@ async function run() {
       stopped: "Явно остановленная задача",
     }).map(([key, title]) => {
       const { id } = cli(["create"], plannedDraft({ title }));
+      confirmFixtureDraft(project, id);
       cli(["approve", id]);
       return [key, id];
     }));

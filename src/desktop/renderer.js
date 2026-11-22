@@ -1,4 +1,5 @@
 const manualBoard = () => frame.board?.settings.boardType === "manual";
+const hasDraftConfirmation = task => task.awaitingAnswer === false && task.draftConfirmed !== false && !task.draftDiscussion;
 const manualColumns = () => frame.board?.settings.manualColumns ?? [];
 const api = window.taskboard;
 const byId = id => document.getElementById(id);
@@ -243,6 +244,9 @@ function projectName() {
 }
 
 function boardError(error) {
+  if (error.code === "DRAFT_DISCUSSION_REQUIRED") {
+    return t("draft_discussion.confirmation_required");
+  }
   if (error.code === "TASK_AWAITING_ANSWER") {
     return t("task_question.approval_blocked");
   }
@@ -4600,8 +4604,11 @@ async function showTask(id, dialogue = false) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft") {
-    if (task.awaitingAnswer === true) {
-      body.append(element("p", () => t("task_question.approval_blocked"), "muted"));
+    if (task.awaitingAnswer === true || !manualBoard() && !hasDraftConfirmation(task)) {
+      const phase = task.draftDiscussion?.phase;
+      const label = task.awaitingAnswer === true ? "task_question.approval_blocked" :
+        phase ? "draft_discussion." + phase : "draft_discussion.confirmation_required";
+      body.append(element("p", () => t(label, { reason: task.draftDiscussion?.reason }), "muted"));
       actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
     } else if (!task.approvalRequirements?.length) {
       actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));

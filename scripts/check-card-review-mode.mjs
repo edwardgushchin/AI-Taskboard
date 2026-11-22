@@ -1,4 +1,4 @@
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
@@ -78,6 +78,7 @@ async function run() {
   const normal = phase === "restart" ? "T-0002" : create("Inherited review");
   if (phase !== "restart") {
     for (const id of [hybrid, normal]) {
+      confirmFixtureDraft(project, id);
       const ready = cli(["approve", id]);
       const started = cli(["start", id], { revision: ready.revision });
       writeFileSync(join(started.worktree, id + ".txt"), id + "\n");

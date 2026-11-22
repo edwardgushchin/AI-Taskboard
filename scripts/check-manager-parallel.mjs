@@ -1,4 +1,5 @@
 // Real Electron windows and production IPC/storage; deterministic provider boundary.
+import { confirmFixtureDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -176,6 +177,7 @@ function prepare() {
       expertTeam: { work: lead, review: lead },
     }).id;
     // Prepare the counter before the desktop watcher can start draft analysis.
+    confirmFixtureDraft(project, effectTask);
     cli(["approve", effectTask]);
     saveManagerHistory(project, Date.now() - 2000, randomUUID(), {
       message: { text: "UNCLASSIFIED-LEGACY", files: [] },

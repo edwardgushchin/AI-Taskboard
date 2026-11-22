@@ -1,3 +1,4 @@
+import { confirmFixtureDraft } from "./fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
@@ -170,6 +171,7 @@ test("public CLI exposes specialization in launch state and rejects unknown assi
 test("planned work and review enforce stage order, evidence and independent mail across CLI sessions", { timeout: 90_000 }, t => {
   const f = fixture(t);
   const call = (args: string[], input: object = {}, error?: string) => {
+    if (args[0] === "approve" && !error) confirmFixtureDraft(f.root, args[1]);
     const result = spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", "src/cli/main.ts", "--project", f.root, "--json", ...args, "--stdin"],
       { input: JSON.stringify(input), encoding: "utf8", windowsHide: true });
     assert.ifError(result.error);
@@ -182,7 +184,7 @@ test("planned work and review enforce stage order, evidence and independent mail
   const work = [brief("analysis", "product-owner"), brief("test", "qa-engineer", ["analysis"])];
   const review = { lead: "independent-reviewer", reason: "Separate review verifies the output.", stages: [brief("test", "independent-reviewer")] };
   const workPlan = { lead: "product-owner", reason: "The product owner checks scope and QA tests the result.", stages: work };
-  const scope = { title: "Check scope", description: "Verify the changes.", criteria: ["Checked"], workingDirectory: f.root,
+  const scope = { title: "Check scope", description: "Verify the changes.", criteria: ["Checked"], tags: ["Verification"], workingDirectory: f.root,
     subtasks: [{ title: "Check the scope" }, { title: "Verify the output" }] };
   call(["create"], { ...scope, actor: "user" }, "EXPERT_PLAN_REQUIRED");
   const task = f.run(store => store.create(createTask(store.allocateId(), scope)));
@@ -318,6 +320,7 @@ test("legacy unchecked workflow is persisted as implicit context before manual a
   await cli("settings", undefined, { autoMode: true, reviewMode: "reviewer" });
   for (const scenario of ["manual", "automatic", "unblocked"]) {
     const draft = await cli<Task>("create", undefined, input);
+    confirmFixtureDraft(f.root, draft.id);
     const ready = await cli<Task>("approve", draft.id, { revision: draft.revision });
     const card = scenario === "unblocked" ? await cli<Task>("block", ready.id, {
       allowUnstarted: true, reason: "SKILL_CHECK_REQUIRED: workflow", condition: "Fix the launch error",
@@ -390,6 +393,7 @@ test("a resumed native specialist must complete in the current lead run", async 
   });
   assert.ok(draft.ok, JSON.stringify(draft));
   const id = draft.data.id;
+  confirmFixtureDraft(f.root, id);
   const ready = await callCli<Task>(f.root, ["approve", id], { revision: draft.data.revision });
   assert.ok(ready.ok, JSON.stringify(ready));
   const started = await callCli<{ task: Task }>(f.root, ["start", id], { revision: ready.data.revision });
@@ -609,6 +613,7 @@ for (const mode of ["reviewer", "manager"] as const) {
       skillChecks: { [reviewSkill]: { tool: "trace", server: "fixture", arguments: { case: "review" } } }, stages: [] };
     await errorCode(callCli(f.root, ["create"], { ...base, expertTeam: { work: { ...work, skillChecks: undefined } } }), "SKILL_CHECK_REQUIRED");
     const draft = await ready<Task>("create", { ...base, expertTeam: { work, review } });
+    confirmFixtureDraft(f.root, draft.id);
     const approved = await ready<Task>("approve", { revision: draft.revision }, draft.id);
     const { task } = await ready<{ task: Task }>("start", { revision: approved.revision }, draft.id);
     const revision = task.revision;

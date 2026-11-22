@@ -5,7 +5,7 @@ import { readdirSync, realpathSync, rmdirSync, statSync, writeFileSync } from "n
 import { basename, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { unzipSync, zipSync } from "fflate";
-import { imageAttachmentPattern, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
+import { hasDraftConfirmation, imageAttachmentPattern, invalidateDraftDiscussion, maxAttachmentBytes, number, object, record, registerTags, requireRevision, requireState, strings, TaskboardError, text } from "./model.ts";
 import type { ArchiveLink, Attachment, BoardTag, Task } from "./model.ts";
 import { directory, exists, readBinary, removeFile, validateCard, writeAtomic } from "./storage.ts";
 import type { BoardStore } from "./storage.ts";
@@ -238,7 +238,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     if (revision < task.revision) {
       // Discard the answer and requeue under the same board lock.
       return store.save(record({
-        ...task, draftDiscussion: { phase: "queued", managerReply: pendingManagerReply },
+        ...task, draftConfirmed: false, draftDiscussion: { phase: "queued", managerReply: pendingManagerReply },
       }, "draft-discussion-queued", "agent"));
     }
     if (managerReply !== undefined && (managerReply > (pendingManagerReply ?? 0) ||
@@ -260,12 +260,22 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (input.awaitingAnswer !== undefined && (actor !== "agent" || typeof input.awaitingAnswer !== "boolean")) {
     throw new TaskboardError("INVALID_INPUT", "Only an agent reply can set a boolean awaitingAnswer state.");
   }
+  if (input.confirmsDraft !== undefined && (actor !== "agent" || task.status !== "draft" || draftDiscussion ||
+      typeof input.confirmsDraft !== "boolean" || typeof input.awaitingAnswer !== "boolean" ||
+      (input.confirmsDraft && input.awaitingAnswer))) {
+    throw new TaskboardError("INVALID_INPUT", "Only a draft dialogue reply without an open question can confirm the draft.");
+  }
   if (!draftDiscussion && actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
     if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
     }
   }
+  if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
+    requireRevision(task, input.revision, true);
+  }
+  const draftReply = actor === "agent" && task.status === "draft" && typeof input.awaitingAnswer === "boolean";
+  const confirmsDraft = input.awaitingAnswer === false && (draftDiscussion || input.confirmsDraft === true);
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
@@ -275,21 +285,33 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     ...(commentary.length ? { commentary } : {}),
     ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
   };
-  let nextDiscussion = task.draftDiscussion;
-  if (draftDiscussion) {
-    nextDiscussion = pendingManagerReply === managerReply ? undefined : { phase: "queued", managerReply: pendingManagerReply };
-  } else if (actor === "user" && pendingManagerReply === undefined) {
-    nextDiscussion = undefined;
-  }
-
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
-    const updated = record({
-      ...task, attachments: [...task.attachments, ...attachments],
-      ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
-      draftDiscussion: nextDiscussion,
-      ...(managerReply === undefined ? {} : { draftManagerReplyThrough: managerReply }),
-    }, "chat", actor, task.status, message);
+    const current = attachments.length
+      ? invalidateDraftDiscussion({ ...task, attachments: [...task.attachments, ...attachments] })
+      : { ...task };
+    if (actor === "user" && task.status === "draft") {
+      // Keep the proof for an unchanged brief while awaiting the outcome of the dialogue.
+      current.draftConfirmed = current.draftConfirmed === true || hasDraftConfirmation(current);
+      current.awaitingAnswer = task.awaitingAnswer === true ? true : undefined;
+      if (pendingManagerReply === undefined && task.draftDiscussion?.phase !== "failed") {
+        current.draftDiscussion = undefined;
+      }
+    }
+    if (typeof input.awaitingAnswer === "boolean") current.awaitingAnswer = input.awaitingAnswer;
+    if (draftReply) {
+      current.draftConfirmed = confirmsDraft || (!draftDiscussion && input.awaitingAnswer === false &&
+        current.draftConfirmed === true);
+      if (draftDiscussion) {
+        current.draftDiscussion = pendingManagerReply === managerReply
+          ? undefined : { phase: "queued", managerReply: pendingManagerReply };
+        if (managerReply !== undefined) current.draftManagerReplyThrough = managerReply;
+      } else if (pendingManagerReply === undefined && input.revision !== undefined &&
+          (confirmsDraft || input.awaitingAnswer === true) && current.draftDiscussion?.phase !== "running") {
+        current.draftDiscussion = undefined;
+      }
+    }
+    const updated = record(current, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),
@@ -316,8 +338,10 @@ export function restoreReplyImages(store: BoardStore, task: Task, input: Record<
     }
     const history = task.history.slice();
     history[replyAt] = { ...reply, chat: { ...chat, files: attachments.map(file => file.file) } };
-    return store.save({ ...task, revision: task.revision + 1, updatedAt: new Date().toISOString(),
-      history, attachments: [...task.attachments, ...attachments] });
+    return store.save(invalidateDraftDiscussion({
+      ...task, revision: task.revision + 1, updatedAt: new Date().toISOString(),
+      history, attachments: [...task.attachments, ...attachments],
+    }));
   });
 }
 
@@ -328,9 +352,9 @@ export function addAttachment(store: BoardStore, task: Task, input: Record<strin
   const { attachment, data } = loadAttachment(input, limit);
   const actor = actorFor(input, "agent");
   if (data !== undefined) writeAtomic(join(attachmentFolder(store, task, true), attachment.file), data);
-  const attached = record({
+  const attached = record(invalidateDraftDiscussion({
     ...task, attachments: [...task.attachments, attachment],
-  }, "attach", actor, task.status, attachment.name);
+  }), "attach", actor, task.status, attachment.name);
   attached.history.at(-1)!.attachment = attachment.file;
   return store.save(attached);
 }

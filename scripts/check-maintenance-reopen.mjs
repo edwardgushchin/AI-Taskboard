@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { withRuntimeLock } from "../src/cli/storage.ts";
 import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 
@@ -73,6 +73,7 @@ async function tick() {
 }
 function submitted(title) {
   const draft = cli(["create"], plannedDraft({ title }));
+  confirmFixtureDraft(project, draft.id);
   cli(["approve", draft.id]);
   const { worktree } = cli(["start", draft.id]);
   writeFileSync(join(worktree, draft.id + ".txt"), "accepted result\n");

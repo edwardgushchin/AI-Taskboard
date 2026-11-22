@@ -118,14 +118,14 @@ export function reviewModeReceipt(task: Task & { effectiveReviewMode: ReviewMode
   return { id: task.id, revision: task.revision, reviewMode: task.effectiveReviewMode, inherited: !task.reviewModeOverride };
 }
 
-export function taskChatActions(project: string, initial: Task, userText: string, onChange: () => void,
+export function taskChatActions(project: string, initial: Task, userText: string, onChange: (revision: number) => void,
   requestChanges?: (task: Task, reason: string) => Promise<CliReply>) {
   let task = initial;
   return async (name: string, args: unknown): Promise<CliReply> => {
     if (name === reviewModeTool.name) {
       const result = setReviewModeFromChat(project, userText, args, task);
       if (!result.ok) return result;
-      if (result.data.revision !== task.revision) onChange();
+      if (result.data.revision !== task.revision) onChange(result.data.revision);
       task = result.data;
       return { ok: true, data: reviewModeReceipt(result.data) };
     }
@@ -138,7 +138,10 @@ export function taskChatActions(project: string, initial: Task, userText: string
       if (typeof reason !== "string" || !reason.trim()) return cliFailure("INVALID_INPUT", "Describe all required corrections.");
       if (task.status !== "review" || !requestChanges) return cliFailure("INVALID_TRANSITION", "Only the current review card can be returned.");
       const result = await requestChanges(task, reason);
-      if (result.ok) { task = { ...task, status: "in_progress" }; onChange(); }
+      if (result.ok) {
+        task = { ...task, status: "in_progress" };
+        onChange(task.revision);
+      }
       return result;
     }
     if (name !== updateTool.name || !args || typeof args !== "object" || Array.isArray(args)) {
@@ -163,7 +166,7 @@ export function taskChatActions(project: string, initial: Task, userText: string
     if (!result.ok) return result;
     task = result.data;
     const changed = task.revision !== revision;
-    if (changed) onChange();
+    if (changed) onChange(task.revision);
     return { ok: true as const, data: { id: task.id, title: task.title, status: task.status, revision: task.revision,
       changed, summary: task.summary, nextStep: task.nextStep, git: task.git, result: task.result } };
   };

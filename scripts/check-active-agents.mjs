@@ -1,4 +1,4 @@
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Real main process, private profile and empty boards: never touches a user's queue.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -103,6 +103,7 @@ try {
   if (returnCheck) {
     const project = boards[1];
     const created = cli(project, ["create"], plannedDraft({ title: "Return from two windows", criteria: ["Checked"], workingDirectory: project }));
+    confirmFixtureDraft(project, created.id);
     const ready = cli(project, ["approve", created.id], { revision: created.revision });
     const running = cli(project, ["start", ready.id], { revision: ready.revision }).task;
     const send = (win, revision) => win.webContents.executeJavaScript(
@@ -125,6 +126,7 @@ try {
 
     const startCard = title => {
       const card = cli(project, ["create"], plannedDraft({ title, criteria: ["Checked"], workingDirectory: project }));
+      confirmFixtureDraft(project, card.id);
       const approved = cli(project, ["approve", card.id], { revision: card.revision });
       return cli(project, ["start", card.id], { revision: approved.revision }).task;
     };

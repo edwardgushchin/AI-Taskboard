@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 import { registerRuntime } from "../src/desktop/board-runtime.ts";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 
 const baselinePhase = ["baseline"];
 const retryPhases = [["ack-retry"], ["later-approval"]];
@@ -74,6 +74,7 @@ function prepare(name, { useGit = false, autoMode = false, reviewMode = "reviewe
   reviewerSlots.push(release);
   const result = submitCard(project, "Supplied result", useGit, reviewMode);
   const queued = cli(project, ["create"], plannedDraft({ title: "Unrelated ready task" }));
+  confirmFixtureDraft(project, queued.id);
   cli(project, ["approve", queued.id]);
   if (autoMode) cli(project, ["auto-queue"], { revision: 0, paused: true });
   const state = { name, project, queued, useGit, autoMode, ...result };
@@ -84,6 +85,7 @@ function prepare(name, { useGit = false, autoMode = false, reviewMode = "reviewe
 
 function submitCard(project, title, useGit, reviewMode) {
   const card = cli(project, ["create"], plannedDraft({ title }));
+  confirmFixtureDraft(project, card.id);
   cli(project, ["approve", card.id]);
   const started = cli(project, ["start", card.id]);
   if (useGit) writeFileSync(join(started.worktree, "result.txt"), "Proof of integration\n");

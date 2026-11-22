@@ -14,6 +14,7 @@ import localization from "../src/desktop/localization.cjs";
 const live = process.argv.includes("--live");
 const creationOnly = process.argv.includes("--creation-only");
 const revisionOnly = process.argv.includes("--revision-only");
+const approvalOnly = process.argv.includes("--approval-only");
 const { scratch, artifacts } = electronCheck(import.meta.url, "draft-discussion", 240000,
   live || creationOnly || revisionOnly ? [[]] : [["--first-pass"], ["--restart"]]);
 const require = createRequire(import.meta.url);
@@ -22,7 +23,7 @@ const restart = process.argv.includes("--restart");
 const project = join(scratch, "board");
 const manual = join(scratch, "personal");
 const profile = join(scratch, "profile");
-const evidence = join(artifacts, "draft-discussion.json");
+const evidence = join(approvalOnly ? scratch : artifacts, "draft-discussion.json");
 const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cli = (args, input, root = project, error, { nodeArgs = [], env } = {}) => {
   const result = spawnSync(process.env.TASKBOARD_CHECK_NODE, [
@@ -75,12 +76,27 @@ const heldDrafts = new Set();
 const draftGates = new Map();
 let stopGate;
 let failMessage = true;
-globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, _action, _scratch,
+let releaseClarification;
+let formatUpdate;
+const initialFormat = "Use CSV and save it in exports.";
+const formatChanges = ["Use XLSX instead of CSV.", "Use JSON instead of XLSX."];
+const revisedBrief = "Экспортировать архив с итоговым отчётом.";
+const returnedTitle = "Экспорт отчёта после возврата в черновик";
+const requestArchive = "Какой архив использовать?";
+const archiveQuestion = "Использовать недельный или месячный архив?";
+const archiveAnswer = "Использовать недельный архив.";
+const archiveConfirmed = "Недельный архив подтверждён.";
+const neutralRequest = "Как работает диалог карточки?";
+const neutralReply = "Здесь можно обсуждать постановку задачи.";
+const legacyTitle = "Черновик с подтверждением в старом формате";
+let releaseLegacyNeutral;
+globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
   assert.equal(cwd, project);
   assert.equal(context.task.id, id);
-  assert.equal(context.task.status, "draft");
+  const approvedDialogue = approvalOnly && context.task.title === returnedTitle && mode !== "initial";
+  assert.equal(context.task.status, approvedDialogue ? "ready" : "draft");
   if (mode === "initial") {
     assert.equal(_commentary, undefined);
     assert.equal(_activity, undefined);
@@ -92,9 +108,33 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   }
   calls.push({ context, configured, mode, images: images.map(path => readFileSync(path).toString("base64")),
     documents: context.attachments.filter(file => file.path && file.name.endsWith(".txt")).map(file => readFileSync(file.path, "utf8")) });
+  const request = context.latestUserMessage?.text;
+  if (approvedDialogue) {
+    assert.ok(request === requestArchive || request === archiveAnswer, "Unexpected ready card message");
+    const awaitingAnswer = request === requestArchive;
+    const text = awaitingAnswer ? archiveQuestion : archiveConfirmed;
+    return { text: JSON.stringify({ text, awaitingAnswer, confirmsDraft: false }) };
+  }
+  const update = approvalOnly && formatChanges.includes(request) ? {
+    request, completion: Promise.withResolvers(), returned: Promise.withResolvers(),
+    steeringGate: request === formatChanges[0] ? Promise.withResolvers() : undefined,
+    steered: [],
+    applyBrief: (authorization, description) => action("task_update", { authorization, description }),
+  } : undefined;
   const interrupted = Promise.withResolvers();
   onControl({ interrupt: async () => interrupted.resolve({ interrupted: true }),
-    steer: async () => assert.fail("Unexpected steering request.") });
+    steer: async prompt => {
+      assert.ok(update, "Unexpected steering request.");
+      update.steered.push(JSON.parse(prompt).latestUserMessage.text);
+      await update.steeringGate?.promise;
+    },
+  });
+  if (update) {
+    formatUpdate = update;
+    const text = await update.completion.promise;
+    update.returned.resolve();
+    return { text: JSON.stringify({ text, awaitingAnswer: false, confirmsDraft: true }) };
+  }
   if (context.latestUserMessage?.text === "Fail once" && failMessage) {
     failMessage = false;
     throw Error("Fixture provider unavailable");
@@ -110,12 +150,15 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   if (mode === "initial" && heldDrafts.has(context.task.title)) {
     await new Promise(resolve => draftGates.set(id, resolve));
   }
+  if (approvalOnly && context.latestUserMessage?.text === initialFormat) {
+    await new Promise(resolve => { releaseClarification = resolve; });
+  }
   await delay(450);
   if (mode === "initial") {
     let questions = "";
     if (context.task.title === "CLI with attachments") {
       questions = "Which viewport is required?";
-    } else if (context.task.title === "Partial answer") {
+    } else if (context.task.title === "Partial answer" && context.task.description !== revisedBrief) {
       questions = "Which format and destination are required?";
     } else if (context.task.title === "Concurrent edits") {
       questions = "Clarify: " + context.task.description;
@@ -123,10 +166,19 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     return { text: JSON.stringify({ questions }) };
   }
   if (context.latestUserMessage.text === "CSV") {
-    return { text: JSON.stringify({ text: "Which destination is required?", awaitingAnswer: true }) };
+    return { text: JSON.stringify({
+      text: "Which destination is required?", awaitingAnswer: true, confirmsDraft: false,
+    }) };
   }
-  const text = context.task.awaitingAnswer ? readyText : "User answer recorded: " + context.latestUserMessage.text;
-  return { text: JSON.stringify({ text, awaitingAnswer: false }) };
+  if (request === neutralRequest) {
+    if (context.task.title === legacyTitle) {
+      await new Promise(resolve => { releaseLegacyNeutral = resolve; });
+    }
+    return { text: JSON.stringify({ text: neutralReply, awaitingAnswer: false, confirmsDraft: false }) };
+  }
+  const confirmsDraft = context.task.awaitingAnswer === true;
+  const text = confirmsDraft ? readyText : "User answer recorded: " + context.latestUserMessage.text;
+  return { text: JSON.stringify({ text, awaitingAnswer: false, confirmsDraft }) };
 };
 
 let writer;
@@ -166,7 +218,8 @@ try {
   require(entry);
   await until(() => BrowserWindow.getAllWindows().length > 0, "window");
   const window = BrowserWindow.getAllWindows()[0];
-  window.setContentSize(1280, 800);
+  const viewport = [1280, approvalOnly ? 900 : 800];
+  window.setContentSize(...viewport);
   const evaluate = code => window.webContents.executeJavaScript(code);
   await until(() => evaluate("Boolean(window.taskboard && document.querySelector('#app-menu button'))"), "renderer");
   const open = async (path, run = evaluate) => {
@@ -186,7 +239,7 @@ try {
     }, "visible draft retry " + id);
   };
   const waitReply = (id, count = 1) => until(() => messages(show(id)).length === count, "chat reply " + id);
-  const waitReady = async id => {
+  const waitReady = async (id, count = 1) => {
     await until(() => {
       const card = show(id);
       assert.notEqual(card.draftDiscussion?.phase, "failed", card.draftDiscussion?.reason);
@@ -196,10 +249,11 @@ try {
     assert.equal(card.status, "draft");
     assert.equal(card.git, undefined);
     assert.equal(card.awaitingAnswer, false);
-    assert.equal(messages(card).length, 1);
-    assert.equal(messages(card)[0].actor, "agent");
-    assert.equal(messages(card)[0].text, readyText);
-    assert.ok(Number.isFinite(Date.parse(messages(card)[0].at)));
+    assert.equal(messages(card).length, count);
+    const confirmation = messages(card).at(-1);
+    assert.equal(confirmation.actor, "agent");
+    assert.equal(confirmation.text, readyText);
+    assert.ok(Number.isFinite(Date.parse(confirmation.at)));
   };
   const reopen = async id => {
     await evaluate("document.querySelector('#close-sheet').click()");
@@ -215,7 +269,7 @@ try {
     window.focus();
     await evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
     const image = await window.webContents.capturePage();
-    assert.deepEqual(window.getContentSize(), [1280, 800]);
+    assert.deepEqual(window.getContentSize(), viewport);
     writeFileSync(join(artifacts, name), image.toPNG());
   };
   const verifyRevision = async (evaluateOther, runtimeEntries) => {
@@ -310,7 +364,14 @@ try {
     ]);
     check("Rapid edits across two attempts coalesce, and both windows show one question about the final brief");
 
-    for (const action of ["cancel", "approve", "chat"]) {
+    const unapproved = await held("Approval during review");
+    const unapprovedRevision = show(unapproved.id).revision;
+    cli(["approve", unapproved.id], { revision: unapprovedRevision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    releaseDraft(unapproved);
+    await waitReady(unapproved.id);
+    check("Approval during automatic discussion is rejected and the review can finish");
+
+    for (const action of ["cancel", "chat"]) {
       const superseded = await held("Superseded by " + action);
       const revision = show(superseded.id).revision;
       const input = { revision };
@@ -324,7 +385,7 @@ try {
         input.effort = settings.effort;
       }
       const updated = cli([action, superseded.id], input);
-      const expected = action === "cancel" ? "cancelled" : action === "approve" ? "ready" : "draft";
+      const expected = action === "cancel" ? "cancelled" : "draft";
       assert.equal(updated.status, expected);
       releaseDraft(superseded);
       await until(() => !runtimeEntries(project).some(entry => entry.task === superseded.id), "superseded writer released");
@@ -334,9 +395,375 @@ try {
       assert.deepEqual(messages(current).map(event => event.actor), action === "chat" ? ["user"] : []);
       assert.equal(turnsFor(superseded).length, 1);
     }
-    check("Cancelling, approving or sending an ordinary chat message supersedes the automatic turn without a reply or retry");
+    check("Cancelling or sending an ordinary chat message supersedes the automatic turn without a reply or retry");
   };
-  if (live) {
+  const verifyApproval = async () => {
+    const approvedLabel = localization.text("ui.approve_535c27a7", {}, "ru");
+    const openLabel = localization.text("task_question.open_dialogue_button", {}, "ru");
+    const button = label => `[...document.querySelectorAll('#sheet[open] button')]
+      .find(button => button.textContent.trim() === ${JSON.stringify(label)} &&
+        !button.disabled && button.checkVisibility())`;
+    const available = (run = evaluate) => run(`Boolean(${button(approvedLabel)})`);
+    const sheetHas = value => evaluate(`document.querySelector('#sheet[open]')?.textContent.includes(${JSON.stringify(value)})`);
+    const activate = async (label, method) => {
+      window.focus();
+      await delay(100);
+      const point = await evaluate(`(() => {
+        const control = ${button(label)};
+        if (!control) throw Error("Expected a visible action");
+        control.scrollIntoView({ block: "center" });
+        if (${JSON.stringify(method)} === "keyboard") control.focus();
+        const { x, y, width, height } = control.getBoundingClientRect();
+        return { x: Math.round(x + width / 2), y: Math.round(y + height / 2) };
+      })()`);
+      if (method === "keyboard") {
+        assert.equal(await evaluate("document.activeElement.textContent.trim()"), label);
+        window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+        window.webContents.sendInputEvent({ type: "char", keyCode: "\r" });
+        window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      } else {
+        window.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...point });
+        window.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...point });
+      }
+    };
+    const showStatus = (key, values = {}) => until(
+      () => sheetHas(localization.text(key, values, "ru")), key);
+    const create = (title, description = "Определить формат и место сохранения результата.") =>
+      cli(["create"], plannedDraft({
+        title, description, criteria: ["Указаны формат и место сохранения."], execution: settings,
+      }));
+    const send = (id, text, attachment) => evaluate(`(async () => {
+      const request = ${JSON.stringify({ ...settings, text, files: [] })};
+      const attachment = ${JSON.stringify(attachment)};
+      if (attachment) {
+        const file = new File([attachment.text], attachment.name, { type: "text/plain" });
+        request.files.push(await window.taskboard.filePayload(file));
+      }
+      return window.taskboard.chatSend(${JSON.stringify(id)}, request);
+    })()`);
+    const waitWriter = async (id, label) => {
+      const { runtimeEntries } = await import("../src/desktop/board-runtime.ts");
+      await until(() => !runtimeEntries(project).some(entry => entry.task === id), label);
+    };
+    const continueDraft = card => {
+      heldDrafts.delete(card.title);
+      const release = draftGates.get(card.id);
+      draftGates.delete(card.id);
+      release();
+    };
+    const sendNeutral = async id => {
+      const reply = await send(id, neutralRequest);
+      assert.equal(reply.result.ok, true, JSON.stringify(reply));
+      const current = show(id);
+      assert.equal(messages(current).at(-1).text, neutralReply);
+      assert.equal(current.awaitingAnswer, false);
+      assert.equal(current.draftConfirmed, false);
+      assert.equal(await available(), false);
+      cli(["approve", id], { revision: current.revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+      return current;
+    };
+    if (restart) {
+      await display(report.approvalDraft);
+      await until(available, "approval after restart");
+      assert.equal(show(report.approvalDraft).awaitingAnswer, false);
+      assert.deepEqual(messages(show(report.approvalDraft)), report.approvalMessages);
+      assert.equal(calls.length, 0);
+      await capture("approval-ready.png");
+      await activate(approvedLabel, "keyboard");
+      try {
+        await until(() => show(report.approvalDraft).status === "ready", "keyboard approves the same card");
+      } catch (error) {
+        const notice = await evaluate("document.querySelector('#sheet-notice:not([hidden])')?.textContent");
+        throw new Error(notice ? error.message + ": " + notice : error.message, { cause: error });
+      }
+      check("After Electron restarts, the same draft can be approved with Enter, with its saved reply intact");
+      writeFileSync(join(artifacts, "approval-check.txt"), [
+        "Ручное утверждение в Windows Electron",
+        "Команда: node scripts/check-draft-discussion.mjs --approval-only --artifacts .tasks/qa/T-0314",
+        "Git HEAD перед проверкой: " + report.head,
+        `ОС: ${report.platform}; Electron: ${report.electron}; Chromium: ${report.chromium}; область содержимого: ${viewport.join("×")}`,
+        "Представление хешей исходников: UTF-8, переводы строк CRLF приведены к LF, SHA-256.",
+        ...Object.entries(report.sourceHashes).map(([path, hash]) => `${hash}  ${path}`),
+        "Запущен реальный Electron и CLI. Провайдер заменён детерминированной фикстурой. Linux и macOS не проверялись.",
+        ...report.checks.map(line => "PASS " + line), "",
+      ].join("\n"));
+      return;
+    }
+
+    heldDrafts.add("Partial answer");
+    const pending = create("Partial answer");
+    await until(() => draftGates.has(pending.id), "provider is reviewing the pending draft");
+    await display(pending.id);
+    await showStatus("draft_discussion.running");
+    assert.equal(await available(), false);
+    cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await capture("approval-pending.png");
+
+    const secondSlot = "Occupy the second automatic review slot";
+    heldDrafts.add(secondSlot);
+    const occupied = create(secondSlot);
+    await until(() => draftGates.has(occupied.id), "both automatic review slots are occupied");
+    const queued = create("Neutral message before first review");
+    assert.equal(show(queued.id).draftDiscussion?.phase, "queued");
+    await display(queued.id);
+    const unreviewed = await sendNeutral(queued.id);
+    assert.equal(unreviewed.draftDiscussion, undefined);
+    assert.deepEqual(calls.filter(call => call.context.task.id === queued.id).map(call => call.mode), [undefined]);
+    continueDraft(occupied);
+    const startLabel = localization.text("draft_discussion.start", {}, "ru");
+    await until(() => evaluate(`Boolean(${button(startLabel)})`), "review action after a neutral reply");
+    heldDrafts.add(queued.title);
+    await activate(startLabel, "mouse");
+    await until(() => draftGates.has(queued.id), "first review starts on request");
+    assert.equal(await available(), false);
+    continueDraft(queued);
+    await waitReady(queued.id, 3);
+    await until(available, "first review restores approval after a neutral reply");
+    check("A neutral reply before the first review leaves approval blocked until the user starts review and the agent confirms the draft");
+    await display(pending.id);
+
+    continueDraft(pending);
+    await waitReply(pending.id);
+    await waitWriter(pending.id, "initial question writer released");
+    assert.equal(show(pending.id).awaitingAnswer, true);
+    await until(() => evaluate(`Boolean(${button(openLabel)})`), "open dialogue action");
+    await activate(openLabel, "mouse");
+    await until(() => evaluate(`document.querySelector('.task-dialogue:not([hidden])')
+      ?.textContent.includes("Which format and destination are required?")`), "question visible after mouse opens dialogue");
+    assert.equal(await available(), false);
+    await capture("approval-question.png");
+    check("A running review and an open question both hide approval; the mouse opens the question in its dialogue");
+
+    const file = { name: "export-format.txt", text: "CSV in the exports directory." };
+    const answer = send(pending.id, initialFormat, file);
+    await until(() => Boolean(releaseClarification), "provider reading owner's answer");
+    const answering = show(pending.id);
+    assert.equal(answering.awaitingAnswer, true);
+    assert.equal(answering.attachments.at(-1).name, file.name);
+    assert.deepEqual(calls.at(-1).documents, [file.text]);
+    cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "TASK_AWAITING_ANSWER");
+    assert.equal(await available(), false);
+    releaseClarification();
+    const reply = await answer;
+    assert.equal(reply.result.ok, true, JSON.stringify(reply));
+    await until(available, "approval after clarification");
+    assert.equal(show(pending.id).status, "draft");
+    assert.equal(show(pending.id).awaitingAnswer, false);
+    check("An answer with an attachment preserves the open question and blocks approval until the agent confirms it in the same card");
+
+    const beginFormatUpdate = async (id, request, steering) => {
+      await waitWriter(id, "writer released before changing the format");
+      const originalCalls = calls.length;
+      const reply = send(id, request);
+      await until(() => formatUpdate?.request === request, "provider receives " + request);
+      await until(async () => !(await available()), "new text hides approval");
+      assert.notEqual(show(id).awaitingAnswer, false);
+      cli(["approve", id], { revision: show(id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+      const steeringReply = send(id, steering);
+      await until(() => formatUpdate.steered.length > 0, "second message reaches the active provider");
+      assert.deepEqual(formatUpdate.steered, [steering]);
+      assert.equal(calls.length, originalCalls + 1, "Steering belongs to the active provider turn");
+      assert.equal(await available(), false);
+      return { reply, steeringReply, update: formatUpdate };
+    };
+    const waitForSteering = async ({ steeringReply }) => {
+      const accepted = await steeringReply;
+      assert.equal(accepted.saved, true, JSON.stringify(accepted));
+      assert.equal(accepted.result.ok, true, JSON.stringify(accepted));
+    };
+    const applyBrief = async (id, { update }, description) => {
+      const before = show(id);
+      const result = await update.applyBrief(update.steered.at(-1), description);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.data.changed, true);
+      assert.equal(result.data.revision, before.revision + 1);
+      const saved = show(id);
+      assert.equal(saved.revision, result.data.revision);
+      assert.equal(saved.description, description);
+      assert.notEqual(saved.awaitingAnswer, false);
+      assert.equal(saved.draftDiscussion?.phase, "queued");
+      cli(["approve", id], { revision: saved.revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+      return saved;
+    };
+    const xlsxFilename = "Name the file report.xlsx.";
+    const xlsx = await beginFormatUpdate(pending.id, formatChanges[0], xlsxFilename);
+    const xlsxBrief = "Выгрузить данные в файл report.xlsx.";
+    const callsBeforeUpdate = calls.length;
+    const xlsxEdit = await applyBrief(pending.id, xlsx, xlsxBrief);
+    const xlsxConfirmation = "Подтверждаю выгрузку XLSX в report.xlsx.";
+    xlsx.update.completion.resolve(xlsxConfirmation);
+    await xlsx.update.returned.promise;
+    const completedBeforeSteering = await Promise.race([xlsx.reply.then(() => true), delay(300, false)]);
+    assert.equal(completedBeforeSteering, false, "The completed provider answer waits for steering acceptance");
+    assert.notEqual(show(pending.id).awaitingAnswer, false);
+    xlsx.update.steeringGate.resolve();
+    await waitForSteering(xlsx);
+    const confirmed = await xlsx.reply;
+    assert.equal(confirmed.result.ok, true, JSON.stringify(confirmed));
+    await until(available, "valid steered reply restores approval");
+    const confirmedCard = show(pending.id);
+    assert.equal(confirmedCard.revision, xlsxEdit.revision + 1);
+    assert.equal(confirmedCard.description, xlsxBrief);
+    assert.equal(confirmedCard.awaitingAnswer, false);
+    assert.equal(confirmedCard.draftDiscussion, undefined);
+    assert.equal(calls.length, callsBeforeUpdate, "The agent edit needs no extra automatic review");
+    assert.deepEqual(messages(confirmedCard).slice(-3).map(event => event.text),
+      [formatChanges[0], xlsxFilename, xlsxConfirmation]);
+    check("An authorized XLSX edit advances the draft revision and blocks approval until the same turn confirms it after steering, without an extra review");
+
+    const failure = create("Provider inactive");
+    await until(() => show(failure.id).draftDiscussion?.phase === "failed", "provider failure");
+    await waitWriter(failure.id, "failed discussion writer released");
+    await display(failure.id);
+    await showStatus("draft_discussion.failed", { reason: "Fixture provider unavailable" });
+    assert.equal(await available(), false);
+    cli(["approve", failure.id], { revision: show(failure.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    const failedWithNeutralReply = await sendNeutral(failure.id);
+    assert.equal(failedWithNeutralReply.draftDiscussion?.phase, "failed");
+    failProvider = false;
+    const failedRevision = show(failure.id).revision;
+    const retryLabel = localization.text("draft_discussion.retry", {}, "ru");
+    await until(() => evaluate(`Boolean(${button(retryLabel)})`), "review retry action after the neutral reply");
+    await activate(retryLabel, "mouse");
+    await until(() => show(failure.id).revision > failedRevision, "draft retry reaches the board");
+    await waitReady(failure.id, 3);
+    await until(available, "approval enabled after retry");
+    check("A neutral reply after a failed review leaves approval blocked; the regular retry restores it after successful review");
+
+    await evaluate("window.taskboard.menuAction('new-window')");
+    const other = BrowserWindow.getAllWindows().find(candidate => candidate.id !== window.id);
+    assert.ok(other);
+    const evaluateOther = code => other.webContents.executeJavaScript(code);
+    await until(() => evaluateOther("Boolean(window.taskboard)"), "second renderer");
+    await open(project, evaluateOther);
+    await evaluateOther(`showTask(${JSON.stringify(failure.id)})`);
+    await until(() => available(evaluateOther), "second window sees the approved brief");
+    const previous = show(failure.id);
+    heldDrafts.add(previous.title);
+    cli(["update", failure.id], { description: "Сохранять выгрузку в каталоге архива.", revision: previous.revision });
+    await until(() => draftGates.has(failure.id), "new review after substantive edit");
+    const stale = await evaluateOther(`window.taskboard.command("approve", ${JSON.stringify(failure.id)},
+      { revision: ${previous.revision} })`);
+    assert.equal(stale.error?.code, "REVISION_CONFLICT", JSON.stringify(stale));
+    assert.equal(show(failure.id).status, "draft");
+    await until(async () => !(await available(evaluateOther)), "second window hides the stale approval");
+    continueDraft(previous);
+    await waitReady(failure.id, 4);
+    await until(() => available(evaluateOther), "same edited card ready after a fresh review");
+    check("A substantive edit blocks an older window's approval and requires a fresh review");
+
+    await display(pending.id);
+    await until(available, "confirmed XLSX draft is visible");
+    const json = await beginFormatUpdate(pending.id, formatChanges[1], "Name the file report.json.");
+    await waitForSteering(json);
+    const jsonEdit = await applyBrief(pending.id, json, "Выгрузить данные в файл report.json.");
+    const outdatedText = "Устаревшее подтверждение JSON.";
+    heldDrafts.add(pending.title);
+    const externalEdit = cli(["update", pending.id], { description: revisedBrief, revision: jsonEdit.revision });
+    assert.equal(externalEdit.revision, jsonEdit.revision + 1);
+    json.update.completion.resolve(outdatedText);
+    const outdated = await json.reply;
+    assert.equal(outdated.result.error?.code, "REVISION_CONFLICT", JSON.stringify(outdated));
+    await until(() => draftGates.has(pending.id), "fresh review after the external edit");
+    assert.notEqual(show(pending.id).awaitingAnswer, false);
+    assert.equal(messages(show(pending.id)).some(event => event.text === outdatedText), false);
+    assert.equal(calls.at(-1).context.task.description, revisedBrief);
+    cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    assert.equal(await available(), false);
+    continueDraft(pending);
+    await until(() => show(pending.id).awaitingAnswer === false, "fresh draft confirmation");
+    await until(available, "approval after fresh review of the external edit");
+    assert.equal(messages(show(pending.id)).at(-1).text, readyText);
+    check("An external CLI edit after the same turn successfully updated the draft rejects the stale reply by revision and requires fresh confirmation");
+
+    const returning = create(returnedTitle, "Экспортировать отчёт в архив.");
+    await waitReady(returning.id);
+    await waitWriter(returning.id, "initial review completed before approval");
+    const approved = cli(["approve", returning.id], { revision: show(returning.id).revision });
+    assert.equal(approved.status, "ready");
+    const question = await send(returning.id, requestArchive);
+    assert.equal(question.result.ok, true, JSON.stringify(question));
+    const withQuestion = show(returning.id);
+    assert.equal(withQuestion.awaitingAnswer, true);
+    assert.equal(messages(withQuestion).at(-1).text, archiveQuestion);
+    const editedBrief = "Экспортировать отчёт о сверке в архив.";
+    const edited = cli(["update", returning.id], {
+      actor: "user", note: "Уточнить состав отчёта", description: editedBrief, revision: withQuestion.revision,
+    });
+    assert.equal(edited.status, "ready");
+    assert.equal(edited.awaitingAnswer, true);
+    const closedQuestion = await send(returning.id, archiveAnswer);
+    assert.equal(closedQuestion.result.ok, true, JSON.stringify(closedQuestion));
+    const clarified = show(returning.id);
+    assert.equal(clarified.status, "ready");
+    assert.equal(clarified.awaitingAnswer, false);
+    assert.equal(messages(clarified).at(-1).text, archiveConfirmed);
+    await waitWriter(returning.id, "ordinary dialogue completed before return");
+    heldDrafts.add(returning.title);
+    const returned = cli(["return-to-draft", returning.id], { revision: clarified.revision });
+    assert.equal(returned.status, "draft");
+    assert.equal(returned.description, editedBrief);
+    assert.equal(returned.awaitingAnswer, undefined);
+    assert.equal(messages(returned).at(-1).text, archiveConfirmed);
+    cli(["approve", returning.id], { revision: show(returning.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await display(returning.id);
+    assert.equal(await available(), false);
+    await until(() => evaluate(`Boolean(${button(startLabel)})`), "review action for returned draft");
+    assert.equal(calls.filter(call => call.context.task.id === returning.id).length, 3);
+    await activate(startLabel, "mouse");
+    await until(() => draftGates.has(returning.id), "new review after returning the changed ready card to draft");
+    assert.equal(calls.at(-1).context.task.description, editedBrief);
+    continueDraft(returning);
+    await until(() => show(returning.id).awaitingAnswer === false, "confirmation of the returned draft");
+    await until(available, "approval of the returned draft after review");
+    check("An ordinary ready-card reply closes the question, and returning the changed card to draft still requires a new review before approval");
+
+    const legacy = create(legacyTitle);
+    await waitReady(legacy.id);
+    await waitWriter(legacy.id, "legacy fixture initial review released");
+    const { locateBoard, onBoard } = await import("../src/cli/storage.ts");
+    onBoard(locateBoard(project), store => {
+      store.save({ ...store.card(legacy.id), draftConfirmed: undefined });
+    });
+    const legacyCard = show(legacy.id);
+    assert.equal(legacyCard.awaitingAnswer, false);
+    assert.equal(legacyCard.draftConfirmed, undefined);
+    await display(legacy.id);
+    await until(available, "approval of a legacy confirmation");
+    const neutral = send(legacy.id, neutralRequest);
+    await until(() => Boolean(releaseLegacyNeutral), "agent receives the neutral message on the legacy draft");
+    const awaitingNeutralReply = show(legacy.id);
+    assert.equal(awaitingNeutralReply.awaitingAnswer, undefined);
+    cli(["approve", legacy.id], { revision: awaitingNeutralReply.revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await until(async () => !(await available()), "approval pauses during a neutral dialogue turn");
+    releaseLegacyNeutral();
+    const neutralResult = await neutral;
+    assert.equal(neutralResult.result.ok, true, JSON.stringify(neutralResult));
+    await until(available, "legacy confirmation remains valid after the neutral reply");
+    const afterNeutral = show(legacy.id);
+    assert.equal(afterNeutral.awaitingAnswer, false);
+    assert.equal(afterNeutral.draftConfirmed, true);
+    assert.equal(afterNeutral.draftDiscussion, undefined);
+    assert.equal(messages(afterNeutral).at(-1).text, neutralReply);
+    assert.deepEqual(calls.filter(call => call.context.task.id === legacy.id).map(call => call.mode), ["initial", undefined]);
+    heldDrafts.add(legacy.title);
+    const changedLegacyBrief = "Экспортировать отчёт с итогами сверки.";
+    cli(["update", legacy.id], { description: changedLegacyBrief, revision: afterNeutral.revision });
+    await until(() => draftGates.has(legacy.id), "new review of the edited legacy draft");
+    cli(["approve", legacy.id], { revision: show(legacy.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await until(async () => !(await available()), "approval blocked after a substantive edit");
+    assert.equal(calls.at(-1).context.task.description, changedLegacyBrief);
+    continueDraft(legacy);
+    await waitReady(legacy.id, 4);
+    await until(available, "edited legacy draft available after fresh confirmation");
+    check("A legacy confirmation survives a neutral dialogue, pauses approval while the reply is pending, and is invalidated by a substantive edit");
+
+    report.approvalDraft = pending.id;
+    report.approvalMessages = messages(show(pending.id));
+  };
+  if (approvalOnly) {
+    await verifyApproval();
+  } else if (live) {
     const catalog = await evaluate("window.taskboard.chatModels()");
     assert.equal(catalog.ok, true, JSON.stringify(catalog));
     const model = catalog.data.find(entry => entry.default) ?? catalog.data[0];
@@ -690,9 +1117,12 @@ try {
     report.interrupted = interrupted.id;
     check("Transient chat staging is cleaned");
   }
-  if (!live) {
-    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/cli/archive.ts", "src/cli/main.ts",
-      "src/desktop/chat.js", "src/desktop/locales/ru.json", "scripts/check-draft-discussion.mjs"];
+  if (!live && !(approvalOnly && restart)) {
+    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/desktop/chat-actions.ts", "src/desktop/board-actions.ts",
+      "src/cli/archive.ts", "src/cli/main.ts",
+      "src/cli/model.ts", "src/cli/storage.ts", "src/cli/tasks.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
+      "src/desktop/locales/ru.json", "src/desktop/preload.cjs", "scripts/check-draft-discussion.mjs",
+      "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts"];
     report.sourceHashes = Object.fromEntries(paths.map(path => {
       const source = readFileSync(new URL("../" + path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
       return [path, createHash("sha256").update(source).digest("hex")];

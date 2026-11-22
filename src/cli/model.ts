@@ -209,6 +209,7 @@ export type ArtifactKind = "png" | "text";
 
 export interface Task {
   awaitingAnswer?: boolean;
+  draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
   draftManagerReplyThrough?: number;
@@ -391,6 +392,28 @@ export function requireState(task: Task, allowed: readonly TaskState[]): void {
   }
 }
 
+export function hasDraftConfirmation(task: Task): boolean {
+  return task.awaitingAnswer === false && task.draftConfirmed !== false && !task.draftDiscussion;
+}
+
+export function invalidateDraftDiscussion(task: Task): Task {
+  if (task.status !== "draft") {
+    return {
+      ...task,
+      draftConfirmed: false,
+      awaitingAnswer: task.awaitingAnswer === true ? true : undefined,
+    };
+  }
+  return {
+    ...task,
+    draftConfirmed: false,
+    awaitingAnswer: undefined,
+    draftDiscussion: task.draftDiscussion?.phase === "running"
+      ? task.draftDiscussion
+      : { phase: "queued", managerReply: task.draftDiscussion?.managerReply },
+  };
+}
+
 export function requireRevision(task: Task, value: unknown, required = false): void {
   if (value === undefined && !required) return;
   const revision = number(value, "revision");
@@ -418,6 +441,14 @@ export function record(
   if (next !== task.status) {
     event.from = task.status;
     event.to = next;
+  }
+  // Outside a draft, awaitingAnswer tracks the dialogue independently of approval.
+  if (task.status === "draft" && next !== "draft") {
+    task = { ...task, draftConfirmed: hasDraftConfirmation(task) };
+  } else if (task.status !== "draft" && next === "draft") {
+    if (task.awaitingAnswer === false && !task.draftConfirmed) {
+      task = { ...task, awaitingAnswer: undefined };
+    }
   }
   return {
     ...task,

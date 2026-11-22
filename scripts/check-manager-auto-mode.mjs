@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { registerRuntime } from "../src/desktop/board-runtime.ts";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "manager-auto-mode", 90_000, [["switch"], ["restart"]]);
@@ -72,6 +72,7 @@ try {
     }
     const task = title => {
       const { id } = data(project, ["create"], plannedDraft({ title, criteria: ["Verify fixture"] }));
+      confirmFixtureDraft(project, id);
       return data(project, ["approve", id]);
     };
     running = task("Work already started");

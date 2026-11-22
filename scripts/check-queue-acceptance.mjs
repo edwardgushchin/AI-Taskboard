@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { activeManagerGoal, managerGoalBinding } from "../src/cli/manager-goal.ts";
 import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "queue-acceptance", 300_000, [
@@ -65,6 +65,7 @@ function prepareBoard() {
   cli(["init"], { git: false });
   const make = title => {
     const draft = cli(["create"], plannedDraft({ title, criteria: ["Checked"] }));
+    confirmFixtureDraft(project, draft.id);
     return cli(["approve", draft.id]);
   };
   const pair = name => {

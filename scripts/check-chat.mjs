@@ -495,7 +495,7 @@ app.whenReady().then(async () => {
       import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
       import { join } from 'node:path';
       import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
-      import { plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
+      import { confirmFixtureDraft, plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
       import { readManagerDialogue, readManagerHistory, saveManagerHistory }
         from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
       const [root, reopen, source] = process.argv.slice(1);
@@ -509,6 +509,7 @@ app.whenReady().then(async () => {
         mkdirSync(root);
         await cli(['init']);
         const task = await cli(['create'], plannedDraft({ title: 'Artifact fixture', workingDirectory: root, criteria: ['Show the screenshot'] }));
+        confirmFixtureDraft(root, task.id);
         await cli(['approve', task.id]);
         await cli(['start', task.id]);
         const name = 'manager work status.png';
@@ -633,7 +634,7 @@ app.whenReady().then(async () => {
         import { initializeBoard } from ${JSON.stringify(new URL("../src/cli/storage.ts", import.meta.url).href)};
         import { createTask } from ${JSON.stringify(new URL("../src/cli/tasks.ts", import.meta.url).href)};
         import { callCli } from ${JSON.stringify(new URL("../src/desktop/cli.ts", import.meta.url).href)};
-        import { plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
+        import { confirmFixtureDraft, plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
         import { managerChatItems, readManagerHistory, syncTaskStatusNotices, managerUnread, readManagerDialogue, readManagerView, saveManagerHistory } from ${JSON.stringify(new URL("../src/desktop/manager-history.ts", import.meta.url).href)};
         const [project, action] = process.argv.slice(1);
         const input = JSON.parse(readFileSync(0, "utf8"));
@@ -652,6 +653,7 @@ app.whenReady().then(async () => {
           await cli(["settings"], { reviewMode: "manager" });
           const card = await cli(["create"], plannedDraft({ title: "Проверка отчёта", criteria: ["Проверить доступ"], workingDirectory: project }));
           syncTaskStatusNotices(project);
+          confirmFixtureDraft(project, card.id);
           await cli(["approve", card.id], { actor: "manager" });
           await cli(["start", card.id], { actor: "manager" });
           const preview = await cli(["preview", card.id]);
@@ -934,14 +936,16 @@ app.whenReady().then(async () => {
     const fixture = spawnSync(process.env.TASKBOARD_CHECK_NODE, ["--input-type=module", "-e", `
       import { mkdirSync } from 'node:fs';
       import { callCli } from ${JSON.stringify(new URL('../src/desktop/cli.ts', import.meta.url).href)};
-      import { plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
+      import { confirmFixtureDraft, plannedDraft } from ${JSON.stringify(new URL("../tests/fixtures/planned-draft.ts", import.meta.url).href)};
       import { recordExecutorResult } from ${JSON.stringify(new URL('../src/desktop/executor-results.ts', import.meta.url).href)};
       import { saveManagerHistory, readManagerHistory } from ${JSON.stringify(new URL('../src/desktop/manager-history.ts', import.meta.url).href)};
       const root = process.argv[1]; mkdirSync(root);
       const cli = async (args, input) => { const r = await callCli(root, args, input); if (!r.ok) throw Error(JSON.stringify(r)); return r.data; };
       await cli(['init']);
       const task = await cli(['create'], plannedDraft({ title: 'Unicode fixture', criteria: ['Exact text'], workingDirectory: root }));
-      await cli(['approve', task.id]); await cli(['start', task.id]);
+      confirmFixtureDraft(root, task.id);
+      await cli(['approve', task.id]);
+      await cli(['start', task.id]);
       const sample = 'Результат: ёж, English; «готово» — да? C:\\\\Проект\\\\file.ts abc1234 ??? literal \\\\u041F';
       const preview = await cli(['preview', task.id]);
       const r = await recordExecutorResult(root, task.id, { action: 'submit', input: {

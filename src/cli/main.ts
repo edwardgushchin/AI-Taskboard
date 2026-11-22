@@ -8,14 +8,14 @@ import { guardManual, manualAction, isManual } from "./manual-board.ts";
 import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
 import { join } from "node:path";
-import { parseArgs } from "node:util";
+import { isDeepStrictEqual, parseArgs } from "node:util";
 import { applyAcceptance, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
   addAttachment, addChatMessage, archiveCancelled, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
-import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
+import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, hasDraftConfirmation, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import { activeManagerGoal } from "./manager-goal.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
@@ -114,7 +114,7 @@ function compactTask(task: Task) {
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, criteria: task.criteria, goalThreadId, managerGoalId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
-    awaitingAnswer: task.awaitingAnswer, reviewReturn: task.reviewReturn,
+    awaitingAnswer: task.awaitingAnswer, draftConfirmed: task.draftConfirmed, reviewReturn: task.reviewReturn,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     activity: taskActivity(task),
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
@@ -835,16 +835,18 @@ function run(
   if (command === "draft-discussion") {
     requireRevision(task, input.revision, true);
     const phase = task.draftDiscussion?.phase;
-    if (isManual(store.index.settings) || task.status !== "draft" ||
-        !(input.phase === "running" && (phase === "queued" || phase === "failed") ||
-          (input.phase === "failed" || input.phase === "completed" ||
-            input.phase === "queued" && task.draftDiscussion?.managerReply !== undefined) && phase === "running")) {
+    const managerReply = task.draftDiscussion?.managerReply;
+    const canStart = input.phase === "running" && (phase === "queued" || phase === "failed" ||
+      (phase === undefined && task.awaitingAnswer !== true && !hasDraftConfirmation(task)));
+    const canFinish = phase === "running" && (input.phase === "failed" || input.phase === "completed" ||
+      (input.phase === "queued" && managerReply !== undefined));
+    if (isManual(store.index.settings) || task.status !== "draft" || !(canStart || canFinish)) {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
     }
     const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
-      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500), managerReply: task.draftDiscussion?.managerReply }
-      : input.phase === "running" || input.phase === "queued" ? { phase: input.phase, managerReply: task.draftDiscussion?.managerReply } : undefined;
-    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + input.phase, "agent"));
+      ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500), managerReply }
+      : input.phase === "running" || input.phase === "queued" ? { phase: input.phase, managerReply } : undefined;
+    return store.save(record({ ...task, draftDiscussion, draftConfirmed: false }, "draft-discussion-" + input.phase, "agent"));
   }
   if (command === "run-log") {
     const logged = recordRunLog(task, input);
@@ -859,6 +861,14 @@ function run(
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
+  if (command === "approve" && !hasDraftConfirmation(task)) {
+    throw new TaskboardError("DRAFT_DISCUSSION_REQUIRED", "The agent must confirm the current draft before approval.");
+  }
+  const briefFields = ["title", "description", "criteria", "questions", "subtasks", "dependencies"] as const;
+  if ((command === "update" || command === "unblock") &&
+      briefFields.some(key => !isDeepStrictEqual(task[key], updated[key]))) {
+    updated = invalidateDraftDiscussion(updated);
+  }
   if (discussionReturn) updated.discussionReturn = updated.revision;
   if (command === "update" && input.queuedExecutor === true) {
     requireRevision(task, input.revision, true);

@@ -1,6 +1,6 @@
 import { activeManagerGoal, managerGoalBinding, managerGoalState } from "../src/cli/manager-goal.ts";
 import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat } from "../src/desktop/chat-actions.ts";
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
 import localization from "../src/desktop/localization.cjs";
@@ -260,6 +260,9 @@ function fixture(t: TestContext) {
         assert.match(instructions, /Lifecycle cleanup and its diagnostics are internal/);
         assert.match(instructions, /only what changes the recipient's work/);
         assert.match(session.mcpTools.find(tool => tool.name === "task_message")!.description, /only what this executor needs to act/);
+        const approval = session.mcpTools.find(tool => tool.name === "task_approve")!.description;
+        assert.match(approval, /agent confirms its current brief/);
+        assert.match(approval, /task_wait.*task_show.*awaitingAnswer is false.*draftConfirmed is not false.*approvalRequirements is empty/);
       }
       assert.equal(session.title, "Project manager for project");
       const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["expert_list", "expert_context", "expert_skill", "ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
@@ -267,7 +270,7 @@ function fixture(t: TestContext) {
         "task_review", "task_review_diff", "task_review_artifact", "task_accept", "task_request_changes", "project_git", "project_path", "project_sha256",
       ] : [
         "expert_list", "expert_context", "expert_skill", "expert_plan", "team_inbox", "team_message", "team_findings",
-        "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
+        "board_archive_cancelled", "board_auto_queue", "task_cancel", "provider_tools", "task_tool_grant", "task_tool_revoke", "task_set_executor_access", "ask_user", "manager_inbox", "manager_ack", "task_message", "task_start", "task_start_batch", "task_approve", "task_wait", "task_review_queue", "task_review", "task_review_diff",
         "task_review_artifact", "task_accept", "task_request_changes",
         "task_cleanup_status", "task_cleanup", "project_git", "project_git_push",
         "project_git_branches", "project_git_fetch", "project_git_fast_forward", "project_git_branch_create", "project_git_branch_delete",
@@ -370,7 +373,10 @@ function fixture(t: TestContext) {
       runtime.boardWorkRequests.get(project)?.automationChanged?.(board.data);
       runtime.boardRequests.get(project)?.automationChanged?.(board.data);
     },
-    cli: (args: string[], input?: unknown) => callCli(project, args, input),
+    cli: (args: string[], input?: unknown) => {
+      if (args[0] === "approve") confirmFixtureDraft(project, args[1]);
+      return callCli(project, args, input);
+    },
     prepareUpdate: async () => {
       supportsUpdates = true;
       await applicationUpdates.check();
@@ -2626,6 +2632,7 @@ test("manager can create and dispatch a task in an existing working directory", 
     const draft = (await act("task_create", plannedDraft({
       title: "Save a report", criteria: ["The report is present."], tags: ["Reports"], workingDirectory: f.folder,
     }))).data;
+    confirmFixtureDraft(f.project, draft.id);
     const approved = (await act("task_approve", { id: draft.id, revision: draft.revision })).data;
     const launched = await act("task_start", { id: draft.id, revision: approved.revision });
     assert.equal(launched.data.status, "in_progress");
@@ -2642,6 +2649,8 @@ test("the manager cannot approve a draft with a newly saved question", async t =
   assert.equal((await f.cli(["init"])).ok, true);
   const result = await f.run("Approve the draft when the clarification is complete.", async act => {
     const { data: draft } = await act("task_create", plannedDraft({ title: "Choose an export format", tags: ["Export"] }));
+    const approve = (revision: number) => act("task_approve", { id: draft.id, revision });
+    assert.equal((await approve(draft.revision)).error.code, "DRAFT_DISCUSSION_REQUIRED");
     const chat = ["chat", draft.id];
     const settings = { model: "fixture", effort: "low" };
     const { data: prompt } = await f.cli(chat, { ...settings, text: "What information is missing?" });
@@ -2653,7 +2662,6 @@ test("the manager cannot approve a draft with a newly saved question", async t =
       awaitingAnswer: true,
     });
 
-    const approve = (revision: number) => act("task_approve", { id: draft.id, revision });
     assert.equal((await approve(draft.revision)).error.code, "REVISION_CONFLICT");
     assert.equal((await approve(question.revision)).error.code, "TASK_AWAITING_ANSWER");
     assert.equal((await f.cli(["show", draft.id])).data.status, "draft");
@@ -2664,7 +2672,9 @@ test("the manager cannot approve a draft with a newly saved question", async t =
       actor: "agent",
       text: "The format is clear.",
       replyTo: answer.history.length - 1,
+      revision: answer.revision,
       awaitingAnswer: false,
+      confirmsDraft: true,
     });
     assert.equal((await approve(closed.revision)).data.status, "ready");
     return { text: "Draft approved after clarification." };
@@ -2684,6 +2694,7 @@ test("the manager can approve drafts created while the goal was paused", async t
     const { data: other } = await act("task_create", plannedDraft({ title: "Update release notes", criteria: ["The notes list user-visible changes."], tags: ["Release"] }));
     pending = other;
     assert.equal((await f.cli(["show", draft.id])).data.goalThreadId, undefined);
+    confirmFixtureDraft(f.project, draft.id);
     const approval = await act("task_approve", { id: draft.id, revision: draft.revision });
     assert.equal(approval.ok, true, JSON.stringify(approval.error));
     assert.equal(approval.data.status, "ready");
@@ -2696,6 +2707,7 @@ test("the manager can approve drafts created while the goal was paused", async t
   const { id, revision } = pending;
   const resumed = await f.resume(objective, async (act, _text, _images, _id, _context, _waiting, _signal, goal) => {
     goal!.update({ objective, status: "active" });
+    confirmFixtureDraft(f.project, id);
     const approval = await act("task_approve", { id, revision });
     assert.equal(approval.ok, true, JSON.stringify(approval.error));
     assert.equal(approval.data.status, "ready");
@@ -2781,6 +2793,7 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
     }))).data;
     sliceId = slice.id;
     assert.equal((await f.cli(["show", slice.id])).data.goalThreadId, f.threadId);
+    confirmFixtureDraft(f.project, slice.id);
     const ready = (await act("task_approve", { id: slice.id, revision: slice.revision })).data;
     assert.equal(ready.status, "ready");
     const another = (await act("task_create", plannedDraft({
@@ -2789,6 +2802,7 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
       criteria: ["Missing config uses defaults."],
       tags: ["Coverage"],
     }))).data;
+    confirmFixtureDraft(f.project, another.id);
     const anotherReady = (await act("task_approve", { id: another.id, revision: another.revision })).data;
     const { data: backlog } = await act("board_list", {});
     assert.equal(backlog.tasks.find((task: { id: string }) => task.id === another.id).revision, anotherReady.revision);

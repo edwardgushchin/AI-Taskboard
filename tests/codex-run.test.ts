@@ -1,4 +1,4 @@
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
 import { callCli } from "../src/desktop/cli.ts";
@@ -603,6 +603,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }));
   assert.ok(card.ok);
   assert.equal(card.data.id, task.id);
+  confirmFixtureDraft(folder, card.data.id);
   assert.equal((await callCli(folder, ["approve", card.data.id])).ok, true);
   assert.equal((await callCli(folder, ["start", card.data.id])).ok, true);
   executorFullAccess(folder, folder, card.data, true);

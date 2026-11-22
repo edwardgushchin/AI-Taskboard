@@ -1248,17 +1248,20 @@ function taskChat(task, renderStageWork) {
   controlLabelForIcon(microphone, () => t("ui.voice_input_a05b7480"));
   controls.append(attach, microphone, retryReply, send);
   composer.append(quoteDraft.root, pendingFiles, input, fileInput, controls, feedback);
-  if (task.status === "draft" && task.draftDiscussion && task.draftDiscussion.phase !== "running") {
-    const { phase, reason } = task.draftDiscussion;
+  const discussionPhase = task.draftDiscussion?.phase ??
+    (task.awaitingAnswer !== true && !hasDraftConfirmation(task) ? "unreviewed" : undefined);
+  if (!manualBoard() && task.status === "draft" && discussionPhase && discussionPhase !== "running") {
+    const phase = discussionPhase;
+    const reason = task.draftDiscussion?.reason;
     const discussion = element("div", undefined, "chat-status");
     discussion.setAttribute("role", "status");
     discussion.append(element("span", () => t("draft_discussion." + phase, { reason })));
-    if (phase === "failed") {
-      const retry = button(() => t("draft_discussion.retry"), async () => {
+    if ((phase === "failed" || phase === "unreviewed") && !frame.replyingTasks?.includes(task.id)) {
+      const retry = button(() => t(phase === "failed" ? "draft_discussion.retry" : "draft_discussion.start"), async () => {
         retry.disabled = true;
         draft.error = "";
         try {
-          const result = await api.retryDraftDiscussion(task.id);
+          const result = await api.retryDraftDiscussion(task.id, phase === "unreviewed");
           if (!result.ok) draft.error = boardError(result.error);
         } catch (error) { draft.error = error.message; }
         finally {

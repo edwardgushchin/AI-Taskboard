@@ -1,4 +1,4 @@
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 // Two real Electron processes and three windows; provider turns are isolated
 // Node stand-ins so this check never contacts a model or opens a user's board.
 import assert from "node:assert/strict";
@@ -23,6 +23,7 @@ async function wait(predicate, label) {
   }
 }
 function cli(project, args, input) {
+  if (args[0] === "approve") confirmFixtureDraft(project, args[1]);
   const reply = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE ?? process.execPath, [
     "--disable-warning=ExperimentalWarning", join(root, "src/cli/main.ts"), "--project", project, "--json", ...args,
     ...(input === undefined ? [] : ["--stdin"]),

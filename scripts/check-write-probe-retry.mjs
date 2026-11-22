@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { executorFullAccess } from "../src/desktop/codex.ts";
 import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { electronCheck } from "./electron-check.mjs";
@@ -174,6 +174,7 @@ if (seed) {
     mkdirSync(cwd);
     writeFileSync(join(cwd, "scenario"), scenario);
     const { id } = cli("create", null, plannedDraft({ title, criteria: ["Run fixture"], workingDirectory: cwd }));
+    confirmFixtureDraft(project, id);
     cli("approve", id);
     return [scenario, { id, cwd: realpathSync(cwd), title }];
   }));

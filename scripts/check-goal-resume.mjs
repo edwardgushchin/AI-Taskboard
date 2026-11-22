@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { registerRuntime, runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { goalMessages, saveManagerHistory, sendGoalMessage } from "../src/desktop/manager-history.ts";
-import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "goal-resume", 90_000, [[], ["--restart"]]);
@@ -113,6 +113,7 @@ function prepare() {
     cli(["init"]);
     cli(["settings", "--stdin"], { autoMode: false, reviewMode: "reviewer", taskLimits: { executor: 1, reviewer: 1 } });
     const { id } = cli(["create", "--stdin"], plannedDraft({ title: taskTitle }));
+    confirmFixtureDraft(project, id);
     cli(["approve", id]);
     cli(["start", id]);
     writeGoal(objective, seed.goalId);

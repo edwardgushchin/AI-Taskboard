@@ -301,7 +301,7 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const status = blocked?.previousStatus ?? (action === "resume" ? "in_progress" : "ready");
       const updated = action === "unblock" && input.dependencies !== undefined
         ? fields({ ...rest, status }, { dependencies: input.dependencies }) : rest;
-      return record(updated, action, boardActor(input), status, text(input.reason, "reason", true));
+      return record({ ...updated, status: task.status }, action, boardActor(input), status, text(input.reason, "reason", true));
     }
     case "update": {
       const updated = fields(task, input);

@@ -71,6 +71,7 @@ globalThis.questionFixtureReply = async (_profile, _project, _settings, prompt, 
   return { text: JSON.stringify({
     text: partial ? "Формат CSV принят. Куда сохранить результат?" : "Уточнение получено. Вопросов больше нет.",
     awaitingAnswer: partial,
+    ...(context.task.status === "draft" ? { confirmsDraft: !partial } : {}),
   }) };
 };
 
@@ -310,7 +311,9 @@ void (async () => {
       for (const [text, awaitingAnswer] of [["Обычное сообщение", false], ["Всё готово", false], ["Символ ? сам по себе", false],
         ["Какой раздел включить?", true], ["Последний вопрос больше не нужен.", false]]) {
         const user = cli(["chat", "T-0002"], { ...settings, text: "Обсудим" });
-        cli(["chat", "T-0002"], { ...settings, actor: "agent", text, awaitingAnswer, replyTo: user.history.length - 1 });
+        cli(["chat", "T-0002"], {
+          ...settings, actor: "agent", text, awaitingAnswer, replyTo: user.history.length - 1, revision: user.revision,
+        });
         await until(() => evaluate(`Boolean([...document.querySelectorAll('.task-card')].find(c => c.querySelector('.task-id')?.textContent === 'T-0002')?.querySelector('.task-question')) === ${awaitingAnswer}`), text);
       }
       log("PASS ordinary text, readiness and punctuation do not mark a card; a new explicit question and its withdrawal update only that card.");

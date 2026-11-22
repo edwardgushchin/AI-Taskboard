@@ -940,7 +940,7 @@ interface ActiveAgent {
   directories: Set<string>;
   draftDiscussion?: true;
   chatWindow?: number;
-  updateMessage?: (task: Task, index: number) => () => void;
+  updateMessage?: (task: Task, index: number) => (accepted: boolean) => void;
   steerMessage?: (text: string, images: string[], index: number) => Promise<void>;
 }
 const activeAgents = new Map<string, ActiveAgent>();
@@ -1047,7 +1047,7 @@ async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRo
 }
 
 async function sendChat(project: string, id: string, request: ChatRequest, notify: (update: ChatUpdate) => void,
-  automatic?: NonNullable<Task["draftDiscussion"]>["phase"], chatWindow?: number) {
+  automatic?: NonNullable<Task["draftDiscussion"]>["phase"] | "unreviewed", chatWindow?: number) {
   if (applicationUpdates.installing) {
     return { saved: false, result: cliFailure("UPDATE_IN_PROGRESS", t("updates.preparing")) };
   }
@@ -1094,10 +1094,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       signal.throwIfAborted();
       if (!current.ok) return { saved, result: current };
       const task = current.data;
-      if (task.status !== "draft" || task.draftDiscussion?.phase !== automatic) {
+      if (task.status !== "draft" || task.draftDiscussion?.phase !== (automatic === "unreviewed" ? undefined : automatic)) {
         return { saved, result: cliFailure("CHAT_CHANGED", "The draft discussion changed.") };
       }
-      if (automatic === "running") {
+      if (automatic === "running" && task.draftDiscussion?.phase === "running") {
         const result = await callCli<Task>(project, ["draft-discussion", id], {
           revision: task.revision, phase: task.draftDiscussion.managerReply === undefined ? "failed" : "queued",
           reason: discussionFailure,
@@ -1215,16 +1215,21 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       // The request owns its staging files until it hands them to the active turn.
       active.directories.add(scratch!);
       directories.delete(scratch!);
-      const undo = active.updateMessage?.(task, last);
+      const finishSteering = active.updateMessage?.(task, last);
       try {
         if (active.steerMessage) await active.steerMessage(prompt, images, last);
         else await active.control.steer(prompt, images);
+        finishSteering?.(true);
+      } catch (error) {
+        finishSteering?.(false);
+        throw error;
       }
-      catch (error) { undo?.(); throw error; }
       return { saved, result: { ok: true as const, data: task } };
     }
     const replyStarted = performance.now();
-    let replyTo = last;
+    let replyTarget = { index: last, revision: task.revision };
+    let actionIndex = last;
+    const pendingSteering = new Set<Promise<void>>();
     const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
       if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь.");
       const review = await callCli<{ revision: number; targetHead: string | null }>(project, ["review", id], { compact: true });
@@ -1236,18 +1241,38 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (!returned.ok) return returned;
       return { ok: true, data: { ...returned.data, feedback: reason, executorState: "waiting_for_discussion" } };
     };
-    let runAction = taskChatActions(project, task, message?.text ?? "", () => notify({ type: "changed" }), requestChanges);
+    const actionsFor = (card: Task, target: typeof replyTarget) => taskChatActions(
+      project, card, card.history[target.index]?.text ?? "", revision => {
+        target.revision = revision;
+        notify({ type: "changed" });
+      }, requestChanges,
+    );
+    let runAction = actionsFor(task, replyTarget);
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
     activeAgents.set(key, { directories, chatWindow, draftDiscussion: automatic ? true : undefined, control: {
       steer: async (text, images) => (await ready.promise).steer(text, images),
       interrupt: async () => (await ready.promise).interrupt(),
     }, updateMessage: (latest, index) => {
-      if (index < replyTo) return () => {};
-      const previousIndex = replyTo, previousAction = runAction;
-      replyTo = index;
-      runAction = taskChatActions(project, latest, latest.history[index].text ?? "", () => notify({ type: "changed" }), requestChanges);
-      return () => { if (replyTo === index) { replyTo = previousIndex; runAction = previousAction; } };
+      const steering = Promise.withResolvers<void>();
+      pendingSteering.add(steering.promise);
+      const target = { index, revision: latest.revision };
+      const previousIndex = actionIndex;
+      const previousAction = runAction;
+      if (index >= actionIndex) {
+        actionIndex = index;
+        runAction = actionsFor(latest, target);
+      }
+      return accepted => {
+        if (accepted && index > replyTarget.index) {
+          replyTarget = target;
+        } else if (!accepted && actionIndex === index) {
+          actionIndex = previousIndex;
+          runAction = previousAction;
+        }
+        pendingSteering.delete(steering.promise);
+        steering.resolve();
+      };
     } });
     const answer = await writer.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
@@ -1256,14 +1281,16 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       report => saveTaskTokenUsage(project, id, "discussion", report),
       control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
       automatic === undefined ? undefined : managerReply === undefined ? "initial" : "handoff",
-      task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
+      task.status === "review", Boolean(task.closedAt), inspectDraft)).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
+    await Promise.all(pendingSteering);
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
       ...answer,
       text: automatic && managerReply === undefined && !answer.text ? t("draft_discussion.ready") : answer.text,
-      actor: "agent", model, effort, replyTo, durationMs: Math.round(performance.now() - replyStarted),
-      ...(automatic ? { draftDiscussion: true, revision: task.revision, managerReply } : {}),
+      actor: "agent", model, effort, replyTo: replyTarget.index, durationMs: Math.round(performance.now() - replyStarted),
+      ...(inspectDraft ? { revision: replyTarget.revision } : {}),
+      ...(automatic ? { draftDiscussion: true, managerReply } : {}),
     });
     if (result.ok) discussionStarted = false;
     else discussionFailure = result.error.message;
@@ -1327,14 +1354,14 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   }, undefined, event.sender.id);
 });
 
-function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"]) {
+function runDraftDiscussion(project: string, id: string, phase: NonNullable<Task["draftDiscussion"]>["phase"] | "unreviewed") {
   return sendChat(project, id, { model: "", effort: "", text: "", files: [] }, () => {}, phase);
 }
 
-ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown) => {
+ipcMain.handle("chat:retry-draft-discussion", async (event, id: unknown, unreviewed: unknown) => {
   const project = stateOf(event).board?.project;
   if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
-  return (await runDraftDiscussion(project, id, "failed")).result;
+  return (await runDraftDiscussion(project, id, unreviewed === true ? "unreviewed" : "failed")).result;
 });
 
 type ManagerQuestion = { id: string; text: string; options: string[]; approval?: true };

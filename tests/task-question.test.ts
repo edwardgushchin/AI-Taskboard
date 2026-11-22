@@ -67,11 +67,12 @@ test("draft manager replies are linked, persisted once, and survive a concurrent
   const ready = finish("The draft is ready for approval.", false, second.sequence);
   assert.equal(ready.status, "draft");
   assert.equal(ready.awaitingAnswer, false);
+  assert.equal(ready.draftConfirmed, true);
   assert.equal(ready.draftManagerReplyThrough, second.sequence);
   assert.equal(ready.draftDiscussion, undefined);
 });
 
-function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void) {
+function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false) {
   let options: any;
   let tools: { name: string }[] = [];
   const replyToTask = runInNewContext(stripTypeScriptTypes(source.slice(start, end).replace("export ", "")) + "\nreplyToTask", {
@@ -95,7 +96,7 @@ function providerResult(result: object, mode?: "initial" | "handoff", onActivity
     },
   });
   const pending = replyToTask("profile", "project", {}, "{}", [], () => {}, () => {}, "scratch", 1024,
-    undefined, undefined, undefined, "T-0001", onActivity, mode);
+    undefined, undefined, undefined, "T-0001", onActivity, mode, false, false, draft);
   return { pending, options: () => options, tools: () => tools.map(tool => tool.name).filter(Boolean) };
 }
 
@@ -119,6 +120,23 @@ test("both discussion modes return explicit question state without parsing punct
     assert.equal(result.attachmentSources[0].name, "result.png");
     assert.ok(f.options().finalAnswerSchema.required.includes("awaitingAnswer"));
   }
+});
+
+test("draft dialogue requires explicit confirmation independently of open questions", async () => {
+  const response = { text: "Hello!", awaitingAnswer: false };
+  for (const variant of [response, { ...response, confirmsDraft: "true" },
+    { ...response, awaitingAnswer: true, confirmsDraft: true }]) {
+    const malformed = providerResult({ text: JSON.stringify(variant) }, undefined, undefined, true);
+    await assert.rejects(malformed.pending, /invalid task discussion result/);
+  }
+
+  const neutral = providerResult({ text: JSON.stringify({ ...response, confirmsDraft: false }) }, undefined, undefined, true);
+  assert.equal((await neutral.pending).confirmsDraft, false);
+  assert.ok(neutral.options().finalAnswerSchema.required.includes("confirmsDraft"));
+  const confirmed = providerResult({
+    text: JSON.stringify({ text: "The draft is ready for approval.", awaitingAnswer: false, confirmsDraft: true }),
+  }, undefined, undefined, true);
+  assert.equal((await confirmed.pending).confirmsDraft, true);
 });
 
 test("automatic discussion modes can use team mail and require a concrete handoff reply", async () => {
@@ -212,7 +230,9 @@ test("question state persists with replies, survives reads and partial answers, 
   for (const [text, awaitingAnswer] of [["Destination still needed?", true], ["Received both answers.", false]] as const) {
     task = addChatMessage(store, task, { ...settings, text: "Answer" });
     assert.equal(task.awaitingAnswer, true, "user sends do not clear state");
-    task = addChatMessage(store, task, { ...settings, actor: "agent", text, awaitingAnswer, replyTo: task.history.length - 1 });
+    task = addChatMessage(store, task, {
+      ...settings, actor: "agent", text, awaitingAnswer, replyTo: task.history.length - 1, revision: task.revision,
+    });
     assert.equal(readTask(new BoardStore(location), task.id).awaitingAnswer, awaitingAnswer);
   }
   // A legacy reply and a plain question mark do not retroactively mark a card.
@@ -240,6 +260,6 @@ test("state validation and stale reply protection preserve the last saved state"
   assert.throws(() => validateCard({ ...task, awaitingAnswer: "false" }, task.id), /Invalid card/);
   // Correcting a rejected value succeeds on the same pending user turn.
   task = addChatMessage(store, task, { ...settings, actor: "agent", text: "The question is no longer needed.",
-    replyTo: task.history.length - 1, awaitingAnswer: false });
+    replyTo: task.history.length - 1, revision: task.revision, awaitingAnswer: false });
   assert.equal(task.awaitingAnswer, false);
 });
