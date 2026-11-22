@@ -4519,6 +4519,8 @@ async function showTask(id, dialogue = false) {
   }
   const task = result.data;
   const scroll = refresh ? body.scrollTop : 0;
+  const previousMail = refresh ? byId("expert-team-mail") : undefined;
+  const focusedMail = previousMail?.firstElementChild === document.activeElement;
   const discussionHandoff = refresh ? byId("task-side").firstElementChild?.discussionHandoff : undefined;
   const focusedChat = refresh && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   const openDetails = new Set(refresh ? [...body.querySelectorAll(".task-details[open]")].map(details => details.id) : []);
@@ -4547,7 +4549,7 @@ async function showTask(id, dialogue = false) {
       () => api.openLink("https://github.com/" + repository + "/milestone/" + number), "quiet task-milestone-link"));
   }
   taskBriefSections(task);
-  const stagePanels = !manualBoard() && !task.expertStage ? expertTeamSection(task) : undefined;
+  const stagePanels = !manualBoard() && !task.expertStage ? expertTeamSection(task, previousMail?.open ?? false) : undefined;
   const renderStageWork = stageWork(task, stagePanels);
   if (!manualBoard()) {
     if (task.expertStage) body.append(button(task.expertStage.parentId, () => showTask(task.expertStage.parentId), "quiet"));
@@ -4701,6 +4703,9 @@ async function showTask(id, dialogue = false) {
     side.querySelector(".task-dialogue").focus({ preventScroll: true });
   }
   body.scrollTop = scroll;
+  if (focusedMail && !dialogue) {
+    byId("expert-team-mail")?.firstElementChild.focus({ preventScroll: true });
+  }
   if (focusedChat && byId("task-chat-input")) {
     byId("task-chat-input").focus({ preventScroll: true });
     byId("task-chat-input").setSelectionRange(focusedChat.selectionStart, focusedChat.selectionEnd);
@@ -5297,7 +5302,7 @@ function expertAvatar(id, name) {
   return avatar;
 }
 
-function expertTeamSection(task) {
+function expertTeamSection(task, mailOpen) {
   const area = element("section", undefined, "expert-team");
   const project = frame.project;
   const panels = new Map();
@@ -5383,6 +5388,8 @@ function expertTeamSection(task) {
   let teamMail;
   if (task.history.some(event => event.expertMessage)) {
     const mail = element("details");
+    mail.id = "expert-team-mail";
+    mail.open = mailOpen;
     teamMail = expertTeamMail(task);
     mail.append(element("summary", () => t("experts.conversation")), teamMail);
     area.append(mail);
