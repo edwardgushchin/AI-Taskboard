@@ -15,7 +15,7 @@ const start = source.indexOf("export function replyToTask(");
 const end = source.indexOf("\nexport async function requestExecutorAccess", start);
 assert.ok(start >= 0 && end > start);
 
-function providerResult(result: object, initial = false, onActivity?: (items: any[]) => void) {
+function providerResult(result: object, initial = false, onActivity?: (items: any[]) => void, draft = false) {
   let options: any;
   const replyToTask = runInNewContext(stripTypeScriptTypes(source.slice(start, end).replace("export ", "")) + "\nreplyToTask", {
     boardWorklog: () => ({}),
@@ -35,7 +35,7 @@ function providerResult(result: object, initial = false, onActivity?: (items: an
     },
   });
   const pending = replyToTask("profile", "project", {}, "{}", [], () => {}, () => {}, "scratch", 1024,
-    undefined, undefined, undefined, "T-0001", onActivity, initial ? "initial" : undefined);
+    undefined, undefined, undefined, "T-0001", onActivity, initial ? "initial" : undefined, false, false, draft);
   return { pending, options: () => options };
 }
 
@@ -59,6 +59,23 @@ test("both discussion modes return explicit question state without parsing punct
     assert.equal(result.attachmentSources[0].name, "result.png");
     assert.ok(f.options().finalAnswerSchema.required.includes("awaitingAnswer"));
   }
+});
+
+test("draft dialogue requires explicit confirmation independently of open questions", async () => {
+  const response = { text: "Hello!", awaitingAnswer: false };
+  for (const variant of [response, { ...response, confirmsDraft: "true" },
+    { ...response, awaitingAnswer: true, confirmsDraft: true }]) {
+    const malformed = providerResult({ text: JSON.stringify(variant) }, false, undefined, true);
+    await assert.rejects(malformed.pending, /invalid task discussion result/);
+  }
+
+  const neutral = providerResult({ text: JSON.stringify({ ...response, confirmsDraft: false }) }, false, undefined, true);
+  assert.equal((await neutral.pending).confirmsDraft, false);
+  assert.ok(neutral.options().finalAnswerSchema.required.includes("confirmsDraft"));
+  const confirmed = providerResult({
+    text: JSON.stringify({ text: "The draft is ready for approval.", awaitingAnswer: false, confirmsDraft: true }),
+  }, false, undefined, true);
+  assert.equal((await confirmed.pending).confirmsDraft, true);
 });
 
 test("discussion streaming decodes JSON strings and saves the first reply timestamp", async () => {

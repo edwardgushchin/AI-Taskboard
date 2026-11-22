@@ -249,6 +249,11 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (input.awaitingAnswer !== undefined && (actor !== "agent" || typeof input.awaitingAnswer !== "boolean")) {
     throw new TaskboardError("INVALID_INPUT", "Only an agent reply can set a boolean awaitingAnswer state.");
   }
+  if (input.confirmsDraft !== undefined && (actor !== "agent" || task.status !== "draft" || draftDiscussion ||
+      typeof input.confirmsDraft !== "boolean" || typeof input.awaitingAnswer !== "boolean" ||
+      (input.confirmsDraft && input.awaitingAnswer))) {
+    throw new TaskboardError("INVALID_INPUT", "Only a draft dialogue reply without an open question can confirm the draft.");
+  }
   if (!draftDiscussion && actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
     if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
@@ -258,8 +263,8 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
     requireRevision(task, input.revision, true);
   }
-  const reviewsCurrentDraft = actor === "agent" && task.status === "draft" &&
-    typeof input.awaitingAnswer === "boolean" && input.revision !== undefined;
+  const draftReply = actor === "agent" && task.status === "draft" && typeof input.awaitingAnswer === "boolean";
+  const confirmsDraft = input.awaitingAnswer === false && (draftDiscussion || input.confirmsDraft === true);
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
@@ -272,17 +277,23 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
 
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
-    const withAttachments = attachments.length
-      ? invalidateDraftDiscussion({ ...task, attachments: [...task.attachments, ...attachments] }) : task;
-    const reopensDraftDiscussion = actor === "user" && task.status === "draft" && task.awaitingAnswer === false;
-    const completesQueuedReview = reviewsCurrentDraft && withAttachments.draftDiscussion?.phase === "queued";
-    const updated = record({
-      ...withAttachments,
-      ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
-      ...(reopensDraftDiscussion ? { awaitingAnswer: undefined, draftConfirmed: undefined } : {}),
-      ...(actor === "user" && task.awaitingAnswer === true ? { awaitingAnswer: true } : {}),
-      draftDiscussion: draftDiscussion || actor === "user" || completesQueuedReview ? undefined : withAttachments.draftDiscussion,
-    }, "chat", actor, task.status, message);
+    const current = attachments.length
+      ? invalidateDraftDiscussion({ ...task, attachments: [...task.attachments, ...attachments] })
+      : { ...task };
+    if (actor === "user" && task.status === "draft") {
+      current.awaitingAnswer = task.awaitingAnswer === true ? true : undefined;
+      current.draftConfirmed = false;
+      current.draftDiscussion = task.draftDiscussion?.phase === "failed" ? task.draftDiscussion : undefined;
+    }
+    if (typeof input.awaitingAnswer === "boolean") current.awaitingAnswer = input.awaitingAnswer;
+    if (draftReply) {
+      current.draftConfirmed = confirmsDraft;
+      if (draftDiscussion || (input.revision !== undefined &&
+          (confirmsDraft || input.awaitingAnswer === true) && current.draftDiscussion?.phase !== "running")) {
+        current.draftDiscussion = undefined;
+      }
+    }
+    const updated = record(current, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,
       ...(actor === "user" || attachments.length ? { files: attachments.map(attachment => attachment.file) } : {}),

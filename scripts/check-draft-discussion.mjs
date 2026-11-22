@@ -86,6 +86,8 @@ const requestArchive = "Какой архив использовать?";
 const archiveQuestion = "Использовать недельный или месячный архив?";
 const archiveAnswer = "Использовать недельный архив.";
 const archiveConfirmed = "Недельный архив подтверждён.";
+const neutralRequest = "Как работает диалог карточки?";
+const neutralReply = "Здесь можно обсуждать постановку задачи.";
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
@@ -109,7 +111,7 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     assert.ok(request === requestArchive || request === archiveAnswer, "Unexpected ready card message");
     const awaitingAnswer = request === requestArchive;
     const text = awaitingAnswer ? archiveQuestion : archiveConfirmed;
-    return { text: JSON.stringify({ text, awaitingAnswer }) };
+    return { text: JSON.stringify({ text, awaitingAnswer, confirmsDraft: false }) };
   }
   const update = approvalOnly && formatChanges.includes(request) ? {
     request, completion: Promise.withResolvers(), returned: Promise.withResolvers(),
@@ -129,7 +131,7 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     formatUpdate = update;
     const text = await update.completion.promise;
     update.returned.resolve();
-    return { text: JSON.stringify({ text, awaitingAnswer: false }) };
+    return { text: JSON.stringify({ text, awaitingAnswer: false, confirmsDraft: true }) };
   }
   if (context.latestUserMessage?.text === "Fail once" && failMessage) {
     failMessage = false;
@@ -162,10 +164,16 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
     return { text: JSON.stringify({ questions }) };
   }
   if (context.latestUserMessage.text === "CSV") {
-    return { text: JSON.stringify({ text: "Which destination is required?", awaitingAnswer: true }) };
+    return { text: JSON.stringify({
+      text: "Which destination is required?", awaitingAnswer: true, confirmsDraft: false,
+    }) };
   }
-  const text = context.task.awaitingAnswer ? readyText : "User answer recorded: " + context.latestUserMessage.text;
-  return { text: JSON.stringify({ text, awaitingAnswer: false }) };
+  if (request === neutralRequest) {
+    return { text: JSON.stringify({ text: neutralReply, awaitingAnswer: false, confirmsDraft: false }) };
+  }
+  const confirmsDraft = context.task.awaitingAnswer === true;
+  const text = confirmsDraft ? readyText : "User answer recorded: " + context.latestUserMessage.text;
+  return { text: JSON.stringify({ text, awaitingAnswer: false, confirmsDraft }) };
 };
 
 let writer;
@@ -438,6 +446,17 @@ try {
       draftGates.delete(card.id);
       release();
     };
+    const sendNeutral = async id => {
+      const reply = await send(id, neutralRequest);
+      assert.equal(reply.result.ok, true, JSON.stringify(reply));
+      const current = show(id);
+      assert.equal(messages(current).at(-1).text, neutralReply);
+      assert.equal(current.awaitingAnswer, false);
+      assert.equal(current.draftConfirmed, false);
+      assert.equal(await available(), false);
+      cli(["approve", id], { revision: current.revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+      return current;
+    };
     if (restart) {
       await display(report.approvalDraft);
       await until(available, "approval after restart");
@@ -474,6 +493,30 @@ try {
     assert.equal(await available(), false);
     cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
     await capture("approval-pending.png");
+
+    const secondSlot = "Occupy the second automatic review slot";
+    heldDrafts.add(secondSlot);
+    const occupied = create(secondSlot);
+    await until(() => draftGates.has(occupied.id), "both automatic review slots are occupied");
+    const queued = create("Neutral message before first review");
+    assert.equal(show(queued.id).draftDiscussion?.phase, "queued");
+    await display(queued.id);
+    const unreviewed = await sendNeutral(queued.id);
+    assert.equal(unreviewed.draftDiscussion, undefined);
+    assert.deepEqual(calls.filter(call => call.context.task.id === queued.id).map(call => call.mode), [undefined]);
+    continueDraft(occupied);
+    const startLabel = localization.text("draft_discussion.start", {}, "ru");
+    await until(() => evaluate(`Boolean(${button(startLabel)})`), "review action after a neutral reply");
+    heldDrafts.add(queued.title);
+    await activate(startLabel, "mouse");
+    await until(() => draftGates.has(queued.id), "first review starts on request");
+    assert.equal(await available(), false);
+    continueDraft(queued);
+    await waitReady(queued.id, 3);
+    await until(available, "first review restores approval after a neutral reply");
+    check("A neutral reply before the first review leaves approval blocked until the user starts review and the agent confirms the draft");
+    await display(pending.id);
+
     continueDraft(pending);
     await waitReply(pending.id);
     await waitWriter(pending.id, "initial question writer released");
@@ -570,13 +613,15 @@ try {
     await showStatus("draft_discussion.failed", { reason: "Fixture provider unavailable" });
     assert.equal(await available(), false);
     cli(["approve", failure.id], { revision: show(failure.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    const failedWithNeutralReply = await sendNeutral(failure.id);
+    assert.equal(failedWithNeutralReply.draftDiscussion?.phase, "failed");
     failProvider = false;
     const failedRevision = show(failure.id).revision;
     await activate(localization.text("draft_discussion.retry", {}, "ru"), "mouse");
     await until(() => show(failure.id).revision > failedRevision, "draft retry reaches the board");
-    await waitReady(failure.id);
+    await waitReady(failure.id, 3);
     await until(available, "approval enabled after retry");
-    check("Provider failure blocks approval; retry from the dialogue restores it after a successful review");
+    check("A neutral reply after a failed review leaves approval blocked; the regular retry restores it after successful review");
 
     await evaluate("window.taskboard.menuAction('new-window')");
     const other = BrowserWindow.getAllWindows().find(candidate => candidate.id !== window.id);
@@ -596,7 +641,7 @@ try {
     assert.equal(show(failure.id).status, "draft");
     await until(async () => !(await available(evaluateOther)), "second window hides the stale approval");
     continueDraft(previous);
-    await waitReady(failure.id, 2);
+    await waitReady(failure.id, 4);
     await until(() => available(evaluateOther), "same edited card ready after a fresh review");
     check("A substantive edit blocks an older window's approval and requires a fresh review");
 
@@ -656,7 +701,6 @@ try {
     cli(["approve", returning.id], { revision: show(returning.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
     await display(returning.id);
     assert.equal(await available(), false);
-    const startLabel = localization.text("draft_discussion.start", {}, "ru");
     await until(() => evaluate(`Boolean(${button(startLabel)})`), "review action for returned draft");
     assert.equal(calls.filter(call => call.context.task.id === returning.id).length, 3);
     await activate(startLabel, "mouse");
@@ -1027,7 +1071,8 @@ try {
     check("Transient chat staging is cleaned");
   }
   if (!live && !(approvalOnly && restart)) {
-    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/desktop/chat-actions.ts", "src/cli/archive.ts", "src/cli/main.ts",
+    const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/desktop/chat-actions.ts", "src/desktop/board-actions.ts",
+      "src/cli/archive.ts", "src/cli/main.ts",
       "src/cli/model.ts", "src/cli/storage.ts", "src/cli/tasks.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
       "src/desktop/locales/ru.json", "src/desktop/preload.cjs", "scripts/check-draft-discussion.mjs",
       "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts"];

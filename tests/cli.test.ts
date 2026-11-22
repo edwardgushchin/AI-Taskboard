@@ -136,6 +136,7 @@ test("approval waits for the last saved clarification to close", t => {
     replyTo: finalAnswer.history.length - 1,
     revision: finalAnswer.revision,
     awaitingAnswer: false,
+    confirmsDraft: true,
   });
   assert.equal(closed.awaitingAnswer, false);
   assert.equal(cli(root, approve, { actor: "manager", revision: closed.revision }).status, "ready");
@@ -188,6 +189,43 @@ test("approval waits for the last saved clarification to close", t => {
   assert.equal(cli(root, ["approve", existing.id], { revision: reviewed.revision }).status, "ready");
 });
 
+test("neutral draft replies cannot approve a draft before or after a failed review", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const settings = { model: "fixture", effort: "low" };
+  for (const failed of [false, true]) {
+    const draft = cli(root, ["create"], { title: failed ? "Retry draft" : "New draft" });
+    const id = draft.id;
+    const discuss = ["draft-discussion", id];
+    if (failed) {
+      const running = cli(root, discuss, { revision: draft.revision, phase: "running" });
+      cli(root, discuss, { revision: running.revision, phase: "failed", reason: "Fixture unavailable" });
+    }
+
+    const owner = cli(root, ["chat", id], { ...settings, text: "Hello." });
+    const reply = {
+      ...settings, actor: "agent", text: "Hello!", replyTo: owner.history.length - 1,
+      revision: owner.revision, awaitingAnswer: false,
+    };
+    for (const invalid of [{ confirmsDraft: "true" }, { confirmsDraft: true, awaitingAnswer: true }]) {
+      cli(root, ["chat", id], { ...reply, ...invalid }, "INVALID_INPUT");
+    }
+    const neutral = cli(root, ["chat", id], failed ? { ...reply, confirmsDraft: false } : reply);
+    assert.equal(neutral.awaitingAnswer, false);
+    assert.equal(neutral.draftConfirmed, false);
+    assert.equal(neutral.draftDiscussion?.phase, failed ? "failed" : undefined);
+    cli(root, ["approve", id], { revision: neutral.revision }, "DRAFT_DISCUSSION_REQUIRED");
+
+    const retry = cli(root, discuss, { revision: neutral.revision, phase: "running" });
+    const confirmed = cli(root, ["chat", id], {
+      ...settings, actor: "agent", text: "The brief is ready for approval.", awaitingAnswer: false,
+      draftDiscussion: true, revision: retry.revision,
+    });
+    assert.equal(confirmed.draftConfirmed, true);
+    assert.equal(cli(root, ["approve", id], { revision: confirmed.revision }).status, "ready");
+  }
+});
+
 test("manual boards move tasks without draft discussion", t => {
   const root = fixture(t);
   const board = cli(root, ["init"], { boardType: "manual" });
@@ -219,6 +257,7 @@ test("legacy draft confirmation survives metadata edits and expires on a brief c
     actor: "agent",
     text: "The XLSX export is ready for approval.",
     awaitingAnswer: false,
+    confirmsDraft: true,
     replyTo: message.history.length - 1,
     revision: message.revision,
   });
@@ -377,7 +416,7 @@ test("restoring an attachment to a dialogue invalidates the draft confirmation",
   const user = cli(root, ["chat", draft.id], { ...settings, text: "Use XLSX." });
   const confirmed = cli(root, ["chat", draft.id], {
     ...settings, actor: "agent", text: "Ready for approval.", replyTo: user.history.length - 1,
-    revision: user.revision, awaitingAnswer: false,
+    revision: user.revision, awaitingAnswer: false, confirmsDraft: true,
   });
   const image = join(root, "preview.png");
   writeFileSync(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64"));
@@ -1660,7 +1699,17 @@ test("task chat records a clarification once, with its sources and lifecycle int
   assert.equal(show().history.some(event => event.action === "start"), false);
   assert.deepEqual(cli(root, ["show", other.id]), other);
 
-  approveFixture(root, ["approve", draft.id]);
+  const current = show();
+  cli(root, ["chat", draft.id], {
+    ...request,
+    actor: "agent",
+    replyTo: current.history.findLastIndex(event => event.chat),
+    revision: current.revision,
+    text: "Постановка проверена, уточнений больше нет.",
+    awaitingAnswer: false,
+    confirmsDraft: true,
+  });
+  cli(root, ["approve", draft.id]);
   cli(root, ["start", draft.id]);
   const token = cli(root, ["preview", draft.id]).token;
   cli(root, ["submit", draft.id], { token, noChanges: true, summary: "Layout checked", checks: ["Checked"] });

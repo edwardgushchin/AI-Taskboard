@@ -209,7 +209,7 @@ export type ArtifactKind = "png" | "text";
 
 export interface Task {
   awaitingAnswer?: boolean;
-  draftConfirmed?: true;
+  draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
   expertId?: string;
@@ -391,17 +391,21 @@ export function requireState(task: Task, allowed: readonly TaskState[]): void {
   }
 }
 
+export function hasDraftConfirmation(task: Task): boolean {
+  return task.awaitingAnswer === false && task.draftConfirmed !== false && !task.draftDiscussion;
+}
+
 export function invalidateDraftDiscussion(task: Task): Task {
   if (task.status !== "draft") {
     return {
       ...task,
-      draftConfirmed: undefined,
+      draftConfirmed: false,
       awaitingAnswer: task.awaitingAnswer === true ? true : undefined,
     };
   }
   return {
     ...task,
-    draftConfirmed: undefined,
+    draftConfirmed: false,
     awaitingAnswer: undefined,
     draftDiscussion: task.draftDiscussion?.phase === "running" ? task.draftDiscussion : { phase: "queued" },
   };
@@ -437,7 +441,7 @@ export function record(
   }
   // Outside a draft, awaitingAnswer tracks the dialogue independently of approval.
   if (task.status === "draft" && next !== "draft") {
-    task = { ...task, draftConfirmed: task.awaitingAnswer === false && !task.draftDiscussion ? true : undefined };
+    task = { ...task, draftConfirmed: hasDraftConfirmation(task) };
   } else if (task.status !== "draft" && next === "draft") {
     if (task.awaitingAnswer === false && !task.draftConfirmed) {
       task = { ...task, awaitingAnswer: undefined };

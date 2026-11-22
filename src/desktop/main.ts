@@ -1267,7 +1267,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       scratch!, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
       report => saveTaskTokenUsage(project, id, "discussion", report),
       control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
-      automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt))).finally(() => ready.reject(new Error("The agent session ended.")));
+      automatic === undefined ? undefined : "initial", task.status === "review", Boolean(task.closedAt), inspectDraft)).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     await Promise.all(pendingSteering);
     signal.throwIfAborted();

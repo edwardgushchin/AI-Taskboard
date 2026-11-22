@@ -15,7 +15,7 @@ import {
   addAttachment, addChatMessage, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
-import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
+import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, hasDraftConfirmation, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import { activeManagerGoal } from "./manager-goal.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
@@ -114,7 +114,7 @@ function compactTask(task: Task) {
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined, acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, criteria: task.criteria, goalThreadId, managerGoalId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
-    awaitingAnswer: task.awaitingAnswer, reviewReturn: task.reviewReturn,
+    awaitingAnswer: task.awaitingAnswer, draftConfirmed: task.draftConfirmed, reviewReturn: task.reviewReturn,
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     activity: taskActivity(task),
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
@@ -835,14 +835,14 @@ function run(
     const phase = task.draftDiscussion?.phase;
     if (isManual(store.index.settings) || task.status !== "draft" ||
         !(input.phase === "running" && (phase === "queued" || phase === "failed" ||
-          phase === undefined && task.awaitingAnswer === undefined) ||
+          phase === undefined && task.awaitingAnswer !== true && !hasDraftConfirmation(task)) ||
           (input.phase === "failed" || input.phase === "completed") && phase === "running")) {
       throw new TaskboardError("CHAT_CHANGED", "The draft discussion is no longer in this state.");
     }
     const draftDiscussion: Task["draftDiscussion"] = input.phase === "failed"
       ? { phase: "failed", reason: text(input.reason, "reason", true).slice(0, 1500) }
       : input.phase === "running" ? { phase: "running" } : undefined;
-    return store.save(record({ ...task, draftDiscussion }, "draft-discussion-" + input.phase, "agent"));
+    return store.save(record({ ...task, draftDiscussion, draftConfirmed: false }, "draft-discussion-" + input.phase, "agent"));
   }
   if (command === "run-log") {
     const logged = recordRunLog(task, input);
@@ -857,7 +857,7 @@ function run(
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
   if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
-  if (command === "approve" && (task.awaitingAnswer !== false || task.draftDiscussion)) {
+  if (command === "approve" && !hasDraftConfirmation(task)) {
     throw new TaskboardError("DRAFT_DISCUSSION_REQUIRED", "The agent must confirm the current draft before approval.");
   }
   const briefFields = ["title", "description", "criteria", "questions", "subtasks", "dependencies"] as const;

@@ -1,4 +1,5 @@
 const manualBoard = () => frame.board?.settings.boardType === "manual";
+const hasDraftConfirmation = task => task.awaitingAnswer === false && task.draftConfirmed !== false && !task.draftDiscussion;
 const manualColumns = () => frame.board?.settings.manualColumns ?? [];
 const api = window.taskboard;
 const byId = id => document.getElementById(id);
@@ -4581,7 +4582,7 @@ async function showTask(id, dialogue = false) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft") {
-    if (task.awaitingAnswer === true || !manualBoard() && (task.awaitingAnswer !== false || task.draftDiscussion)) {
+    if (task.awaitingAnswer === true || !manualBoard() && !hasDraftConfirmation(task)) {
       const phase = task.draftDiscussion?.phase;
       const label = task.awaitingAnswer === true ? "task_question.approval_blocked" :
         phase ? "draft_discussion." + phase : "draft_discussion.confirmation_required";

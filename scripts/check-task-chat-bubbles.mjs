@@ -227,7 +227,7 @@ void (async () => {
         project: frame.project, id: ${JSON.stringify(card.id)}, type: 'run',
         items: [{ id: 'foreign', type: 'mcpToolCall', title: 'Foreign executor event', text: '', status: 'completed' }]
       })`);
-      const encoded = JSON.stringify({ text: reply, awaitingAnswer: false });
+      const encoded = JSON.stringify({ text: reply, awaitingAnswer: false, confirmsDraft: false });
       const publish = text => {
         provider.publish([...activity, {
           id: "reply", type: "agentMessage", phase: "final_answer", text, at: provider.at, status: "inProgress",
@@ -419,7 +419,7 @@ void (async () => {
       await until(() => provider, "retry provider after error");
       await until(() => evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "continued reply thinking");
       const continued = "Обработка продолжена.";
-      provider.finish.resolve({ text: JSON.stringify({ text: continued, awaitingAnswer: false }) });
+      provider.finish.resolve({ text: JSON.stringify({ text: continued, awaitingAnswer: false, confirmsDraft: false }) });
       await until(() => interruptedMessages().length === 3, "continued reply saved");
       await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(interrupted.id)}))`), "continued writer released");
       await showInterrupted();
@@ -432,7 +432,7 @@ void (async () => {
       await until(() => provider, "ordinary message provider");
       await until(() => evaluate("Boolean(document.querySelector('.chat-turn .chat-thinking'))"), "ordinary message thinking");
       const ordinary = "В карточке записано требование автоматически удалить рабочую копию.";
-      const encoded = JSON.stringify({ text: ordinary, awaitingAnswer: false });
+      const encoded = JSON.stringify({ text: ordinary, awaitingAnswer: false, confirmsDraft: false });
       provider.finish.resolve({ text: encoded });
       await until(() => interruptedMessages().length === 5, "ordinary reply without tool events saved");
       await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.replyingTasks?.includes(${JSON.stringify(interrupted.id)}))`), "ordinary writer released");

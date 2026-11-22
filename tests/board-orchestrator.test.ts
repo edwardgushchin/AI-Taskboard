@@ -258,7 +258,7 @@ function fixture(t: TestContext) {
         assert.match(session.mcpTools.find(tool => tool.name === "task_message")!.description, /only what this executor needs to act/);
         const approval = session.mcpTools.find(tool => tool.name === "task_approve")!.description;
         assert.match(approval, /agent confirms its current brief/);
-        assert.match(approval, /task_wait.*task_show.*awaitingAnswer is false.*approvalRequirements is empty/);
+        assert.match(approval, /task_wait.*task_show.*awaitingAnswer is false.*draftConfirmed is not false.*approvalRequirements is empty/);
       }
       assert.equal(session.title, "Project manager for project");
       const expectedTools = cleanupTurn ? ["task_cleanup_status", "task_cleanup", "project_path", "project_sha256"] : manualTurn ? ["expert_list", "expert_context", "expert_skill", "ask_user", "tag_set_color", "github_read"] : reviewTurn ? [
@@ -2656,6 +2656,7 @@ test("the manager cannot approve a draft with a newly saved question", async t =
       replyTo: answer.history.length - 1,
       revision: answer.revision,
       awaitingAnswer: false,
+      confirmsDraft: true,
     });
     assert.equal((await approve(closed.revision)).data.status, "ready");
     return { text: "Draft approved after clarification." };

@@ -1249,14 +1249,14 @@ function taskChat(task, renderStageWork) {
   controls.append(attach, microphone, retryReply, send);
   composer.append(quoteDraft.root, pendingFiles, input, fileInput, controls, feedback);
   const discussionPhase = task.draftDiscussion?.phase ??
-    (task.awaitingAnswer === undefined ? "unreviewed" : undefined);
+    (task.awaitingAnswer !== true && !hasDraftConfirmation(task) ? "unreviewed" : undefined);
   if (!manualBoard() && task.status === "draft" && discussionPhase && discussionPhase !== "running") {
     const phase = discussionPhase;
     const reason = task.draftDiscussion?.reason;
     const discussion = element("div", undefined, "chat-status");
     discussion.setAttribute("role", "status");
     discussion.append(element("span", () => t("draft_discussion." + phase, { reason })));
-    if (phase === "failed" || phase === "unreviewed" && !frame.replyingTasks?.includes(task.id)) {
+    if ((phase === "failed" || phase === "unreviewed") && !frame.replyingTasks?.includes(task.id)) {
       const retry = button(() => t(phase === "failed" ? "draft_discussion.retry" : "draft_discussion.start"), async () => {
         retry.disabled = true;
         draft.error = "";
