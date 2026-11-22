@@ -27,7 +27,7 @@ import type { configuredCodex } from "./codex.ts";
 import { requestExecutorAccess } from "./codex-chat.ts";
 import { windowsGuiEvidence } from "./windows-gui.ts";
 import type { CliReply } from "./cli.ts";
-import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
@@ -317,10 +317,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     throw error;
   }
   const exited = new Promise<void>(resolve => child.once("close", resolve));
+  const stop = stopCodexProcess(child);
   let releaseProvider: ReturnType<typeof trackProvider>;
   try { releaseProvider = trackProvider(project, child.pid); }
   catch (error) {
-    child.kill();
+    await stop();
+    child.stdout.destroy();
+    child.stderr.destroy();
     await exited;
     try { await closeTools(); } finally { await removeRunTemp(); }
     throw error;
@@ -338,7 +341,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let probePending = false;
   const timeout = setTimeout(() => {
     rpc.fail(new Error("Codex did not start the task in time."));
-    child.kill();
+    void stop();
     rpc.close();
   }, 60_000);
   const close = async () => {
@@ -348,8 +351,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", interrupt);
     rpc.close();
+    await stop();
     child.stdin.end();
-    child.kill();
     await exited;
     try {
       if (probePending) {
@@ -406,9 +409,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const { request, send } = rpc;
   function interrupt() {
     const reason = signal?.reason instanceof Error ? signal.reason : new Error("The task run was interrupted.");
-    if (control) void control.interrupt().catch(error => { rpc.fail(error); child.kill(); });
-    else { rpc.fail(reason); child.kill(); }
-    interruptTimeout = setTimeout(() => { rpc.fail(reason); child.kill(); }, 5000);
+    if (control) void control.interrupt().catch(error => { rpc.fail(error); void stop(); });
+    else { rpc.fail(reason); void stop(); }
+    interruptTimeout = setTimeout(() => { rpc.fail(reason); void stop(); }, 5000);
   }
   signal?.addEventListener("abort", interrupt, { once: true });
   async function monitor(turnId: string) {

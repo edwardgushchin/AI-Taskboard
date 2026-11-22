@@ -4,7 +4,7 @@ import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
 import type { ManagerAccess } from "./codex.ts";
@@ -81,14 +81,21 @@ async function withServer<T>(
         ...(process.platform === "win32" ? ["--disable", "prefer_mxc", "-c", "windows.sandbox=" + JSON.stringify(client.windowsSandbox ?? "mxc")] : []),
       ]),
     ] : []),
-  ], { cwd, env: mcp ? { ...(client.env ?? process.env), ...mcp.env } : client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"], signal });
+  ], { cwd, env: mcp ? { ...(client.env ?? process.env), ...mcp.env } : client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
   const exited = new Promise<void>(resolve => child.once("close", resolve));
+  const stop = stopCodexProcess(child);
   let releaseProvider: ReturnType<typeof trackProvider>;
   try { releaseProvider = trackProvider(cwd, child.pid); }
-  catch (error) { child.kill(); await exited; throw error; }
+  catch (error) { await stop(); child.stdout.destroy(); await exited; throw error; }
   child.once("close", releaseProvider);
   let notify: Notification | undefined;
   const rpc = codexRpc(child, message => notify?.(message), onRequest);
+  const abort = () => {
+    rpc.fail(signal?.reason instanceof Error ? signal.reason : new Error("The Codex session was interrupted."));
+    void stop();
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   let timeoutMs = idleTimeoutMs;
   const timeoutError = () => rpc.fail(new Error("Codex did not respond in time."));
   let timeout = setTimeout(timeoutError, idleTimeoutMs);
@@ -118,11 +125,15 @@ async function withServer<T>(
     return await releaseProvider.run(() => callback({ client, request, receive, refreshTimeout }));
   } finally {
     clearTimeout(timeout);
-    child.stdin.end();
+    signal?.removeEventListener("abort", abort);
+    const force = rpc.failed;
     rpc.close();
-    const shutdown = setTimeout(() => child.kill(), 2000);
+    if (force) await stop();
+    child.stdin.end();
+    const shutdown = setTimeout(stop, 2000);
     await exited;
     clearTimeout(shutdown);
+    await stop();
   }
 }
 
