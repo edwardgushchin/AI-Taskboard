@@ -1,4 +1,7 @@
 {
+  "ui.acceptance_wait_local_changes": "Приёмка ждёт устранения конфликта с локальными правками",
+  "ui.acceptance_wait_local_changes_help": "Сохраните конфликтующие правки в отдельном коммите или отложите их в Git stash. Доска перепроверит сдачу после изменения целевой рабочей копии.",
+  "ui.acceptance_wait_diagnostics": "Диагностика приёмки",
   "archive.cancelled.action": "Архивировать отменённые",
   "archive.cancelled.count": "Перенесено карточек: {count}",
   "archive.cancelled.issues": "Ошибки:",

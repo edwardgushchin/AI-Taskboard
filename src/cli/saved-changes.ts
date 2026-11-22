@@ -199,7 +199,7 @@ export function checkPreserveChanges(
     throw new TaskboardError("LOCAL_CHANGES_CONFLICT", "The task would overwrite local files.", { path, paths: collisions });
   }
   // Create a tracked snapshot for the check while leaving the real index and files in place.
-  const sha = git(path, ["stash", "create", "Taskboard local changes check"]).trim();
+  const sha = git(path, ["stash", "create", "Taskboard local changes check"], { GIT_OPTIONAL_LOCKS: "0" }).trim();
   if (!sha) throw new TaskboardError("LOCAL_CHANGES_CHANGED", "Local changes have changed. Review the task again.", { path });
   const checkHead = git(path, ["commit-tree", "--no-gpg-sign", tree, "-p", head, "-m", "Check local changes"]).trim();
   try {

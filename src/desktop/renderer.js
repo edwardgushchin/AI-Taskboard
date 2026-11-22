@@ -1033,6 +1033,8 @@ function renderAgentRunStatus(target, task, { compactQueue = false } = {}) {
       status = quotaLabel();
     } else if (repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)) {
       status = acceptanceRepairStatus(task.id, repair);
+    } else if (boardTask?.acceptanceWaitUnchanged === true) {
+      status = t("ui.acceptance_wait_local_changes");
     } else if (routingRetry) {
       if (routingRetry.exhausted && !compactQueue) {
         if (target.firstElementChild?.textContent !== routingRetry.reason || !target.querySelector("button")) {
@@ -1136,7 +1138,8 @@ function card(task) {
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id), frame.routingRetries?.[task.id],
-    frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
+    frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair,
+    task.acceptanceWaitUnchanged, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
     task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, needsAnswer,
@@ -4522,6 +4525,10 @@ async function showTask(id, dialogue = false) {
   taskInSheet = task;
   openTaskSheet(task);
   if (task.status === "blocked" && task.blocked) body.append(blockerBanner(task.blocked));
+  const waitState = frame.board?.tasks.find(card => card.id === task.id)?.acceptanceWaitUnchanged;
+  if (waitState === true && task.acceptanceWait) {
+    body.append(acceptanceWaitDetails(task.acceptanceWait, openDetails.has("acceptance-wait-diagnostics")));
+  }
   if (showUnconfirmedLaunch(task)) {
     const explanation = element("p", () => t("ui.unconfirmed_executor_launch"), "muted");
     explanation.id = "task-unconfirmed-launch";
@@ -4859,6 +4866,20 @@ async function showAcceptedTask(task) {
   if (messages.length) notice(messages.join("\n"));
 }
 
+function acceptanceWaitDetails(wait, open = false) {
+  const section = element("div", undefined);
+  section.id = "acceptance-local-wait";
+  const status = element("p", () => t("ui.acceptance_wait_local_changes"));
+  status.setAttribute("role", "status");
+  section.append(status);
+  if (wait.paths.length) section.append(element("p", wait.paths.join(", "), "muted"));
+  section.append(element("p", () => t("ui.acceptance_wait_local_changes_help"), "muted"));
+  const details = taskDetails("acceptance-wait-diagnostics", () => t("ui.acceptance_wait_diagnostics"), undefined, open);
+  details.append(element("pre", JSON.stringify(wait.error, null, 2), "task-details-content"));
+  section.append(details);
+  return section;
+}
+
 function acceptanceRepairStatus(id, repair) {
   if (frame.quotaTasks?.includes(id)) return quotaLabel();
   if (repair.reason) return repair.reason;
@@ -4892,6 +4913,10 @@ async function showReview(task, messageDraft, acceptanceError) {
   const canAccept = !review.pendingModeChanged && (!hybrid || review.pending || review.awaitingHumanAcceptance);
   const decision = { revision: review.revision, targetHead: review.targetHead, reviewModeVersion: review.reviewModeVersion };
   const showReviewStatus = editor => {
+    const card = frame.board?.tasks.find(entry => entry.id === task.id);
+    if (card?.acceptanceWaitUnchanged === true && card.acceptanceWait) {
+      editor.before(acceptanceWaitDetails(card.acceptanceWait));
+    }
     if (!canAccept) editor.querySelector("button[type=submit]").disabled = true;
     if (!hybrid || review.pendingModeChanged) return;
     editor.before(element("p", () => t(canAccept ? "ui.awaiting_human_acceptance" : "ui.awaiting_reviewer_approval"), "muted"));
@@ -6389,7 +6414,9 @@ function update(next) {
     const currentMode = current?.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode;
     const previousVersion = previous?.reviewModeOverride?.version ?? previousBoard?.settings.reviewModeVersion;
     const currentVersion = current?.reviewModeOverride?.version ?? frame.board?.settings.reviewModeVersion;
-    if (current && (previousMode !== currentMode || ((previousMode === "reviewer-human" || currentMode === "reviewer-human") &&
+    if (current && (previousMode !== currentMode || current.acceptanceWaitUnchanged !== previous?.acceptanceWaitUnchanged ||
+        current.acceptanceWait?.fingerprint !== previous?.acceptanceWait?.fingerprint ||
+        ((previousMode === "reviewer-human" || currentMode === "reviewer-human") &&
         (current.revision !== previous?.revision || current.reviewApproved !== previous?.reviewApproved ||
          current.reviewTargetHead !== previous?.reviewTargetHead || previousVersion !== currentVersion)))) {
       if (current.status === "review") void showReview({ ...taskInSheet, ...current }, body.querySelector("[name=message]")?.value);
@@ -6410,6 +6437,8 @@ function update(next) {
     const archived = frame.board?.archived.find(entry => entry.id === taskInSheet.id);
     const cleaned = taskInSheet.cleanupAvailable && frame.board?.cleanedTasks?.includes(taskInSheet.id);
     if (Boolean(byId("task-unconfirmed-launch")) !== showUnconfirmedLaunch(taskInSheet) ||
+        Boolean(byId("acceptance-local-wait")) !== (task?.acceptanceWaitUnchanged === true) ||
+        (task?.acceptanceWaitUnchanged === true && task.acceptanceWait?.fingerprint !== taskInSheet.acceptanceWait?.fingerprint) ||
         Boolean(byId("task-stop-waiting")) !== Boolean(frame.waitingTasks?.includes(taskInSheet.id)) ||
         previousBoard?.settings.reviewMode !== frame.board?.settings.reviewMode ||
         JSON.stringify(previousBoard?.settings.manualColumns) !== JSON.stringify(frame.board?.settings.manualColumns) || cleaned || (task && (task.revision !== taskInSheet.revision ||

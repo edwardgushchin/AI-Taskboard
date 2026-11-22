@@ -9,7 +9,7 @@ import { existsSync, lstatSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher, Stats } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual, parseArgs } from "node:util";
-import { applyAcceptance, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
+import { acceptanceWaitUnchanged, applyAcceptance, cleanAcceptedTask, compareAcceptedTree, inspectReview, inspectReviewDiff, inspectReviewQueue, reopenConflictingReview, reviewDetails, verifyReviewDecision } from "./acceptance.ts";
 import { describeSavedChanges, restoreSavedChanges } from "./saved-changes.ts";
 import {
   addAttachment, addChatMessage, archiveCancelled, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
@@ -113,7 +113,8 @@ function compactTask(task: Task) {
   return { reviewModeOverride: task.reviewModeOverride, expertId: task.expertId, expertTeam: task.expertTeam, expertStage: task.expertStage, expertStages: task.expertStages,
     reviewDecision: status === "review" ? reviewDecisionSequence(task) : undefined,
     reviewSubmissionSequence: status === "review" ? task.history.findLastIndex(event => event.action === "submit" && event.to === "review") + 1 : undefined,
-    acceptanceRepair: task.acceptanceRepair, id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
+    acceptanceRepair: task.acceptanceRepair, acceptanceWait: task.acceptanceWait,
+    id, title, description: description.slice(0, 512), status, revision, tags, priority, attachments,
     coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, criteria: task.criteria, goalThreadId, managerGoalId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     awaitingAnswer: task.awaitingAnswer, draftConfirmed: task.draftConfirmed, reviewReturn: task.reviewReturn,
@@ -130,8 +131,8 @@ function compactTask(task: Task) {
     submittedAt: status === "review" ? task.history.findLast(event => event.action === "submit" && event.to === "review")?.at : undefined };
 }
 
-function taskReceipt({ id, status, revision, git, result }: Task) {
-  return { id, status, revision, git, result };
+function taskReceipt({ id, status, revision, git, result, acceptanceWait }: Task) {
+  return { id, status, revision, git, result, acceptanceWait };
 }
 
 function taskLaunchState(task: Task) {
@@ -185,10 +186,21 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
       return card;
     });
     const statuses = new Map([...cards.map(card => card.task), ...archived].map(task => [task.id, task.status]));
+    const acceptanceWaits = new Map<string, boolean>();
     return { ...header, tasks: cards.map(({ task, target, approval, note }) => {
       let reviewTargetHead: string | null | undefined;
       const mode = taskReviewMode(task, header.settings);
       const reviewPending = task.status === "review" && exists(store.pendingPath(task.id)) ? true as const : undefined;
+      const waiting = task.acceptanceWait;
+      let waitUnchanged: boolean | undefined;
+      if (waiting && target && mode === "reviewer" &&
+          waiting.reviewModeVersion === taskReviewModeVersion(task, header.settings)) {
+        const key = JSON.stringify([target, waiting.fingerprint]);
+        if (!acceptanceWaits.has(key)) {
+          acceptanceWaits.set(key, acceptanceWaitUnchanged(store.location.repository, target, waiting.fingerprint));
+        }
+        waitUnchanged = acceptanceWaits.get(key);
+      }
       const checkReviewTarget = mode === "reviewer-human" ||
         (mode === "reviewer" && (note || (approval && (!header.settings.autoMode || !task.expertReviewPlanned))));
       if (task.status === "review" && checkReviewTarget) {
@@ -205,6 +217,7 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
         note.reviewMode === mode && note.reviewModeVersion === taskReviewModeVersion(task, header.settings) &&
         note.targetHead === reviewTargetHead;
       return { ...task, reviewTargetHead, reviewPending, reviewApprovalTargetHead: approval?.targetHead,
+        acceptanceWaitUnchanged: waitUnchanged,
         ...(reviewNoted ? { reviewNoted: true } : {}), ...(task.dependencies?.length
         ? { unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : {}) };
     }),

@@ -4,14 +4,14 @@ import { boardReviewMode, taskReviewMode, taskReviewModeVersion } from "../cli/m
 
 type BoardState = {
   settings: BoardSettings;
-  tasks: (Task & { reviewApproved?: boolean; reviewPending?: boolean; reviewApprovalTargetHead?: string | null })[];
+  tasks: (Task & { reviewApproved?: boolean; reviewPending?: boolean; reviewApprovalTargetHead?: string | null; acceptanceWaitUnchanged?: boolean })[];
   managerInbox?: { id: string; sequence: number; kind: string }[];
 };
 
 export function pendingReviewApprovals(board: BoardState) {
   if (board.settings.autoMode) return [];
   return board.tasks.filter(task => task.status === "review" && task.reviewApproved &&
-    !task.reviewPending && !task.acceptanceRepair && taskReviewMode(task, board.settings) === "reviewer")
+    !task.reviewPending && !task.acceptanceRepair && !task.acceptanceWaitUnchanged && taskReviewMode(task, board.settings) === "reviewer")
     .map(task => ({
       id: task.id,
       key: JSON.stringify([task.id, task.revision, taskReviewModeVersion(task, board.settings), task.reviewApprovalTargetHead]),
