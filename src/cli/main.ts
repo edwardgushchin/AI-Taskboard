@@ -33,7 +33,7 @@ import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
-import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencyRequest, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages, taskQuestionAudience } from "./task-messages.ts";
+import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencyRequest, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages, taskQuestionAudience, taskQuestionState } from "./task-messages.ts";
 import { taskActivity } from "./task-activity.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -848,7 +848,7 @@ function run(
     const task = taskWithCurrentWorktree(store, stored);
     const details = {
       artifacts: artifactFiles(store, id), savedChanges: describeSavedChanges(store, task),
-      questionAudience: taskQuestionAudience(task),
+      ...taskQuestionState(task),
       ...(task.status === "draft" ? { approvalRequirements: approvalRequirements(task, store.index.settings) } : {}),
       ...(task.expertTeam ? { expertStageStatus: {
         work: expertStagesStatus(task, "work"), review: expertStagesStatus(task, "review"),

@@ -58,10 +58,16 @@ export function draftManagerReply(task: Task, sequence: number, to: string) {
     event.messageKind !== "question" && !deferredDependencyReply(task, sequence, event)) + 1;
 }
 
-export function taskQuestionAudience(task: Task): "owner" | "manager" | undefined {
-  if (task.status === "cancelled") return;
-  if (task.awaitingAnswer === true && task.awaitingOwnerAnswer === true) return "owner";
+export function taskQuestionAudience(task: Task) {
+  return taskQuestionState(task).questionAudience;
+}
 
+export function taskQuestionState(task: Task): {
+  questionAudience?: "owner" | "manager";
+  openOwnerQuestionSequences: number[];
+} {
+  const openOwnerQuestionSequences: number[] = [];
+  if (task.status === "cancelled") return { openOwnerQuestionSequences };
   let waitingForManager = task.status === "draft" && task.draftDiscussion?.managerReply !== undefined;
   const answered = new Set<number>();
   for (let index = task.history.length - 1; index >= 0; index--) {
@@ -72,7 +78,9 @@ export function taskQuestionAudience(task: Task): "owner" | "manager" | undefine
     if (!mail && task.status === "draft") continue;
     if (event.messageKind === "question") {
       if (answered.has(index + 1)) continue;
-      if (mail?.to === "owner" && mail.from !== "owner") return "owner";
+      if (mail?.to === "owner" && mail.from !== "owner") {
+        openOwnerQuestionSequences.push(index + 1);
+      }
       if ((!mail && event.actor === "agent") ||
           mail?.to === "manager" && (event.actor === "agent" || event.actor === "reviewer")) {
         waitingForManager = true;
@@ -87,9 +95,15 @@ export function taskQuestionAudience(task: Task): "owner" | "manager" | undefine
       }
     }
   }
-  if (waitingForManager) return "manager";
+  if (openOwnerQuestionSequences.length || task.awaitingAnswer === true && task.awaitingOwnerAnswer === true) {
+    return { questionAudience: "owner", openOwnerQuestionSequences };
+  }
+  if (waitingForManager) return { questionAudience: "manager", openOwnerQuestionSequences };
   // Older replies recorded one flag for both audiences.
-  if (task.awaitingAnswer === true && task.awaitingOwnerAnswer === undefined) return "owner";
+  if (task.awaitingAnswer === true && task.awaitingOwnerAnswer === undefined) {
+    return { questionAudience: "owner", openOwnerQuestionSequences };
+  }
+  return { openOwnerQuestionSequences };
 }
 
 export function pendingDraftDependency(task: Task, question: number) {

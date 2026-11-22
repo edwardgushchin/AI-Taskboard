@@ -9,7 +9,7 @@ import { addChatMessage, readTask } from "../src/cli/archive.ts";
 import { sendTeamMessage } from "../src/cli/expert-team.ts";
 import { TaskboardError } from "../src/cli/model.ts";
 import { BoardStore, initializeBoard, validateCard } from "../src/cli/storage.ts";
-import { managerInbox, sendTaskMessage, taskQuestionAudience } from "../src/cli/task-messages.ts";
+import { managerInbox, sendTaskMessage, taskQuestionAudience, taskQuestionState } from "../src/cli/task-messages.ts";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8");
@@ -156,9 +156,12 @@ test("team questions use the saved recipient and close only on a linked reply fr
   sendTeamMessage(store, id, "owner", { to: id, text: "Thanks." });
   sendTeamMessage(store, id, "owner", { kind: "question", to: id, replyTo: owner.sequence, text: "Which report?" });
   assert.equal(audience(), "owner");
+  assert.deepEqual(taskQuestionState(read()).openOwnerQuestionSequences, [owner.sequence]);
+  assert.deepEqual(taskQuestionState({ ...read(), status: "cancelled" }).openOwnerQuestionSequences, []);
 
   sendTeamMessage(store, id, "owner", { to: id, replyTo: owner.sequence, text: "The team." });
   assert.equal(audience(), "manager");
+  assert.deepEqual(taskQuestionState(read()).openOwnerQuestionSequences, []);
   sendTeamMessage(store, id, "manager", { to: id, replyTo: secondManager.sequence, text: "Use the shared folder." });
   assert.equal(audience(), "manager");
   sendTeamMessage(store, id, "manager", { to: "reviewer", replyTo: manager.sequence, text: "Use CSV." });

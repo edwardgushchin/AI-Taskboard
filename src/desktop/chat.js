@@ -1043,10 +1043,13 @@ function taskChat(task, renderStageWork, discussionHandoff) {
   let day;
   let lastMessage;
   let lastMessageIndex = -1;
+  let latestOwnerQuestion;
+  const openOwnerQuestions = new Set(task.openOwnerQuestionSequences);
   for (const { event, index } of events) {
     const returned = event.actor === "reviewer" && event.action === "request-changes";
-    const conversation = ["chat", "comment", "questions"].includes(event.action) || returned;
-    if (event.expertMessage) continue;
+    const ownerQuestion = openOwnerQuestions.has(index + 1);
+    const conversation = ["chat", "comment", "questions"].includes(event.action) || returned || ownerQuestion;
+    if (event.expertMessage && !ownerQuestion) continue;
 
     if (renderStageWork && event.action === "run-log" && event.run?.length) savedStageItems.set(index, event.run);
     const executorEvent = event.action === "run-log" && event.actor === "agent" && index > sessionStart &&
@@ -1085,7 +1088,7 @@ function taskChat(task, renderStageWork, discussionHandoff) {
 
     const entry = element("li", undefined, "chat-entry");
     entry.dataset.actor = event.actor;
-    const coordination = returned || (event.actor === "manager" && event.text);
+    const coordination = returned || ownerQuestion || (event.actor === "manager" && event.text);
     if (coordination) entry.classList.add("chat-coordination");
     entry.append(element("span", author, "chat-author"));
     if (attachments.length) {
@@ -1121,6 +1124,7 @@ function taskChat(task, renderStageWork, discussionHandoff) {
     }
     appendChatTime(entry, event.at);
     list.append(entry);
+    if (ownerQuestion) latestOwnerQuestion = entry;
   }
   const workControls = element("li", undefined, "task-work-controls");
   if (missingRuns.size) {
@@ -1314,7 +1318,16 @@ function taskChat(task, renderStageWork, discussionHandoff) {
       renderLiveWork();
     }
   }
-  area.openDialogue = () => selectView("dialogue");
+  area.openDialogue = () => {
+    selectView("dialogue");
+    if (latestOwnerQuestion) {
+      requestAnimationFrame(() => {
+        if (list.hidden || !list.isConnected) return;
+        const questionTop = latestOwnerQuestion.getBoundingClientRect().top;
+        list.scrollTop += questionTop - list.getBoundingClientRect().top;
+      });
+    }
+  };
   selectView(draft.view === "team" || draft.view === "work" ? "work" : "dialogue");
 
   function working() { return Boolean(draft.pending || frame.runningTasks?.includes(task.id) || frame.replyingTasks?.includes(task.id)); }
