@@ -1009,6 +1009,7 @@ function tagBadges(names) {
 
 function renderAgentRunStatus(target, task, { compactQueue = false } = {}) {
   const review = frame.reviewingTasks?.[task.id];
+  const routingRetry = frame.routingRetries?.[task.id];
   const label = review === "reviewer" ? t("ui.reviewer_is_reviewing_d6afb5da") :
     review === "manager" ? t("ui.project_manager_is_reviewing_730137f9") :
     frame.runningTasks?.includes(task.id) ? t("ui.agent_is_working_28ccd334") : "";
@@ -1032,6 +1033,16 @@ function renderAgentRunStatus(target, task, { compactQueue = false } = {}) {
       status = quotaLabel();
     } else if (repair && !(hybridReview && repair.phase === "checking" && !task.reviewApproved)) {
       status = acceptanceRepairStatus(task.id, repair);
+    } else if (routingRetry) {
+      if (routingRetry.exhausted && !compactQueue) {
+        if (target.firstElementChild?.textContent !== routingRetry.reason || !target.querySelector("button")) {
+          const retry = button(() => t("ui.retry_review"), () => api.retryReview(task.id));
+          target.replaceChildren(element("span", routingRetry.reason), retry);
+        }
+        target.hidden = false;
+        return;
+      }
+      status = routingRetry.exhausted ? routingRetry.reason : t("ui.waiting_for_codex_retry");
     } else if (waitsForReview || waitsForExecutor) {
       if (!waitsForReview && (task.mergeRepair || boardTask?.mergeRepair)) {
         status = t(reviewerSlotLabel);
@@ -1124,7 +1135,7 @@ function card(task) {
   const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
-    frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id),
+    frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id), frame.routingRetries?.[task.id],
     frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),

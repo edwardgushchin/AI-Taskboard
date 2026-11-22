@@ -2,11 +2,13 @@ import { trackActiveRun, trackProvider, claimDiscussion, activeRunSummary, obser
 import { providerActions } from "../src/desktop/provider-tools.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexRpc } from "../src/desktop/codex-rpc.ts";
+import { codexRpc, stopCodexProcess } from "../src/desktop/codex-rpc.ts";
+import { isRoutingTimeout } from "../src/desktop/codex-routing-timeout.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { boardProjectRulesPrompt, readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
@@ -80,6 +82,8 @@ test("task discussion streams task usage before success, provider failure, or a 
           const rules = params.additionalContext.ai_taskboard_project_rules.value;
           assert.match(rules, /Reviewer CURRENT rule/);
           assert.doesNotMatch(rules, /Reviewer OLD rule/);
+          assert.equal(typeof params.clientUserMessageId, "string");
+          require("node:fs").writeFileSync("review-client-id", params.clientUserMessageId);
         }
         send({ method: "turn/started", params: { threadId: "root", turn: { id: "turn-1" } } });
         const counts = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 50, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };
@@ -125,6 +129,7 @@ test("task discussion streams task usage before success, provider failure, or a 
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
       boardProjectRulesPrompt, reviewModeInstruction,
+      randomUUID, stopCodexProcess, isRoutingTimeout,
       executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool, leadInstructions, phaseStageReporter, subagentInstructions,
       leadSkillInstructions: async () => [], watchTeamMail: () => () => {},
@@ -138,6 +143,7 @@ test("task discussion streams task usage before success, provider failure, or a 
     });
     if (outcome.startsWith("review")) {
       let activity: RunActivity[] = [];
+      const checkpoints: { clientId: string; turnId?: string }[] = [];
       const review = await runtime.reviewWithCodex("profile", folder, { model: "selected", effort: "low" },
         "Review prompt", [], async () => ({ ok: true }), new AbortController().signal,
         async (report: TokenUsageReport) => {
@@ -146,7 +152,17 @@ test("task discussion streams task usage before success, provider failure, or a 
         }, "T-0001", (items: RunActivity[]) => { activity = items; }, {
           lead: "qa-engineer", stages: [{ key: "check-api", expertId: "backend-developer", title: "Check API",
             description: "Verify the contract", criteria: ["Contract is compatible"], inputs: [], outputs: ["Evidence"], dependsOn: [] }],
+        }, undefined, 0, {
+          save: () => {},
+          saveTurn: (turn?: { clientId: string; turnId?: string }) => {
+            if (turn) checkpoints.push(turn);
+          },
         });
+      const clientId = readFileSync(join(folder, "review-client-id"), "utf8");
+      assert.deepEqual(Array.from(checkpoints, ({ clientId, turnId }) => [clientId, turnId]), [
+        [clientId, undefined],
+        [clientId, "turn-1"],
+      ]);
       assert.equal(review.summary, "Verified");
       assert.equal(review.verifyRisk, false);
       assert.deepEqual(Array.from(activity, item => item.id), ["commentary", "tool", "final"]);

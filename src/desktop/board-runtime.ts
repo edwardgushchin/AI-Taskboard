@@ -12,7 +12,7 @@ const context = new AsyncLocalStorage<string>();
 export interface RuntimeEntry {
   id: string;
   owner: number;
-  kind: "slot" | "provider" | "turn" | "task" | "defaults" | "queue" | "executor-release";
+  kind: "slot" | "provider" | "turn" | "task" | "defaults" | "queue" | "executor-release" | "review-retry";
   role?: keyof AgentLimits;
   task?: string;
   operation?: "maintenance" | "acceptanceRepair" | "managerReview" | "mergeRepair";
@@ -24,6 +24,9 @@ export interface RuntimeEntry {
   linkedThread?: { revision: number; codexThreadId: string };
   turnRequest?: { threadId: string; clientId: string; turnId?: string };
   restart?: { threadId: string; cwd: string };
+  routingRetryAt?: number;
+  routingRetryFailure?: string;
+  reviewRetry?: { binding: string; reason: string; notBefore: number; exhausted?: true; manual?: true };
   earlyLaunch?: { cwd: string };
   writeProbeRetry?: {
     cwd: string;
@@ -87,7 +90,7 @@ function liveEntries(entries: RuntimeEntry[]) {
       entry = entries.find(candidate => candidate.id === entry!.parent);
     }
   }
-  const live = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" || entry.kind === "executor-release"
+  const live = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" || entry.kind === "executor-release" || entry.kind === "review-retry"
     ? true : entry.kind === "provider"
     ? providers.has(entry)
     : isAlive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent)));
@@ -207,6 +210,31 @@ export function queueWriteProbeRetry(project: string, slotId: string, task: Queu
       entries.push({ id: "queue:" + task.id, kind: "queue", owner: 0, task: task.id, revision: task.revision,
         writeProbeRetry: retry, continuation, newThread });
     }
+    return true;
+  });
+}
+
+export function queueExecutorRoutingRetry(project: string, slotId: string, task: QueuedTask, cwd: string,
+  notBefore: number, continuation: RuntimeEntry["continuation"]) {
+  return runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === slotId && entry.task === task.id && entry.kind === "slot");
+    if (!slot || slot.launchStopped || task.status !== "in_progress" || !task.codexThreadId) return false;
+    if (entries.some(entry => matchesQueuedExecutor(entry, task))) return false;
+    entries.push({
+      id: "queue:" + task.id, kind: "queue", owner: 0, task: task.id, revision: task.revision,
+      restart: { threadId: task.codexThreadId, cwd }, routingRetryAt: notBefore, continuation,
+    });
+    return true;
+  });
+}
+
+export function exhaustExecutorRoutingRetry(project: string, slotId: string, task: string, reason: string) {
+  return runtimeTransaction(project, entries => {
+    const slot = entries.find(entry => entry.id === slotId && entry.task === task && entry.kind === "slot");
+    if (!slot || slot.launchStopped) return false;
+    const queued = entries.find(entry => entry.kind === "queue" && entry.task === task && entry.routingRetryAt !== undefined);
+    if (!queued) return false;
+    queued.routingRetryFailure = reason;
     return true;
   });
 }

@@ -28,55 +28,29 @@ import type { configuredCodex } from "./codex.ts";
 import { requestExecutorAccess } from "./codex-chat.ts";
 import { windowsGuiEvidence } from "./windows-gui.ts";
 import type { CliReply } from "./cli.ts";
-import { CodexRpcRejection, codexRpc, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
 import { CodexTokenUsage } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import type { Expert } from "../cli/experts.ts";
 import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions, watchTeamMail } from "./expert-tools.ts";
 import { insideProject } from "./project-files.ts";
+import { findQueuedTurn, missingCodexThread } from "./codex-queued-turn.ts";
+import { isRoutingTimeout } from "./codex-routing-timeout.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; error?: { message?: string } | null };
-type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean };
+type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean; routingTimeout?: boolean; unconfirmed?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
 type QueuedTurn = {
   clientId: string;
   recover: boolean;
   turnId?: string;
+  requireCompletion?: boolean;
   accepted: (turnId: string) => void;
   rejected?: (reason: string) => void;
 };
 
-async function findQueuedTurn(request: <R>(method: string, params: object) => Promise<R>,
-  threadId: string, queued: QueuedTurn, recoverWriteProbeTurn: boolean): Promise<Turn | undefined> {
-  type SavedTurn = Turn & { itemsView?: string; items: { type: string; clientId?: string }[] };
-  let cursor: string | undefined;
-  const seen = new Set<string>();
-  let active = false;
-  try {
-    do {
-      const page: { data: SavedTurn[]; nextCursor?: string | null } = await request("thread/turns/list", {
-        threadId, cursor, sortDirection: "desc", limit: 10, itemsView: "full",
-      });
-      for (const turn of page.data) {
-        if (turn.id === queued.turnId) return turn;
-        if (!Array.isArray(turn.items) || turn.itemsView === "summary" || turn.itemsView === "notLoaded") {
-          throw new Error("Codex returned incomplete turn history.");
-        }
-        if (turn.items.some(item => item.type === "userMessage" && item.clientId === queued.clientId)) return turn;
-        active ||= turn.status === "inProgress";
-      }
-      cursor = page.nextCursor ?? undefined;
-      if (cursor && seen.has(cursor)) throw new Error("Codex repeated a turn history cursor.");
-      if (cursor) seen.add(cursor);
-    } while (cursor);
-    if (queued.turnId || active) throw new Error("Codex has not confirmed the queued turn in history.");
-  } catch (error) {
-    if (recoverWriteProbeTurn && error instanceof CodexRpcRejection && missingCodexThread(error.message, threadId)) throw error;
-    throw Object.assign(new Error((error as Error).message), { code: "CODEX_START_UNCONFIRMED" });
-  }
-}
 const taskProfile = "ai-taskboard";
 const instructions = new URL("./agent-instructions/", import.meta.url);
 
@@ -177,9 +151,7 @@ function writeProbeDetail(output: string): string {
 export type ExecutorTask = Pick<Task, "expertId" | "expertTeam" | "expertStage" | "expertStages" | "acceptanceRepair" | "id" | "title" | "description" | "criteria" | "dueDate" | "summary" | "nextStep" | "execution" | "git" | "codexThreadId" | "codexServiceThreads" | "workingDirectory" | "schedule" | "toolGrants"> &
   { feedback?: string; fullAccess?: boolean };
 
-export function missingCodexThread(message: string | undefined, threadId: string | undefined) {
-  return Boolean(threadId && message === "no rollout found for thread id " + threadId);
-}
+export { missingCodexThread } from "./codex-queued-turn.ts";
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
   onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
@@ -318,10 +290,13 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     throw error;
   }
   const exited = new Promise<void>(resolve => child.once("close", resolve));
+  const stop = stopCodexProcess(child);
   let releaseProvider: ReturnType<typeof trackProvider>;
   try { releaseProvider = trackProvider(project, child.pid); }
   catch (error) {
-    child.kill();
+    await stop();
+    child.stdout.destroy();
+    child.stderr.destroy();
     await exited;
     try { await closeTools(); } finally { await removeRunTemp(); }
     throw error;
@@ -339,7 +314,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   let probePending = false;
   const timeout = setTimeout(() => {
     rpc.fail(new Error("Codex did not start the task in time."));
-    child.kill();
+    void stop();
     rpc.close();
   }, 60_000);
   const close = async () => {
@@ -349,8 +324,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", interrupt);
     rpc.close();
+    await stop();
     child.stdin.end();
-    child.kill();
     await exited;
     try {
       if (probePending) {
@@ -407,9 +382,9 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const { request, send } = rpc;
   function interrupt() {
     const reason = signal?.reason instanceof Error ? signal.reason : new Error("The task run was interrupted.");
-    if (control) void control.interrupt().catch(error => { rpc.fail(error); child.kill(); });
-    else { rpc.fail(reason); child.kill(); }
-    interruptTimeout = setTimeout(() => { rpc.fail(reason); child.kill(); }, 5000);
+    if (control) void control.interrupt().catch(error => { rpc.fail(error); void stop(); });
+    else { rpc.fail(reason); void stop(); }
+    interruptTimeout = setTimeout(() => { rpc.fail(reason); void stop(); }, 5000);
   }
   signal?.addEventListener("abort", interrupt, { once: true });
   async function monitor(turnId: string) {
@@ -426,12 +401,14 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       const turn = turns.get(turnId)!;
       if (turn.status !== "completed") failure = {
         reason: turn.error?.message || "Codex ended the task run: " + turn.status + ".",
+        ...(isRoutingTimeout(turn) ? { routingTimeout: true } : {}),
         ...(turn.status === "interrupted" ? { interrupted: true } : {}),
       };
     } catch (error) {
       const message = (error as Error).message;
       failure = {
         reason: message,
+        unconfirmed: true,
         disconnected: !signal?.aborted && message === "The Codex process closed.",
       };
     } finally {
@@ -575,8 +552,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (onActivity) stages.listen(item => onActivity(item, false));
     tokens.track(threadId, started.model ?? started.thread.model ?? null, true);
     const recovered = queued?.recover ? await findQueuedTurn(request, threadId, queued, recoverWriteProbeTurn) : undefined;
-    if (recoverWriteProbeTurn && !recovered) {
-      throw Object.assign(new Error("Codex has not confirmed the write probe retry's turn in history."),
+    if ((recoverWriteProbeTurn || queued?.recover && queued.requireCompletion) && !recovered) {
+      throw Object.assign(new Error("Codex has not confirmed the queued turn in history."),
         { code: "CODEX_START_UNCONFIRMED" });
     }
     signal?.throwIfAborted();

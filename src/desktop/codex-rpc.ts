@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { debuglog } from "node:util";
 
@@ -30,6 +32,22 @@ export class CodexRpcRejection extends Error {}
 export interface AgentControl {
   steer(text: string, images: string[], clientUserMessageId?: string): Promise<void>;
   interrupt(): Promise<void>;
+}
+
+export function stopCodexProcess(child: ChildProcess) {
+  let stopping: Promise<void> | undefined;
+  const running = () => child.pid && child.exitCode === null && child.signalCode === null;
+  return () => stopping ??= new Promise<void>(resolve => {
+    if (!running()) { resolve(); return; }
+    const finish = () => {
+      if (running()) child.kill();
+      resolve();
+    };
+    if (process.platform !== "win32") { finish(); return; }
+    // Resolve the descendants before ending the App Server and losing its tree.
+    const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+    execFile(taskkill, ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 10_000 }, finish);
+  });
 }
 
 // One reader routes responses by id, so steering never competes with the turn monitor.

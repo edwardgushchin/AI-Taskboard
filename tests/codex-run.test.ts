@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { startCodexRun, writeProbeTimeoutCode } from "../src/desktop/codex-run.ts";
 import { executorFullAccess } from "../src/desktop/codex.ts";
-import { CodexRpcRejection, codexRpc, watchCodexQuotaExceeded } from "../src/desktop/codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, stopCodexProcess, watchCodexQuotaExceeded } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
@@ -71,6 +71,46 @@ test("closing the Codex connection does not wait for a descendant's output pipe"
     }
     child.kill();
     await closed;
+  }
+});
+
+test("Windows Codex shutdown terminates detached descendants", { skip: process.platform !== "win32", timeout: 45_000 }, async () => {
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const child = spawn(process.execPath, ["-e", `
+      const { spawn } = require("node:child_process");
+      const worker = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        detached: true, windowsHide: true, stdio: "ignore",
+      });
+      console.log(worker.pid);
+      worker.unref();
+      process.stdin.resume();
+    `], { stdio: "pipe", windowsHide: true });
+    const exited = once(child, "close");
+    const stop = stopCodexProcess(child);
+    const deadline = new AbortController();
+    let worker: number | undefined;
+    try {
+      const event = await Promise.race([
+        once(child.stdout, "data"),
+        delay(5000, undefined, { signal: deadline.signal }).then(() => { throw Error("Fixture worker did not start."); }),
+      ]);
+      worker = Number(String(event[0]).trim());
+      assert.ok(Number.isSafeInteger(worker) && worker > 0);
+      process.kill(worker, 0);
+      const stopped = stop();
+      assert.equal(stop(), stopped);
+      await stopped;
+      await exited;
+      assert.throws(() => process.kill(worker!, 0), { code: "ESRCH" });
+    } finally {
+      deadline.abort();
+      if (worker) {
+        try { process.kill(worker); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+      child.kill();
+      await exited;
+    }
   }
 });
 

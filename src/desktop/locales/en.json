@@ -576,6 +576,8 @@
   "ui.retry_executor_launch": "Retry launch",
   "ui.write_probe_retry_condition": "Choose Retry launch on the card to run the write check again.",
   "ui.write_probe_retry_timed_out": "The Codex write check exceeded 15 seconds on both attempts.",
+  "ui.waiting_for_codex_retry": "Waiting to retry Codex",
+  "ui.retry_review": "Retry review",
   "ui.write_probe_retry_interrupted": "The automatic retry of the Codex write check was interrupted.",
   "ui.write_probe_retry_access_changed": "Full access was revoked before the Codex write check could retry.",
   "ui.write_probe_recovery_thread_missing": "The original Codex chat is missing. The board cannot confirm whether the turn started.",

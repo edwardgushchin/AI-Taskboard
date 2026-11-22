@@ -15,7 +15,7 @@ import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
-import { CodexRpcRejection, codexRpc, turnControl } from "../src/desktop/codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
@@ -283,7 +283,7 @@ test("discussion steering and interruption share the streaming connection, inclu
       child.stderr.pipe(process.stderr);
       return child;
     },
-    executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, codexRpc, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
+    executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, codexRpc, stopCodexProcess, turnControl, CodexTokenUsage, withBoardMcp, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogTool, worklogReminder,
     githubReadTool, readBoardGitHub: async (project: string, args: unknown) => {
       assert.equal(project, directory);
       assert.deepEqual(args, { view: "run-failed-log", runId: 43816168554 });
@@ -475,7 +475,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     boardProjectRulesPrompt,
-    spawn, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
+    spawn, stopCodexProcess, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     openComputerUse: async () => undefined,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
