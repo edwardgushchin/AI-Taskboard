@@ -4492,6 +4492,7 @@ async function showTask(id, dialogue = false) {
   }
   const task = result.data;
   const scroll = refresh ? body.scrollTop : 0;
+  const discussionHandoff = refresh ? byId("task-side").firstElementChild?.discussionHandoff : undefined;
   const focusedChat = refresh && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   const openDetails = new Set(refresh ? [...body.querySelectorAll(".task-details[open]")].map(details => details.id) : []);
   taskInSheet = task;
@@ -4662,7 +4663,7 @@ async function showTask(id, dialogue = false) {
   if (codexAction) actions.append(codexAction);
   body.append(actions);
   const side = byId("task-side");
-  side.replaceChildren(taskChat(task, renderStageWork));
+  side.replaceChildren(taskChat(task, renderStageWork, discussionHandoff));
   side.hidden = false;
   if (dialogue) {
     side.firstChild.openDialogue();
