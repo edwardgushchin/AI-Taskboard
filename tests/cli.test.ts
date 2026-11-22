@@ -406,6 +406,67 @@ test("a brief changed after approval needs a fresh review when returned to draft
   }
 });
 
+test("draft edits recheck open questions without a new chat message", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const connectedRule = "При отказе обновления подключённого устройства сохрани прежнюю раскладку.";
+  const deferredRule = "При отказе первого применения отложенной раскладки удали её из настроек.";
+  const deferredQuestion = "При отказе первого применения отложенной раскладки удалить её или повторить попытку?";
+  const draft = cli(root, ["create"], { title: "Сохранять рабочую раскладку", description: connectedRule });
+  const id = draft.id;
+  const start = (task: Task): Task => cli(root, ["draft-discussion", id], { revision: task.revision, phase: "running" });
+  const finish = (task: Task, text: string, awaitingAnswer: boolean): Task => cli(root, ["chat", id], {
+    actor: "agent", model: "fixture", effort: "low", draftDiscussion: true,
+    revision: task.revision, text, awaitingAnswer,
+  });
+  const cannotApprove = (task: Task) =>
+    cli(root, ["approve", id], { revision: task.revision }, "TASK_AWAITING_ANSWER");
+  const initial = finish(start(draft), deferredQuestion, true);
+  const partialEdit = cli(root, ["update", id], {
+    revision: initial.revision,
+    criteria: ["После отказа обновления логический ID подключённого устройства сохраняется."],
+  });
+  assert.equal(partialEdit.awaitingAnswer, true);
+  assert.equal(partialEdit.draftDiscussion?.phase, "queued");
+  cannotApprove(partialEdit);
+
+  const partial = finish(start(partialEdit), connectedRule + " " + deferredQuestion, true);
+  assert.equal(partial.awaitingAnswer, true);
+  assert.equal(partial.draftDiscussion, undefined);
+  cannotApprove(partial);
+
+  const completeEdit = cli(root, ["update", id], {
+    revision: partial.revision,
+    description: connectedRule + " " + deferredRule,
+  });
+  assert.equal(completeEdit.awaitingAnswer, true);
+  assert.equal(completeEdit.draftDiscussion?.phase, "queued");
+  const running = start(completeEdit);
+  const failed = cli(root, ["draft-discussion", id], {
+    revision: running.revision, phase: "failed", reason: "Provider unavailable",
+  });
+  assert.equal(failed.awaitingAnswer, true);
+  cannotApprove(failed);
+
+  const retry = start(failed);
+  const concurrentEdit = cli(root, ["update", id], {
+    revision: retry.revision, criteria: [deferredRule],
+  });
+  assert.equal(concurrentEdit.awaitingAnswer, true);
+  const requeued = finish(retry, "Устаревшее подтверждение.", false);
+  assert.equal(requeued.draftDiscussion?.phase, "queued");
+  assert.equal(requeued.awaitingAnswer, true);
+  assert.ok(!requeued.history.some(event => event.text === "Устаревшее подтверждение."));
+  cannotApprove(requeued);
+
+  const complete = finish(start(requeued), "Задача готова к утверждению.", false);
+  assert.equal(complete.awaitingAnswer, false);
+  assert.equal(complete.draftConfirmed, true);
+  assert.equal(complete.draftDiscussion, undefined);
+  assert.ok(!complete.history.some(event => event.chat && event.actor === "user"));
+  assert.equal(cli(root, ["approve", id], { revision: complete.revision }).status, "ready");
+});
+
 test("ordinary replies outside draft leave approval tied to the last confirmed brief", t => {
   const root = fixture(t);
   cli(root, ["init"]);

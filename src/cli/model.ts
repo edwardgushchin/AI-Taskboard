@@ -407,7 +407,7 @@ export function invalidateDraftDiscussion(task: Task): Task {
   return {
     ...task,
     draftConfirmed: false,
-    awaitingAnswer: undefined,
+    awaitingAnswer: task.awaitingAnswer === true ? true : undefined,
     draftDiscussion: task.draftDiscussion?.phase === "running"
       ? task.draftDiscussion
       : { phase: "queued", managerReply: task.draftDiscussion?.managerReply },
