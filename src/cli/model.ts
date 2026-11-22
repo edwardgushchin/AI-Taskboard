@@ -209,6 +209,7 @@ export type ArtifactKind = "png" | "text";
 
 export interface Task {
   awaitingAnswer?: boolean;
+  draftConfirmed?: true;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: { phase: "queued" | "running" } | { phase: "failed"; reason: string };
   expertId?: string;
@@ -392,10 +393,15 @@ export function requireState(task: Task, allowed: readonly TaskState[]): void {
 
 export function invalidateDraftDiscussion(task: Task): Task {
   if (task.status !== "draft") {
-    return task.awaitingAnswer === false ? { ...task, awaitingAnswer: undefined } : task;
+    return {
+      ...task,
+      draftConfirmed: undefined,
+      awaitingAnswer: task.awaitingAnswer === true ? true : undefined,
+    };
   }
   return {
     ...task,
+    draftConfirmed: undefined,
     awaitingAnswer: undefined,
     draftDiscussion: task.draftDiscussion?.phase === "running" ? task.draftDiscussion : { phase: "queued" },
   };
@@ -428,6 +434,14 @@ export function record(
   if (next !== task.status) {
     event.from = task.status;
     event.to = next;
+  }
+  // Outside a draft, awaitingAnswer tracks the dialogue independently of approval.
+  if (task.status === "draft" && next !== "draft") {
+    task = { ...task, draftConfirmed: task.awaitingAnswer === false && !task.draftDiscussion ? true : undefined };
+  } else if (task.status !== "draft" && next === "draft") {
+    if (task.awaitingAnswer === false && !task.draftConfirmed) {
+      task = { ...task, awaitingAnswer: undefined };
+    }
   }
   return {
     ...task,

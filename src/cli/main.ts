@@ -861,7 +861,8 @@ function run(
     throw new TaskboardError("DRAFT_DISCUSSION_REQUIRED", "The agent must confirm the current draft before approval.");
   }
   const briefFields = ["title", "description", "criteria", "questions", "subtasks", "dependencies"] as const;
-  if (command === "update" && briefFields.some(key => !isDeepStrictEqual(task[key], updated[key]))) {
+  if ((command === "update" || command === "unblock") &&
+      briefFields.some(key => !isDeepStrictEqual(task[key], updated[key]))) {
     updated = invalidateDraftDiscussion(updated);
   }
   if (discussionReturn) updated.discussionReturn = updated.revision;

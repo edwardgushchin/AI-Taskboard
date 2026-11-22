@@ -258,8 +258,8 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
     requireRevision(task, input.revision, true);
   }
-  const completesQueuedReview = actor === "agent" && task.status === "draft" &&
-    task.draftDiscussion?.phase === "queued" && typeof input.awaitingAnswer === "boolean" && input.revision !== undefined;
+  const reviewsCurrentDraft = actor === "agent" && task.status === "draft" &&
+    typeof input.awaitingAnswer === "boolean" && input.revision !== undefined;
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
@@ -272,12 +272,16 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
 
   return withNewAttachments(store, task, input.attachmentSources, attachments => {
     if (!message && !attachments.length) throw new TaskboardError("INVALID_INPUT", "Write a message or attach a file.");
+    const withAttachments = attachments.length
+      ? invalidateDraftDiscussion({ ...task, attachments: [...task.attachments, ...attachments] }) : task;
     const reopensDraftDiscussion = actor === "user" && task.status === "draft" && task.awaitingAnswer === false;
+    const completesQueuedReview = reviewsCurrentDraft && withAttachments.draftDiscussion?.phase === "queued";
     const updated = record({
-      ...task, attachments: [...task.attachments, ...attachments],
+      ...withAttachments,
       ...(actor === "agent" && input.awaitingAnswer !== undefined ? { awaitingAnswer: input.awaitingAnswer as boolean } : {}),
-      ...(reopensDraftDiscussion ? { awaitingAnswer: undefined } : {}),
-      draftDiscussion: draftDiscussion || actor === "user" || completesQueuedReview ? undefined : task.draftDiscussion,
+      ...(reopensDraftDiscussion ? { awaitingAnswer: undefined, draftConfirmed: undefined } : {}),
+      ...(actor === "user" && task.awaitingAnswer === true ? { awaitingAnswer: true } : {}),
+      draftDiscussion: draftDiscussion || actor === "user" || completesQueuedReview ? undefined : withAttachments.draftDiscussion,
     }, "chat", actor, task.status, message);
     updated.history.at(-1)!.chat = {
       ...chat,
@@ -305,8 +309,10 @@ export function restoreReplyImages(store: BoardStore, task: Task, input: Record<
     }
     const history = task.history.slice();
     history[replyAt] = { ...reply, chat: { ...chat, files: attachments.map(file => file.file) } };
-    return store.save({ ...task, revision: task.revision + 1, updatedAt: new Date().toISOString(),
-      history, attachments: [...task.attachments, ...attachments] });
+    return store.save(invalidateDraftDiscussion({
+      ...task, revision: task.revision + 1, updatedAt: new Date().toISOString(),
+      history, attachments: [...task.attachments, ...attachments],
+    }));
   });
 }
 

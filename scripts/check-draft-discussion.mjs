@@ -81,12 +81,18 @@ let formatUpdate;
 const initialFormat = "Use CSV and save it in exports.";
 const formatChanges = ["Use XLSX instead of CSV.", "Use JSON instead of XLSX."];
 const revisedBrief = "Экспортировать архив с итоговым отчётом.";
+const returnedTitle = "Экспорт отчёта после возврата в черновик";
+const requestArchive = "Какой архив использовать?";
+const archiveQuestion = "Использовать недельный или месячный архив?";
+const archiveAnswer = "Использовать недельный архив.";
+const archiveConfirmed = "Недельный архив подтверждён.";
 globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images, _commentary, action, _scratch,
   _limit, _usage, onControl, _signal, id, _activity, mode) => {
   const context = JSON.parse(prompt);
   assert.equal(cwd, project);
   assert.equal(context.task.id, id);
-  assert.equal(context.task.status, "draft");
+  const approvedDialogue = approvalOnly && context.task.title === returnedTitle && mode !== "initial";
+  assert.equal(context.task.status, approvedDialogue ? "ready" : "draft");
   if (mode === "initial") {
     assert.equal(_commentary, undefined);
     assert.equal(_activity, undefined);
@@ -99,6 +105,12 @@ globalThis.draftFixtureReply = async (_profile, cwd, configured, prompt, images,
   calls.push({ context, configured, mode, images: images.map(path => readFileSync(path).toString("base64")),
     documents: context.attachments.filter(file => file.path && file.name.endsWith(".txt")).map(file => readFileSync(file.path, "utf8")) });
   const request = context.latestUserMessage?.text;
+  if (approvedDialogue) {
+    assert.ok(request === requestArchive || request === archiveAnswer, "Unexpected ready card message");
+    const awaitingAnswer = request === requestArchive;
+    const text = awaitingAnswer ? archiveQuestion : archiveConfirmed;
+    return { text: JSON.stringify({ text, awaitingAnswer }) };
+  }
   const update = approvalOnly && formatChanges.includes(request) ? {
     request, completion: Promise.withResolvers(), returned: Promise.withResolvers(),
     steeringGate: request === formatChanges[0] ? Promise.withResolvers() : undefined,
@@ -407,8 +419,15 @@ try {
       cli(["create"], plannedDraft({
         title, description, criteria: ["Указаны формат и место сохранения."], execution: settings,
       }));
-    const send = (id, text) => evaluate(
-      `window.taskboard.chatSend(${JSON.stringify(id)}, ${JSON.stringify({ ...settings, text, files: [] })})`);
+    const send = (id, text, attachment) => evaluate(`(async () => {
+      const request = ${JSON.stringify({ ...settings, text, files: [] })};
+      const attachment = ${JSON.stringify(attachment)};
+      if (attachment) {
+        const file = new File([attachment.text], attachment.name, { type: "text/plain" });
+        request.files.push(await window.taskboard.filePayload(file));
+      }
+      return window.taskboard.chatSend(${JSON.stringify(id)}, request);
+    })()`);
     const waitWriter = async (id, label) => {
       const { runtimeEntries } = await import("../src/desktop/board-runtime.ts");
       await until(() => !runtimeEntries(project).some(entry => entry.task === id), label);
@@ -467,8 +486,13 @@ try {
     await capture("approval-question.png");
     check("A running review and an open question both hide approval; the mouse opens the question in its dialogue");
 
-    const answer = send(pending.id, initialFormat);
+    const file = { name: "export-format.txt", text: "CSV in the exports directory." };
+    const answer = send(pending.id, initialFormat, file);
     await until(() => Boolean(releaseClarification), "provider reading owner's answer");
+    const answering = show(pending.id);
+    assert.equal(answering.awaitingAnswer, true);
+    assert.equal(answering.attachments.at(-1).name, file.name);
+    assert.deepEqual(calls.at(-1).documents, [file.text]);
     cli(["approve", pending.id], { revision: show(pending.id).revision }, project, "TASK_AWAITING_ANSWER");
     assert.equal(await available(), false);
     releaseClarification();
@@ -477,7 +501,7 @@ try {
     await until(available, "approval after clarification");
     assert.equal(show(pending.id).status, "draft");
     assert.equal(show(pending.id).awaitingAnswer, false);
-    check("Sending an answer keeps approval unavailable until the agent confirms it in the same card");
+    check("An answer with an attachment preserves the open question and blocks approval until the agent confirms it in the same card");
 
     const beginFormatUpdate = async (id, request, steering) => {
       await waitWriter(id, "writer released before changing the format");
@@ -599,6 +623,50 @@ try {
     await until(available, "approval after fresh review of the external edit");
     assert.equal(messages(show(pending.id)).at(-1).text, readyText);
     check("An external CLI edit after the same turn successfully updated the draft rejects the stale reply by revision and requires fresh confirmation");
+
+    const returning = create(returnedTitle, "Экспортировать отчёт в архив.");
+    await waitReady(returning.id);
+    await waitWriter(returning.id, "initial review completed before approval");
+    const approved = cli(["approve", returning.id], { revision: show(returning.id).revision });
+    assert.equal(approved.status, "ready");
+    const question = await send(returning.id, requestArchive);
+    assert.equal(question.result.ok, true, JSON.stringify(question));
+    const withQuestion = show(returning.id);
+    assert.equal(withQuestion.awaitingAnswer, true);
+    assert.equal(messages(withQuestion).at(-1).text, archiveQuestion);
+    const editedBrief = "Экспортировать отчёт о сверке в архив.";
+    const edited = cli(["update", returning.id], {
+      actor: "user", note: "Уточнить состав отчёта", description: editedBrief, revision: withQuestion.revision,
+    });
+    assert.equal(edited.status, "ready");
+    assert.equal(edited.awaitingAnswer, true);
+    const closedQuestion = await send(returning.id, archiveAnswer);
+    assert.equal(closedQuestion.result.ok, true, JSON.stringify(closedQuestion));
+    const clarified = show(returning.id);
+    assert.equal(clarified.status, "ready");
+    assert.equal(clarified.awaitingAnswer, false);
+    assert.equal(messages(clarified).at(-1).text, archiveConfirmed);
+    await waitWriter(returning.id, "ordinary dialogue completed before return");
+    heldDrafts.add(returning.title);
+    const returned = cli(["return-to-draft", returning.id], { revision: clarified.revision });
+    assert.equal(returned.status, "draft");
+    assert.equal(returned.description, editedBrief);
+    assert.equal(returned.awaitingAnswer, undefined);
+    assert.equal(messages(returned).at(-1).text, archiveConfirmed);
+    cli(["approve", returning.id], { revision: show(returning.id).revision }, project, "DRAFT_DISCUSSION_REQUIRED");
+    await display(returning.id);
+    assert.equal(await available(), false);
+    const startLabel = localization.text("draft_discussion.start", {}, "ru");
+    await until(() => evaluate(`Boolean(${button(startLabel)})`), "review action for returned draft");
+    assert.equal(calls.filter(call => call.context.task.id === returning.id).length, 3);
+    await activate(startLabel, "mouse");
+    await until(() => draftGates.has(returning.id), "new review after returning the changed ready card to draft");
+    assert.equal(calls.at(-1).context.task.description, editedBrief);
+    continueDraft(returning);
+    await until(() => show(returning.id).awaitingAnswer === false, "confirmation of the returned draft");
+    await until(available, "approval of the returned draft after review");
+    check("An ordinary ready-card reply closes the question, and returning the changed card to draft still requires a new review before approval");
+
     report.approvalDraft = pending.id;
     report.approvalMessages = messages(show(pending.id));
   };
@@ -960,7 +1028,7 @@ try {
   }
   if (!live && !(approvalOnly && restart)) {
     const paths = ["src/desktop/main.ts", "src/desktop/codex-chat.ts", "src/desktop/chat-actions.ts", "src/cli/archive.ts", "src/cli/main.ts",
-      "src/cli/model.ts", "src/cli/tasks.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
+      "src/cli/model.ts", "src/cli/storage.ts", "src/cli/tasks.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
       "src/desktop/locales/ru.json", "src/desktop/preload.cjs", "scripts/check-draft-discussion.mjs",
       "scripts/electron-check.mjs", "tests/fixtures/planned-draft.ts"];
     report.sourceHashes = Object.fromEntries(paths.map(path => {

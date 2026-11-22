@@ -110,7 +110,10 @@ test("approval waits for the last saved clarification to close", t => {
   cli(root, approve, { actor: "manager", revision: question.revision }, "TASK_AWAITING_ANSWER");
   assert.equal(cli(root, ["show", draft.id, "--compact"]).revision, question.revision);
 
-  const answer = cli(root, chat, { ...discussion, text: "CSV." });
+  const sample = join(root, "sample.csv");
+  writeFileSync(sample, "id,name\n1,example\n");
+  const answer = cli(root, chat, { ...discussion, text: "CSV.", attachmentSources: [{ path: sample }] });
+  assert.equal(answer.awaitingAnswer, true);
   cli(root, approve, { revision: answer.revision }, "TASK_AWAITING_ANSWER");
   const followUp = cli(root, chat, {
     ...discussion,
@@ -308,6 +311,104 @@ test("a brief changed after approval needs a fresh review when returned to draft
     });
     assert.equal(cli(root, ["approve", id], { revision: confirmed.revision }).status, "ready");
   }
+});
+
+test("ordinary replies outside draft leave approval tied to the last confirmed brief", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const settings = { model: "fixture", effort: "low" };
+  const prerequisite = cli(root, ["create"], { title: "Export schema" });
+  const path = join(root, "schema.csv");
+  writeFileSync(path, "id,name\n1,example\n");
+
+  for (const scenario of ["late execution reply", "review attachment", "changed dependencies", "same dependencies"]) {
+    const draft = cli(root, ["create"], { title: scenario, workingDirectory: root });
+    const id = draft.id;
+    approveFixture(root, ["approve", id]);
+    cli(root, ["start", id]);
+    if (scenario === "review attachment") {
+      const token = cli(root, ["preview", id]).token;
+      cli(root, ["submit", id], { token, noChanges: true, summary: "Export ready", checks: ["Checked"] });
+    }
+
+    const prompt = cli(root, ["chat", id], { ...settings, text: "What information do you need?" });
+    cli(root, ["chat", id], {
+      ...settings, actor: "agent", text: "Which format?", replyTo: prompt.history.length - 1, awaitingAnswer: true,
+    });
+    const answer = { ...settings, text: "Use XLSX." };
+    const sent = cli(root, ["chat", id], scenario === "review attachment"
+      ? { ...answer, attachmentSources: [{ path }] } : answer);
+    assert.equal(sent.awaitingAnswer, true);
+
+    if (scenario === "late execution reply") {
+      const updated = cli(root, ["update", id], {
+        description: "Use XLSX instead of CSV.", actor: "user", note: "Use XLSX.",
+      });
+      assert.equal(updated.awaitingAnswer, true);
+    }
+    if (scenario === "changed dependencies" || scenario === "same dependencies") {
+      const blocked = cli(root, ["block", id], { reason: "Waiting", condition: "Choose the prerequisites" });
+      const dependencies = scenario === "changed dependencies" ? [prerequisite.id] : [];
+      const unblocked = cli(root, ["unblock", id], { dependencies, revision: blocked.revision, reason: "Prerequisites recorded" });
+      assert.deepEqual(unblocked.dependencies ?? [], dependencies);
+      assert.equal(unblocked.awaitingAnswer, true);
+      assert.equal(unblocked.history.at(-1).from, "blocked");
+    }
+
+    const closed = cli(root, ["chat", id], {
+      ...settings, actor: "agent", text: "The question is closed.", replyTo: sent.history.length - 1, awaitingAnswer: false,
+    });
+    assert.equal(closed.awaitingAnswer, false);
+    const returned = cli(root, ["return-to-draft", id], { revision: closed.revision });
+    if (scenario === "same dependencies") {
+      assert.equal(cli(root, ["approve", id], { revision: returned.revision }).status, "ready");
+    } else {
+      assert.equal(returned.awaitingAnswer, undefined);
+      cli(root, ["approve", id], { revision: returned.revision }, "DRAFT_DISCUSSION_REQUIRED");
+    }
+  }
+});
+
+test("restoring an attachment to a dialogue invalidates the draft confirmation", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const draft = cli(root, ["create"], { title: "Export data" });
+  const settings = { model: "fixture", effort: "low" };
+  const user = cli(root, ["chat", draft.id], { ...settings, text: "Use XLSX." });
+  const confirmed = cli(root, ["chat", draft.id], {
+    ...settings, actor: "agent", text: "Ready for approval.", replyTo: user.history.length - 1,
+    revision: user.revision, awaitingAnswer: false,
+  });
+  const image = join(root, "preview.png");
+  writeFileSync(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64"));
+  const attached = cli(root, ["attachment", "restore-reply", draft.id], {
+    revision: confirmed.revision, replyAt: confirmed.history.length - 1, attachmentSources: [{ path: image }],
+  });
+  assert.equal(attached.awaitingAnswer, undefined);
+  assert.equal(attached.draftDiscussion?.phase, "queued");
+  cli(root, ["approve", draft.id], { revision: attached.revision }, "DRAFT_DISCUSSION_REQUIRED");
+});
+
+test("unblocking a draft cannot promote a non-draft dialogue reply to confirmation", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const draft = cli(root, ["create"], { title: "Blocked draft" });
+  const blocked = cli(root, ["block", draft.id], {
+    allowUnstarted: true, reason: "Waiting", condition: "Answer the question",
+  });
+  const settings = { model: "fixture", effort: "low" };
+  const user = cli(root, ["chat", draft.id], { ...settings, text: "Use XLSX." });
+  const answer = cli(root, ["chat", draft.id], {
+    ...settings, actor: "agent", text: "The question is closed.", replyTo: user.history.length - 1, awaitingAnswer: false,
+  });
+  assert.equal(answer.status, blocked.status);
+  assert.equal(answer.awaitingAnswer, false);
+  const unblocked = cli(root, ["unblock", draft.id], {
+    revision: answer.revision, reason: "Question closed", dependencies: [],
+  });
+  assert.equal(unblocked.status, "draft");
+  assert.equal(unblocked.awaitingAnswer, undefined);
+  cli(root, ["approve", draft.id], { revision: unblocked.revision }, "DRAFT_DISCUSSION_REQUIRED");
 });
 
 test("a late ordinary chat reply cannot confirm an edited draft", t => {
