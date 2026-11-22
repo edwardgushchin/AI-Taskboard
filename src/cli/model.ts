@@ -116,6 +116,7 @@ export interface TaskEvent {
   };
   draftDependencySource?: { id: string; question: number };
   draftDependencyId?: string;
+  draftDependencyRequiresChoice?: true;
   expertMessage?: { from: string; to: string; replyTo?: number };
   expertSkill?: { expertId: string; skillId: string; name: string; source: "plan" | "tool" };
   expertSkillProof?: { phase: "work" | "review"; key?: string; targetHead?: string | null;

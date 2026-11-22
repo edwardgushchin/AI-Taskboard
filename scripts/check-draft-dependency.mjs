@@ -11,7 +11,7 @@ import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
 import { electronCheck } from "./electron-check.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "draft-dependency", 180_000, [[], ["--restart"]]);
+const { scratch, artifacts } = electronCheck(import.meta.url, "draft-dependency", 300_000, [[], ["--restart"]]);
 const restart = process.argv.includes("--restart");
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog } = require("electron");
@@ -36,9 +36,12 @@ const prefix = "AI Taskboard queue: answer these draft questions through team_me
 let hold;
 let managerHeld = false;
 let failSource;
-let failure;
+let observedFault;
 let managerCalls = 0;
+const managerQuestions = [];
 const handoffs = new Map();
+const cancelledTargets = new Map();
+const faultedSources = new Set();
 const legacySourceId = "T-0147";
 const legacyDependencyId = "T-0163";
 const legacyDependencyTitle = "Подключить управляемую кучу к общему счётчику памяти движка";
@@ -67,8 +70,8 @@ function pass(description) {
   writeFileSync(journal, description + "\n", { flag: "a" });
 }
 
-async function until(predicate, label) {
-  const deadline = Date.now() + 25_000;
+async function until(predicate, label, timeout = 25_000) {
+  const deadline = Date.now() + timeout;
   while (!await predicate()) {
     if (Date.now() >= deadline) throw new Error("Timed out: " + label);
     await delay(180);
@@ -101,7 +104,12 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
   assert.ok(inbox.ok, JSON.stringify(inbox));
   for (const { id, sequence, text } of inbox.data) {
     const legacy = id === legacySourceId;
-    assert.equal(text, legacy ? legacyEvents.find(event => event.sequence === 30).text : managerQuestion);
+    const scenario = cancelledTargets.get(id);
+    if (scenario?.questionSequence !== undefined) {
+      assert.equal(sequence, scenario.questionSequence);
+    }
+    managerQuestions.push({ id, sequence });
+    assert.equal(text, legacy ? legacyEvents.find(event => event.sequence === 30).text : scenario?.request ?? managerQuestion);
     const source = await run("task_show", { id, historyLimit: 20 });
     assert.ok(source.ok, JSON.stringify(source));
     const { data: card } = source;
@@ -149,10 +157,15 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
       continue;
     }
 
-    assert.equal(owner.text, ownerText);
+    assert.equal(owner.text, scenario?.request ?? ownerText);
     const search = await run("draft_dependency", { ...reference, operation: "search" });
     assert.ok(search.ok, JSON.stringify(search));
-    assert.ok([...search.data.tasks, ...search.data.archived].every(entry => entry.title === dependencyTitle));
+    const expectedTitle = scenario?.title ?? dependencyTitle;
+    const candidates = [...search.data.tasks, ...search.data.archived];
+    assert.ok(candidates.every(entry => entry.title === expectedTitle));
+    if (scenario) {
+      assert.deepEqual(candidates.map(entry => entry.id), [scenario.replacementId ?? scenario.cancelledId]);
+    }
     const [otherId] = card.dependencies;
     const wrongInspect = await run("draft_dependency", { ...reference, operation: "inspect", existingId: otherId });
     assert.equal(wrongInspect.ok, false, JSON.stringify(wrongInspect));
@@ -163,11 +176,11 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
       draft: plannedDraft({ title: "Не согласованная владельцем задача", tags: ["Memory"] }),
     });
     assert.equal(wrongDraft.error?.code, "USER_DIRECTION_REQUIRED", JSON.stringify(wrongDraft));
-    const candidate = search.data.tasks.find(entry => entry.title === dependencyTitle && entry.status !== "cancelled");
+    const candidate = candidates.find(entry => entry.title === expectedTitle && entry.status !== "cancelled");
     if (candidate) {
       const inspected = await run("draft_dependency", { ...reference, operation: "inspect", existingId: candidate.id });
       assert.ok(inspected.ok, JSON.stringify(inspected));
-      assert.equal(inspected.data.description, "Измерять память управляемой кучи.");
+      assert.equal(inspected.data.description, scenario?.description ?? "Измерять память управляемой кучи.");
     }
     const target = candidate ? { existingId: candidate.id } : {
       draft: plannedDraft({ title: dependencyTitle, description: "Измерять память управляемой кучи.", tags: ["Memory"] }),
@@ -181,7 +194,7 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
         id, to: id, replyTo: sequence, kind: "update", text: "Попытка закрыть сохранённый запрос.",
       });
       assert.equal(prematureReply.ok, false, JSON.stringify(prematureReply));
-      failure.resolve();
+      observedFault = id;
       continue;
     }
     assert.ok(saved.ok, JSON.stringify(saved));
@@ -199,9 +212,13 @@ globalThis.dependencyDraft = async (prompt, onControl, mode, tools, run) => {
   const { id, title } = context.task;
   onControl({ interrupt: async () => {}, steer: async () => {} });
   const answer = output => ({ text: JSON.stringify(output) });
+  const scenario = cancelledTargets.get(id);
   if (mode === "initial") {
     if (title.startsWith("Без решения")) {
       return answer({ questions: unrelatedQuestion });
+    }
+    if (scenario) {
+      return answer({ questions: "Какую карточку закрепить как обязательную зависимость?" });
     }
     return answer({ questions: title.includes("T-0147") ? ownerQuestion : "" });
   }
@@ -211,13 +228,20 @@ globalThis.dependencyDraft = async (prompt, onControl, mode, tools, run) => {
       assert.equal(context.managerReplies.at(-1).text, ownerQuestion);
       return answer({ text: ownerQuestion, awaitingAnswer: true });
     }
+    if (scenario?.explicitId) {
+      const reply = context.managerReplies.at(-1);
+      assert.equal(reply.requiresChoice, true);
+      assert.ok(reply.text.includes(scenario.cancelledId));
+      assert.match(reply.text, /cancel|отмен/i);
+      return answer({ text: choiceQuestion(scenario.cancelledId), awaitingAnswer: true });
+    }
     const dependencyId = context.task.dependencies.at(-1);
     assert.match(context.managerReplies.at(-1).text, new RegExp(dependencyId));
     return answer({ text: ready(dependencyId), awaitingAnswer: false });
   }
-  assert.equal(context.latestUserMessage?.text, title.startsWith("Без решения") ? unrelatedText : ownerText);
+  assert.equal(context.latestUserMessage?.text, title.startsWith("Без решения") ? unrelatedText : scenario?.request ?? ownerText);
   assert.ok(tools.some(tool => tool.name === "team_message"));
-  const sent = await run("team_message", { to: "manager", kind: "question", text: managerQuestion });
+  const sent = await run("team_message", { to: "manager", kind: "question", text: scenario?.request ?? managerQuestion });
   assert.ok(sent.ok, JSON.stringify(sent));
   return answer({ text: "Жду номер обязательной зависимости.", awaitingAnswer: true, confirmsDraft: false });
 };
@@ -259,6 +283,7 @@ function mountApp() {
 }
 
 function installFault(id) {
+  faultedSources.add(id);
   writeFileSync(failureHook, [
     "const fs = require('node:fs');",
     "const path = require('node:path');",
@@ -275,11 +300,21 @@ function installFault(id) {
     "require('node:module').syncBuiltinESMExports();",
   ].join("\n"));
   globalThis.dependencyCli = (real, cwd, args, input, options) => {
-    if (cwd === project && args[0] === "draft-dependency" && args[1] === id && input?.draft) {
-      return cliResult(args, input, true).reply;
+    if (cwd === project && args[0] === "draft-dependency") {
+      if (faultedSources.has(args[1]) && input?.revision === undefined) {
+        // The write fault stays active until the process exits.
+        return { ok: false, error: { code: "EIO", message: "QA_WRITE_FAILURE" } };
+      }
+      if (args[1] === id && (input?.draft || input?.existingId)) {
+        return cliResult(args, input, true).reply;
+      }
     }
     return real(cwd, args, input, options);
   };
+}
+
+function choiceQuestion(cancelledId) {
+  return `Карточка ${cancelledId} отменена. Какую карточку выбрать в качестве обязательной зависимости?`;
 }
 
 async function verifyOutcome(id, dependencyId, priorId, expectedOwnerMessages = [ownerText]) {
@@ -376,6 +411,10 @@ function checkedSourceHashes() {
 
 async function run() {
   process.env.GIT_CEILING_DIRECTORIES = scratch;
+  const state = restart ? JSON.parse(readFileSync(fixtureState, "utf8")) : undefined;
+  for (const scenario of state?.cancelledTargets ?? []) {
+    cancelledTargets.set(scenario.sourceId, scenario);
+  }
   if (!restart) {
     writeFileSync(initialHashes, JSON.stringify(checkedSourceHashes()));
     mkdirSync(project);
@@ -408,12 +447,38 @@ async function run() {
   assert.equal(preferences.nodeIntegration, false);
 
   if (restart) {
-    const { id, dependencyId, priorId, completeId } = JSON.parse(readFileSync(fixtureState, "utf8"));
+    const { id, dependencyId, priorId, completeId } = state;
     await verifyOutcome(id, dependencyId, priorId, [ownerText, unrelatedText]);
-    assert.equal(managerCalls, 0);
     assert.equal(handoffs.get(completeId), undefined);
     assert.equal(cards().filter(card => card.title === dependencyTitle && card.status !== "cancelled").length, 1);
     pass("После несвязанного уточнения владельца и перезапуска очередь завершила сохранённое действие без вызова провайдера менеджера. ID созданной до сбоя карточки сохранён, продолжение произошло один раз.");
+
+    for (const scenario of cancelledTargets.values()) {
+      const { sourceId, cancelledId, replacementId, request, questionSequence } = scenario;
+      if (scenario.explicitId) {
+        await until(() => show(sourceId).history.some(event => event.chat && event.text === choiceQuestion(cancelledId)),
+          "request a new explicit dependency ID");
+        const source = show(sourceId);
+        assert.deepEqual(source.dependencies, [priorId]);
+        assert.deepEqual(ownerMessages(source).map(event => event.text), [request]);
+        assert.equal(replies(source).length, 1);
+        assert.equal(replies(source)[0].expertMessage.replyTo, questionSequence);
+        assert.ok(replies(source)[0].text.includes(cancelledId));
+        assert.equal(source.awaitingAnswer, true);
+        assert.equal(handoffs.get(sourceId), 1);
+        pass("Указанная владельцем карточка отменена после EIO. Агент получил её ID и причину, по которой нужен новый выбор. Действующее совпадение по названию не было привязано без решения владельца.");
+      } else {
+        await verifyOutcome(sourceId, replacementId, priorId, [request]);
+        assert.equal(replies(show(sourceId))[0].expertMessage.replyTo, questionSequence);
+        pass("Карточка, выбранная по согласованному названию, отменена после EIO. После перезапуска менеджер повторил поиск по исходному запросу и добавил действующую карточку один раз.");
+      }
+      assert.equal(show(cancelledId).status, "cancelled");
+      assert.equal(cli(["manager-inbox"]).some(entry => entry.id === sourceId && entry.sequence === questionSequence), false);
+      assert.deepEqual(cards().filter(card => card.title === scenario.title && card.status !== "cancelled").map(card => card.id), [replacementId]);
+    }
+    const byTitle = [...cancelledTargets.values()].find(scenario => !scenario.explicitId);
+    assert.deepEqual(managerQuestions, [{ id: byTitle.sourceId, sequence: byTitle.questionSequence }]);
+    assert.equal(managerCalls, 1);
     const hashes = checkedSourceHashes();
     assert.deepEqual(hashes, JSON.parse(readFileSync(initialHashes, "utf8")), "The source bytes changed between Electron phases.");
     const gitHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
@@ -490,10 +555,9 @@ async function run() {
   await verifyDenial(true);
   const createSource = create("T-0147: создание после сбоя", { dependencies: [prior.id] });
   failSource = createSource.id;
-  failure = Promise.withResolvers();
   installFault(failSource);
   await sendOwner(createSource.id);
-  await failure.promise;
+  await until(() => observedFault === failSource, "EIO while saving the newly created dependency", 60_000);
   const pending = show(createSource.id);
   const dependency = cards().find(card => card.title === dependencyTitle && card.status === "draft");
   assert.ok(dependency);
@@ -506,7 +570,41 @@ async function run() {
   assert.equal(cli(["manager-inbox"]).some(entry => entry.id === pending.id && entry.draftDependencyPending), true);
   assert.deepEqual(show(pending.id).dependencies, [prior.id]);
   pass("Авторежим включён. После поиска без совпадения создан один черновик. Ошибка EIO и следующее несвязанное уточнение оставили запрос в очереди, без ответа агенту и без утверждения. Чужую карточку или название подставить не удалось.");
-  writeFileSync(fixtureState, JSON.stringify({ id: pending.id, dependencyId: dependency.id, priorId: prior.id, completeId: reusable.id }));
+
+  for (const explicitId of [false, true]) {
+    const title = explicitId ? "Сохранять пиковый размер буфера" : "Проверять текущий размер буфера";
+    const description = "Подтвердить показания штатного счётчика буфера.";
+    const initial = create(title, { description });
+    const source = create("T-0147: повтор после отмены выбранной карточки", { dependencies: [prior.id] });
+    const request = `Обязательная зависимость: ${explicitId ? initial.id : title}`;
+    const scenario = { title, description, explicitId, request, sourceId: source.id, cancelledId: initial.id };
+    cancelledTargets.set(source.id, scenario);
+
+    failSource = source.id;
+    installFault(failSource);
+    await sendOwner(source.id, request);
+    const selection = explicitId ? "an explicitly named ID" : "an approved title";
+    await until(() => observedFault === source.id, "EIO while saving " + selection, 60_000);
+
+    const pendingSource = show(source.id);
+    assert.deepEqual(pendingSource.dependencies, [prior.id]);
+    assert.equal(replies(pendingSource).length, 0);
+    const queued = cli(["manager-inbox"]).find(entry => entry.id === source.id && entry.draftDependencyPending);
+    assert.ok(queued);
+    scenario.questionSequence = queued.sequence;
+    cli(["cancel", initial.id], { revision: show(initial.id).revision, reason: "Проверить повтор с отменённой карточкой." });
+    const replacement = create(title, { description });
+    scenario.replacementId = replacement.id;
+    assert.deepEqual(show(source.id).dependencies, [prior.id]);
+  }
+
+  writeFileSync(fixtureState, JSON.stringify({
+    id: pending.id,
+    dependencyId: dependency.id,
+    priorId: prior.id,
+    completeId: reusable.id,
+    cancelledTargets: [...cancelledTargets.values()],
+  }));
 }
 
 process.on("unhandledRejection", error => {

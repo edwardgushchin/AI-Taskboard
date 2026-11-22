@@ -208,6 +208,89 @@ test("draft dependency retry reuses new matches and skips cancelled drafts", asy
   }
 });
 
+test("retry of a cancelled existing dependency respects title and ID authorizations", async t => {
+  for (const scenario of ["title with replacement", "title without replacement", "specific ID"] as const) {
+    await t.test(scenario, subtest => {
+      const root = fixture(subtest);
+      cli(root, ["init"]);
+      const prior = cli(root, ["create"], { title: "Check allocations" });
+      const source = cli(root, ["create"], { title: "Report memory", dependencies: [prior.id] });
+      const selected = cli(root, ["create"], { title: "Account for managed heap" });
+      const replacement = scenario === "title without replacement"
+        ? undefined : cli(root, ["create"], { title: selected.title });
+      const subject = scenario === "specific ID" ? selected.id : selected.title;
+      const ownerText = `Required dependency: ${subject}`;
+      const chat = { model: "fixture", effort: "low" };
+      const owner = cli(root, ["chat", source.id], { ...chat, text: ownerText });
+      const question = cli(root, ["expert-message", source.id], {
+        actor: "agent", to: "manager", kind: "question", text: ownerText,
+      });
+      onBoard(locateBoard(root), store => {
+        const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+        pending.history.at(-1)!.draftDependency = {
+          subject, question: question.sequence, ownerMessage: owner.history.length, existingId: selected.id,
+        };
+        store.save(pending);
+      });
+      cli(root, ["cancel", selected.id], { revision: selected.revision, reason: "Cancelled while the write was unavailable." });
+      const before = cli(root, ["show", source.id]);
+      cli(root, ["approve", source.id], { revision: before.revision }, "PENDING_OPERATION");
+
+      const command = ["draft-dependency", source.id];
+      const replay = { replyTo: question.sequence };
+      if (scenario === "specific ID") {
+        const stopped = cli(root, command, replay);
+        assert.equal(stopped.requiresChoice, true);
+        assert.deepEqual(cli(root, command, replay), stopped);
+        assert.equal(cli(root, ["manager-inbox"]).some((entry: { id: string }) => entry.id === source.id), false);
+        const waiting = cli(root, ["show", source.id]);
+        assert.deepEqual(waiting.dependencies, [prior.id]);
+        assert.equal(waiting.draftDiscussion.managerReply, stopped.sequence);
+        assert.equal(waiting.history.at(-1).draftDependencyRequiresChoice, true);
+        assert.match(waiting.history.at(-1).text, new RegExp(selected.id + " was cancelled"));
+        const running = cli(root, ["draft-discussion", source.id], { revision: waiting.revision, phase: "running" });
+        const ask = cli(root, ["chat", source.id], {
+          ...chat, actor: "agent", text: "Which dependency should replace the cancelled card?",
+          revision: running.revision, draftDiscussion: true, managerReply: stopped.sequence, awaitingAnswer: false,
+        });
+        assert.equal(ask.awaitingAnswer, true);
+        assert.equal(ask.draftConfirmed, false);
+        cli(root, ["approve", source.id], { revision: ask.revision }, "TASK_AWAITING_ANSWER");
+
+        const nextChoice = `Required dependency: ${replacement.id}`;
+        const nextOwner = cli(root, ["chat", source.id], { ...chat, text: nextChoice });
+        const nextQuestion = cli(root, ["expert-message", source.id], {
+          actor: "agent", to: "manager", kind: "question", text: nextChoice,
+        });
+        const linked = cli(root, command, {
+          revision: nextOwner.revision, ownerSequence: nextOwner.history.length, ownerText: nextChoice,
+          replyTo: nextQuestion.sequence, existingId: replacement.id,
+        });
+        assert.equal(linked.dependencyId, replacement.id);
+        assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, replacement.id]);
+      } else {
+        assert.deepEqual(cli(root, command, replay), { searchRequired: true });
+        const reference = {
+          ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText,
+        };
+        cli(root, command, { ...reference, ownerSequence: String(reference.ownerSequence), authorizeOnly: true },
+          "USER_DIRECTION_REQUIRED");
+        assert.deepEqual(cli(root, command, { ...reference, authorizeOnly: true }), { subject });
+        const target = replacement ? { existingId: replacement.id } :
+          { draft: plannedDraft({ title: subject, tags: ["Memory"] }) };
+        const linked = cli(root, command, { ...reference, ...target });
+        assert.notEqual(linked.dependencyId, selected.id);
+        if (replacement) assert.equal(linked.dependencyId, replacement.id);
+        assert.deepEqual(cli(root, command, replay), linked);
+        assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, linked.dependencyId]);
+        const matchingCards = cli(root, ["list"]).tasks.filter((card: Task) =>
+          card.title === subject && card.status !== "cancelled");
+        assert.deepEqual(matchingCards.map((card: Task) => card.id), [linked.dependencyId]);
+      }
+    });
+  }
+});
+
 test("approval waits for the last saved clarification to close", t => {
   const root = fixture(t);
   cli(root, ["init"]);

@@ -48,7 +48,8 @@ export function linkedDraftManagerReply(task: Task, event: TaskEvent | undefined
   if (mail?.from !== "manager" || mail.replyTo === undefined ||
       draftManagerQuestion(task, mail.replyTo)?.from !== mail.to ||
       deferredDependencyReply(task, mail.replyTo, event)) return;
-  return { text: event.text, replyTo: mail.replyTo, question: task.history[mail.replyTo - 1].text };
+  return { text: event.text, replyTo: mail.replyTo, question: task.history[mail.replyTo - 1].text,
+    ...(event.draftDependencyRequiresChoice ? { requiresChoice: true } : {}) };
 }
 
 export function draftManagerReply(task: Task, sequence: number, to: string) {

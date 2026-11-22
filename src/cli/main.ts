@@ -227,8 +227,10 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   }
   const answered = draftManagerReply(source, question, request.from);
   if (answered) {
-    const dependencyId = source.history[answered - 1].draftDependencyId;
+    const response = source.history[answered - 1];
+    const dependencyId = response.draftDependencyId;
     if (dependencyId) return { dependencyId, sequence: answered };
+    if (response.draftDependencyRequiresChoice) return { requiresChoice: true, sequence: answered };
     if (pendingDraftDependency(source, question)) return { cancelled: true, sequence: answered };
     throw new TaskboardError("INVALID_INPUT", "This draft question already has a reply.");
   }
@@ -274,10 +276,30 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   };
 
   let saved = pendingDraftDependency(source, question);
-  if (!saved) {
+  if (saved && input.authorizeOnly !== true && cancellation > saved.ownerMessage) {
+    const reply = sendTeamMessage(store, id, "manager", {
+      to: request.from, replyTo: question, kind: "decision", text: `The owner cancelled the request for a required dependency: ${subject}.`,
+    }, { parent: source });
+    return { cancelled: true, sequence: reply.sequence };
+  }
+  const savedStatus = saved?.existingId ? dependencyStatus(store, saved.existingId) : undefined;
+  const reselect = Boolean(saved?.existingId && (!savedStatus || savedStatus === "cancelled"));
+  if (reselect && taskIdPattern.test(subject) && input.authorizeOnly !== true) {
+    const reason = savedStatus === "cancelled" ? "was cancelled" : "is no longer on the board";
+    const reply = sendTeamMessage(store, id, "manager", {
+      to: request.from, replyTo: question, kind: "decision",
+      text: `The required dependency ${subject} ${reason}. Ask the owner to choose a different required dependency, by title or card ID.`,
+    }, { parent: { ...source, awaitingAnswer: true, draftConfirmed: false }, requiresChoice: true });
+    return { requiresChoice: true, sequence: reply.sequence };
+  }
+  if (reselect && !taskIdPattern.test(subject) && input.revision === undefined && input.authorizeOnly !== true) {
+    return { searchRequired: true };
+  }
+  if (!saved || reselect && !taskIdPattern.test(subject)) {
     const { ownerSequence, ownerText } = input;
-    if (ownerMessage <= cancellation || ownerSequence !== ownerMessage || ownerMessage >= question ||
-        typeof ownerText !== "string" || !ownerText.trim() || source.history[ownerMessage - 1].text !== ownerText) {
+    const decision = saved?.ownerMessage ?? ownerMessage;
+    if (decision <= cancellation || ownerSequence !== decision || decision >= question ||
+        typeof ownerText !== "string" || !ownerText.trim() || source.history[decision - 1].text !== ownerText) {
       throw new TaskboardError("USER_DIRECTION_REQUIRED", "Cite the saved owner decision for the named dependency that precedes this draft question.");
     }
     requireRevision(source, input.revision, true);
@@ -294,20 +316,12 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
         throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Search for the existing named dependency and select its ID.");
       }
     }
-    saved = { question, ownerMessage, subject, existingId, draft };
+    saved = { question, ownerMessage: decision, subject, existingId, draft };
     source = record({ ...source, draftConfirmed: false }, "draft-dependency-request", "manager");
     source.history.at(-1)!.draftDependency = saved;
     store.save(source);
-  } else {
-    if (input.authorizeOnly === true) {
-      throw new TaskboardError("PENDING_OPERATION", "The queue will resume the already saved dependency request.");
-    }
-    if (cancellation > saved.ownerMessage) {
-      const reply = sendTeamMessage(store, id, "manager", {
-        to: request.from, replyTo: question, kind: "decision", text: `The owner cancelled the request for a required dependency: ${subject}.`,
-      }, { parent: source });
-      return { cancelled: true, sequence: reply.sequence };
-    }
+  } else if (input.authorizeOnly === true) {
+    throw new TaskboardError("PENDING_OPERATION", "The queue will resume the already saved dependency request.");
   }
 
   let dependency: Task;

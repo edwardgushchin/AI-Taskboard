@@ -359,7 +359,7 @@ export function teamInbox(store: BoardStore, taskId: string, recipient: string, 
     ? [{ sequence: index + 1, at: event.at, text: event.text, kind: event.messageKind, ...event.expertMessage }] : []) };
 }
 export function sendTeamMessage(store: BoardStore, taskId: string, sender: string, input: Record<string, unknown>,
-  dependency?: { parent: Task; id?: string }) {
+  dependency?: { parent: Task; id?: string; requiresChoice?: true }) {
   const parent = dependency?.parent ?? teamRoot(store, taskId);
   requireState(parent, ["draft", "ready", "in_progress", "blocked", "review"]);
   const members = [parent.id, ...(parent.expertStages ?? []).map(s => s.taskId), "manager", "owner", "reviewer",
@@ -388,7 +388,8 @@ export function sendTeamMessage(store: BoardStore, taskId: string, sender: strin
   const event: Task["history"][number] = { at: new Date().toISOString(), action: "coordination",
     actor: sender === "owner" ? "user" : sender === "manager" || sender === "reviewer" ? sender : "agent", text: message,
     messageKind: kind as "update", expertMessage: { from: sender, to, replyTo },
-    ...(dependency?.id ? { draftDependencyId: dependency.id } : {}) };
+    ...(dependency?.id ? { draftDependencyId: dependency.id } : {}),
+    ...(dependency?.requiresChoice ? { draftDependencyRequiresChoice: true } : {}) };
   const sequence = parent.history.length + 1;
   store.save({
     ...parent,
