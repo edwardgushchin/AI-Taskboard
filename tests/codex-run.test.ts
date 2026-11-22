@@ -5,7 +5,7 @@ import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,7 @@ import { executorFullAccess } from "../src/desktop/codex.ts";
 import { CodexRpcRejection, codexRpc, stopCodexProcess, watchCodexQuotaExceeded } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
+import { readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
 import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
 
@@ -149,10 +150,21 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   mkdirSync(join(folder, ".worktrees"), { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: folder, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-b", "main");
-  git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Initial");
+  assert.equal((await callCli(folder, ["init"])).ok, true);
+  writeBoardProjectRules(folder, {
+    text: "Executor OLD rule", revision: readBoardProjectRules(folder).revision,
+  });
+  git("add", "AGENTS.md");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--no-gpg-sign", "-m", "Initial");
   const base = git("rev-parse", "HEAD");
   git("worktree", "add", "-b", "ai-taskboard/T-0001", worktree);
-  assert.equal((await callCli(folder, ["init"])).ok, true);
+  if (process.platform !== "win32") {
+    renameSync(join(folder, "AGENTS.md"), join(folder, "executor-rules.md"));
+    symlinkSync("executor-rules.md", join(folder, "AGENTS.md"), "file");
+  }
+  writeBoardProjectRules(folder, {
+    text: "Executor CURRENT rule", revision: readBoardProjectRules(folder).revision,
+  });
   const stub = join(folder, "codex.cjs");
   const capture = join(folder, "captured.json");
   const thread = "01234567-1234-5678-1234-123456789012";
@@ -395,6 +407,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(!("projectId" in started.params));
   assert.equal(started.params.cwd, worktree);
   assert.equal(turn.params.effort, "high");
+  const suppliedRules = turn.params.additionalContext.ai_taskboard_project_rules.value;
+  assert.match(suppliedRules, /Executor CURRENT rule/);
+  assert.doesNotMatch(suppliedRules, /Executor OLD rule/);
+  assert.match(readFileSync(join(worktree, "AGENTS.md"), "utf8"), /Executor OLD rule/);
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
   assert.ok(started.params.developerInstructions.includes(russianWriting));
@@ -482,7 +498,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   for (const [status, rationale] of [["denied", "This destination is outside the project scope."], ["approved", "Read public documentation."]]) {
     activity.length = 0;
     assert.equal(await (await launch("review-" + status)).completion, undefined);
-    assert.deepEqual(activity.filter(item => item.type === "autoApprovalReview").map(({ at, ...item }) => item), [
+    const approvals = activity.filter(item => item.type === "autoApprovalReview");
+    assert.ok(approvals.every(item => item.threadId === thread && item.stageSessionId));
+    assert.deepEqual(approvals.map(({ at, threadId, stageSessionId, ...item }) => item), [
       { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: "", status: "inProgress" },
       { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: rationale, status },
     ]);
@@ -490,7 +508,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   }
   assert.deepEqual(await (await launch("failed")).completion, { reason: "Provider disconnected" });
   const closed = await (await launch("closed")).completion;
-  assert.deepEqual(closed, { reason: "The Codex process closed.", disconnected: true });
+  assert.deepEqual(closed, { reason: "The Codex process closed.", disconnected: true, unconfirmed: true });
   const receivedMessages: string[] = [];
   const controlled = await startCodexRun(client("control"), folder, worktree, task, item => activity.push(item),
     undefined, undefined, undefined, undefined, undefined, false,
@@ -631,7 +649,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     });
     assert.deepEqual(await measured.completion, outcome === "usage" ? undefined :
       outcome === "usage-failed" ? { reason: "Provider disconnected" } :
-        { reason: "The Codex process closed.", disconnected: true });
+        { reason: "The Codex process closed.", disconnected: true, unconfirmed: true });
   }
   const interrupted = await launch("control");
   await interrupted.interrupt();

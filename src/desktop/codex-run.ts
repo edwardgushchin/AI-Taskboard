@@ -10,6 +10,7 @@ import { git, gitSafeDirectoryEnvironment, isolatedWorktreesDirectory } from "..
 import { boardReviewMode, codexThreadPattern } from "../cli/model.ts";
 import type { BoardSettings, RunActivity, Task } from "../cli/model.ts";
 import { directory } from "../cli/storage.ts";
+import { boardProjectRulesPrompt } from "../cli/board-agents.ts";
 import { redactSecrets } from "../cli/redact.ts";
 import { runActivity } from "./run-activity.ts";
 import { boardAgentInstructions, boardCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
@@ -556,10 +557,15 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         { code: "CODEX_START_UNCONFIRMED" });
     }
     signal?.throwIfAborted();
+    const projectRules = recovered ? "" : boardProjectRulesPrompt(project);
     const { turn } = recovered ? { turn: recovered } : await request<{ turn: Turn }>("turn/start", {
-      threadId, effort: task.execution?.effort, input: [{ type: "text", text: prompt, text_elements: [] }],
+      threadId, effort: task.execution?.effort,
+      input: [{ type: "text", text: prompt, text_elements: [] }],
       ...(queued ? { clientUserMessageId: queued.clientId } : {}),
-      additionalContext: { ai_taskboard_worklog: { value: worklogReminder, kind: "application" } },
+      additionalContext: {
+        ai_taskboard_worklog: { value: worklogReminder, kind: "application" },
+        ...(projectRules ? { ai_taskboard_project_rules: { value: projectRules, kind: "application" } } : {}),
+      },
     }).catch(error => {
       if (error instanceof CodexRpcRejection && queued?.rejected) {
         queued.rejected(error.message.trim() || "Codex rejected the turn start.");

@@ -5594,6 +5594,66 @@ function settings() {
   if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
 
+function appendProjectRules(project, before) {
+  const form = element("form", undefined, "form");
+  const label = element("label", () => t("projectRules.label"));
+  const input = element("textarea");
+  input.name = "projectRules";
+  input.rows = 5;
+  label.append(input);
+  const help = element("small", () => t("projectRules.help"), "muted");
+  help.id = "board-project-rules-help";
+  const status = element("p", "", "muted");
+  status.setAttribute("role", "status");
+  const savedLabel = element("label", () => t("projectRules.current"));
+  const saved = element("textarea");
+  saved.readOnly = true;
+  saved.rows = 3;
+  savedLabel.append(saved);
+  savedLabel.hidden = true;
+  const save = element("button", () => t("projectRules.save"), "button primary");
+  input.setAttribute("aria-describedby", help.id);
+  input.disabled = save.disabled = true;
+  form.append(label, help, savedLabel, status, save);
+  if (before) before.before(form);
+  else body.append(form);
+
+  let revision;
+  const request = async draft => {
+    try {
+      const result = await api.projectRules(project, draft);
+      if (!form.isConnected) return;
+      if (result.ok) {
+        revision = result.data.revision;
+        if (!draft || input.value === draft.text) input.value = result.data.text;
+        savedLabel.hidden = true;
+        bindLocalized(status, "textContent", () => draft ? t("projectRules.saved") : "");
+        input.disabled = false;
+      } else if (result.error.code === "PROJECT_RULES_CONFLICT") {
+        revision = result.error.details.revision;
+        saved.value = result.error.details.text;
+        savedLabel.hidden = false;
+        bindLocalized(status, "textContent", () => t("projectRules.conflict"));
+      } else {
+        bindLocalized(status, "textContent", () => boardError(result.error));
+      }
+    } catch (error) {
+      bindLocalized(status, "textContent", () => error.message);
+    } finally {
+      save.disabled = false;
+      bindLocalized(save, "textContent", () => t(revision === undefined ? "projectRules.load" : "projectRules.save"));
+    }
+  };
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (save.disabled) return;
+    save.disabled = true;
+    void request(revision === undefined ? undefined : { text: input.value, revision });
+  });
+  void request();
+  return form;
+}
+
 function boardSettings() {
   if (!frame.board) return;
   if (manualBoard()) return manualBoardSettings();
@@ -5673,6 +5733,7 @@ function boardSettings() {
       sheet.close();
     }
   });
+  appendProjectRules(project, editor);
   const [, review, ...selects] = editor.querySelectorAll("select");
   body.append(button(() => t("experts.title"), () => expertSettings()));
   const reviewHint = element("small", undefined, "muted");
@@ -6747,6 +6808,8 @@ function createManualTask(status) {
 }
 
 function manualBoardSettings() {
+  const { project } = frame;
+  let projectRules;
   const previous = structuredClone(manualColumns());
   const columns = structuredClone(previous);
   const moves = {};
@@ -6790,6 +6853,8 @@ function manualBoardSettings() {
     body.append(button("Сохранить колонки", async () => {
       if (await command("manual-columns", undefined, { previous, columns, moves })) sheet.close();
     }, "primary"));
+    if (projectRules) body.append(projectRules);
+    else projectRules = appendProjectRules(project);
   }
   render();
 }
