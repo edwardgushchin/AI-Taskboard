@@ -12,7 +12,7 @@ import { sweepArchives } from "../src/cli/archive.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { statusNotice } from "../src/cli/task-messages.ts";
 import type { Task } from "../src/cli/model.ts";
-import { goalActivityItems, hasManagerImageView, managerChatItems, managerUnread, managerWorkItems, readManagerDialogue, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
+import { goalActivityItems, hasManagerImageView, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readManagerDialogue, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
 import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
@@ -577,4 +577,31 @@ test("legacy unread arrays migrate when a later reply is read", t => {
   const saved = JSON.parse(readFileSync(join(project, ".tasks", "manager-unread.json"), "utf8"));
   assert.deepEqual(saved.unread, []);
   assert.equal(saved.through.at, 2);
+});
+
+test("board snapshots normalize legacy unread markers without losing the read position", async t => {
+  const project = fixture(t);
+  const path = join(project, ".tasks", "manager-unread.json");
+  const run = randomUUID();
+  const notice = randomUUID();
+  const reply = (id: string) => ({
+    id, type: "agentMessage", title: "", text: id, phase: "final_answer", status: "completed",
+  } as const);
+  saveManagerHistory(project, 1, run, { lane: "chat", items: [reply("seen"), reply("pending")] });
+  saveManagerHistory(project, 2, notice, { lane: "notice", items: [reply(notice), reply("pending")] });
+  const through = { at: 1, file: "0000000000001-" + run + ".json", index: 0 };
+  writeJson(path, { unread: ["pending", notice, "interrupted-delivery"], through });
+
+  assert.equal(managerUnreadSnapshot(project), undefined);
+  await assert.rejects(normalizeManagerUnread(project, AbortSignal.abort()), { name: "AbortError" });
+  assert.equal(managerUnreadSnapshot(project), undefined);
+  assert.equal(await normalizeManagerUnread(project, new AbortController().signal), true);
+  const saved = JSON.parse(readFileSync(path, "utf8"));
+  assert.deepEqual(saved, { unread: ["pending", "interrupted-delivery"], through, dialogueOnly: true });
+
+  // An unrelated unreadable history entry must not affect a normalized counter.
+  writeFileSync(join(project, ".tasks", "manager-chat", "0000000000003-" + randomUUID() + ".json"), "{");
+  assert.deepEqual(managerUnreadSnapshot(project), ["pending", "interrupted-delivery"]);
+  assert.equal(saveManagerHistory(project, 4, randomUUID(), { lane: "chat", items: [reply("new")] }), true);
+  assert.deepEqual(managerUnreadSnapshot(project), ["pending", "interrupted-delivery", "new"]);
 });

@@ -58,7 +58,7 @@ import { linkedDraftManagerReply, needsManagerAttention } from "../cli/task-mess
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
-import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
@@ -108,6 +108,8 @@ interface WindowState {
 }
 
 interface BoardWatch {
+  unreadMigration?: AbortController;
+  unreadMigrationNeeded?: boolean;
   failedDiscussionStarts?: Map<string, number>;
   draftDiscussionCursor?: number;
   tabs: Set<ProjectTab>;
@@ -229,8 +231,27 @@ function stateOf(event: IpcMainInvokeEvent): ProjectTab {
 }
 
 function boardUnread(project?: string) {
-  try { return project ? managerUnread(project) : []; }
-  catch { return []; }
+  if (!project) return [];
+  const unread = managerUnreadSnapshot(project);
+  const watch = subscriptions.get(project);
+  if (!watch) return unread ?? [];
+  watch.unreadMigrationNeeded = unread === undefined;
+  if (unread === undefined && !watch.unreadMigration && watch.tabs.size) {
+    const migration = new AbortController();
+    watch.unreadMigration = migration;
+    void normalizeManagerUnread(project, migration.signal).then(complete => {
+      if (migration.signal.aborted) return;
+      watch.unreadMigrationNeeded = !complete;
+      if (complete) publishManagerUnread(project);
+    }).catch(error => {
+      if (migration.signal.aborted) return;
+      watch.unreadMigrationNeeded = error.code === "BOARD_BUSY";
+      if (!watch.unreadMigrationNeeded) console.error("Could not normalize unread messages.", error);
+    }).finally(() => {
+      watch.unreadMigration = undefined;
+    });
+  }
+  return unread ?? [];
 }
 
 function frame(state: ProjectTab) {
@@ -247,8 +268,8 @@ function frame(state: ProjectTab) {
   const sharedGoal = sharedRuns.find(entry => entry.task === "manager:context")?.state;
   const background = sharedRuns.find(entry => entry.task === "manager:background")?.state;
   const openTabs = windowStates.get(state.window.webContents.id)?.tabs ?? [];
-  const unreadTabs = new Set(openTabs.flatMap(tab =>
-    tab.project && boardUnread(tab.board?.project).length ? [tab.project] : []));
+  const unreadByProject = new Map(openTabs.flatMap(tab =>
+    tab.board ? [[tab.board.project, boardUnread(tab.board.project)] as const] : []));
   const activity = activeRunSummary([...subscriptions.values()].map(watch => ({
     path: watch.board.project, name: watch.board.settings.name, taskLimits: watch.board.settings.taskLimits })));
   const reviewingTasks = Object.fromEntries(state.board?.tasks.flatMap(task => {
@@ -265,11 +286,11 @@ function frame(state: ProjectTab) {
     tabs: projectLabels(openTabs.flatMap(tab =>
       tab.project ? [{ path: tab.project, name: tab.board?.settings?.name }] : []))
       .map(tab => ({
-        ...tab, unread: unreadTabs.has(tab.path), activity: activity.boards.find(board => board.path === tab.path),
+        ...tab, unread: Boolean(unreadByProject.get(tab.path)?.length), activity: activity.boards.find(board => board.path === tab.path),
         expertCatalogVersion: subscriptions.get(tab.path)?.board.expertCatalogVersion,
       })),
     activeAgents: activity,
-    managerUnread: boardUnread(state.board?.project),
+    managerUnread: state.board ? unreadByProject.get(state.board.project) ?? boardUnread(state.board.project) : [],
     project: state.project, board: state.board, error: state.error, loading: state.loading, localization: localization.state(), theme,
     managerQuestion: key ? managerQuestion(key)?.view : undefined,
     managerAccess: state.project ? managerAccess(app.getPath("userData"), state.project) : "auto",
@@ -370,6 +391,7 @@ function unbind(state: ProjectTab): void {
   const project = state.board.project;
   const watch = subscriptions.get(project);
   watch?.tabs.delete(state);
+  if (watch && !watch.tabs.size) watch.unreadMigration?.abort();
   if (watch) releaseWatch(project, watch);
 }
 
@@ -396,6 +418,7 @@ function subscribe(project: string, board: Board): BoardWatch {
     reviewReports: readReviewReports(app.getPath("userData"), project), reviewerRuns: new Map(),
     stop: () => {
       stopped = true;
+      watch.unreadMigration?.abort();
       if (retry) clearTimeout(retry);
       if (noticeRetry) clearTimeout(noticeRetry);
       clearInterval(sweep);
@@ -5556,6 +5579,7 @@ else {
       for (const watch of subscriptions.values()) {
         const project = watch.board.project;
         try {
+          if (watch.unreadMigrationNeeded && !watch.unreadMigration && watch.tabs.size) boardUnread(project);
           const entries = agentSlots.entries(project);
           const context = entries.find(entry => entry.task === "manager:dialogue");
           const goalContext = entries.find(entry => entry.task === "manager:context");

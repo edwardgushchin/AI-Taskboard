@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, readdirSync, statSync } from "node:fs";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { codexThreadPattern } from "../cli/model.ts";
+import { codexThreadPattern, TaskboardError } from "../cli/model.ts";
 import { directory, exists, readJson, writeJson } from "../cli/storage.ts";
 import type { BoardActivity, readBoardHistory } from "./codex-chat.ts";
 import { onBoard, withRuntimeLock } from "../cli/storage.ts";
@@ -76,7 +77,7 @@ const isStatusNotice = ({ lane, goalId }: Pick<Run, "lane" | "goalId">) => lane 
 const cursorPrefix = "local:";
 const filePattern = /^\d{13}-[0-9a-f-]{36}\.json$/i;
 type ReadPosition = { at: number; file: string; index: number };
-type UnreadState = { unread: string[]; through?: ReadPosition };
+type UnreadState = { unread: string[]; through?: ReadPosition; dialogueOnly?: true };
 const lastUnread = new Map<string, string[]>();
 
 export function hasManagerImageView(project: string, path: string): boolean {
@@ -98,7 +99,7 @@ export function hasManagerImageView(project: string, path: string): boolean {
 
 export const isLocalManagerCursor = (cursor: string | null) => cursor?.startsWith(cursorPrefix) ?? false;
 
-function unreadState(project: string): UnreadState {
+function readUnreadState(project: string): UnreadState {
   const path = join(project, ".tasks", "manager-unread.json");
   const saved = exists(path) ? readJson(path) : [];
   const state: UnreadState = Array.isArray(saved) ? { unread: saved } : saved as UnreadState;
@@ -106,16 +107,17 @@ function unreadState(project: string): UnreadState {
       (state.through && (!Number.isFinite(state.through.at) || !filePattern.test(state.through.file) || !Number.isSafeInteger(state.through.index) || state.through.index < 0))) {
     throw new Error("Invalid manager unread messages.");
   }
-  const folder = join(project, ".tasks", "manager-chat");
+  return state;
+}
+
+function legacyUnreadFilter(unread: string[]) {
   // Older versions used the same UUID for the notice item and its run file.
   // Preserve pending dialogue delivery and the saved read position.
-  const candidates = new Set(state.unread);
+  const candidates = new Set(unread);
   const statusIds = new Set<string>();
   const dialogueIds = new Set<string>();
-  if (candidates.size && exists(folder)) for (const file of readdirSync(folder)) {
-    if (!filePattern.test(file)) continue;
+  function visit(file: string, run: Run) {
     const id = file.slice(14, -5);
-    const run = readJson(join(folder, file)) as Run;
     if (run.lane !== "chat" || run.goalId) {
       if (candidates.has(id)) statusIds.add(id);
       for (const item of run.items) {
@@ -125,13 +127,73 @@ function unreadState(project: string): UnreadState {
       }
     } else {
       for (const item of run.items) {
-        dialogueIds.add(item.id);
+        if (candidates.has(item.id)) dialogueIds.add(item.id);
       }
     }
   }
-  state.unread = state.unread.filter(id => !statusIds.has(id) || dialogueIds.has(id));
+  return { visit, result: () => unread.filter(id => !statusIds.has(id) || dialogueIds.has(id)) };
+}
+
+function unreadState(project: string): UnreadState {
+  const state = readUnreadState(project);
+  if (state.dialogueOnly !== true && state.unread.length) {
+    const folder = join(project, ".tasks", "manager-chat");
+    const filter = legacyUnreadFilter(state.unread);
+    if (exists(folder)) for (const file of readdirSync(folder)) {
+      if (filePattern.test(file)) filter.visit(file, readJson(join(folder, file)) as Run);
+    }
+    state.unread = filter.result();
+  }
   lastUnread.set(project, [...state.unread]);
   return state;
+}
+
+// A new snapshot needs only the small unread file. Legacy files are normalized
+// separately so building an Electron frame never has to walk the chat history.
+export function managerUnreadSnapshot(project: string): string[] | undefined {
+  try {
+    const state = readUnreadState(project);
+    if (state.dialogueOnly !== true && state.unread.length) return undefined;
+    lastUnread.set(project, [...state.unread]);
+    return state.unread;
+  } catch {
+    return lastUnread.get(project) ?? [];
+  }
+}
+
+export async function normalizeManagerUnread(project: string, signal: AbortSignal): Promise<boolean> {
+  const state = readUnreadState(project);
+  if (state.dialogueOnly === true || !state.unread.length) return true;
+  const board = join(project, ".tasks");
+  const folder = join(board, "manager-chat");
+  const directoryStat = await lstat(folder).catch(error => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  if (directoryStat && !directoryStat.isDirectory()) {
+    throw new TaskboardError("INVALID_STORAGE_PATH", "Expected a real directory at " + folder + ".");
+  }
+  const files = directoryStat ? (await readdir(folder)).filter(file => filePattern.test(file)) : [];
+  const filter = legacyUnreadFilter(state.unread);
+  for (let offset = 0; offset < files.length; offset += 8) {
+    signal.throwIfAborted();
+    await Promise.all(files.slice(offset, offset + 8).map(async file => {
+      const path = join(folder, file);
+      if (!(await lstat(path)).isFile()) {
+        throw new TaskboardError("INVALID_STORAGE_PATH", "Expected a regular file at " + path + ".");
+      }
+      const contents = await readFile(path, { encoding: "utf8", signal });
+      filter.visit(file, JSON.parse(contents) as Run);
+    }));
+  }
+  signal.throwIfAborted();
+  return withRuntimeLock(board, () => {
+    const current = readUnreadState(project);
+    if (current.dialogueOnly === true || !current.unread.length) return true;
+    if (JSON.stringify(current) !== JSON.stringify(state)) return false;
+    if (lstatSync(folder, { throwIfNoEntry: false })?.mtimeMs !== directoryStat?.mtimeMs) return false;
+    persistManagerUnread(project, filter.result(), state.through);
+    return true;
+  }, 0);
 }
 
 export function managerUnread(project: string): string[] {
@@ -143,13 +205,15 @@ export function managerUnread(project: string): string[] {
   }
 }
 
-function updateManagerUnread(project: string, ids: string[], through = unreadState(project).through): boolean {
-  const previous = unreadState(project);
+function persistManagerUnread(project: string, ids: string[], through?: ReadPosition) {
+  writeJson(join(project, ".tasks", "manager-unread.json"), { unread: ids, through, dialogueOnly: true });
+  lastUnread.set(project, [...ids]);
+}
+
+function updateManagerUnread(project: string, previous: UnreadState, ids: string[], through: ReadPosition | undefined): boolean {
   if (ids.length === previous.unread.length && ids.every((id, index) => id === previous.unread[index]) &&
       through?.at === previous.through?.at && through?.file === previous.through?.file && through?.index === previous.through?.index) return false;
-  const state = { unread: ids, through };
-  writeJson(join(project, ".tasks", "manager-unread.json"), state);
-  lastUnread.set(project, [...ids]);
+  persistManagerUnread(project, ids, through);
   return true;
 }
 
@@ -178,7 +242,7 @@ export function readManagerMessages(project: string, ids: string[]) {
       const position = positions.get(id);
       if (position && (!through || comparePosition(position, through) > 0)) through = position;
     }
-    return updateManagerUnread(project, state.unread.filter(id => {
+    return updateManagerUnread(project, state, state.unread.filter(id => {
       const position = positions.get(id);
       return !position || !through || comparePosition(position, through) > 0;
     }), through);
@@ -219,13 +283,14 @@ export function saveManagerHistory(project: string, startedAt: number, id: strin
     if (incoming.length) {
       const previous = exists(path) ? new Set(incomingMessages(readJson(path) as Run)) : new Set<string>();
       // Write unread first so replay can retain the marker after an interrupted write.
-      const { unread, through } = unreadState(project);
+      const state = unreadState(project);
+      const { unread, through } = state;
       const added = incoming.filter(messageId => {
         if (previous.has(messageId)) return false;
         const index = run.items.findIndex(item => item.id === messageId);
         return !through || comparePosition(messagePosition(file, run.items[index], index), through) > 0;
       });
-      changed = added.length > 0 && updateManagerUnread(project, [...new Set([...unread, ...added])], through);
+      changed = added.length > 0 && updateManagerUnread(project, state, [...new Set([...unread, ...added])], through);
     }
     writeJson(path, run);
     return changed;
