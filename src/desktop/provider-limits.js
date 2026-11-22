@@ -77,21 +77,13 @@ if (typeof document !== "undefined") {
       }
       group.append(header);
       content.append(group);
-      const count = globalThis.providerLimitResetCount(providers[index], now);
-      if (count !== undefined) {
-        const resets = document.createElement("p");
-        resets.className = "limits-reset-count";
-        resets.textContent = t("limits.available_resets", { count: new Intl.NumberFormat(localization.locale).format(count) });
-        group.append(resets);
-      }
-      if (provider.state === "unsupported" || provider.state === "no_windows") continue;
-      if (provider.state !== "ready") {
+      if (!["ready", "unsupported", "no_windows"].includes(provider.state)) {
         const status = document.createElement("p");
         status.textContent = t("limits." + provider.state);
         group.append(status);
-        continue;
       }
-      for (const window of provider.windows) {
+      const windows = provider.state === "ready" ? provider.windows : [];
+      for (const window of windows) {
         const quota = document.createElement("div");
         quota.className = "limits-window";
         const row = document.createElement("p");
@@ -121,6 +113,25 @@ if (typeof document !== "undefined") {
           quota.append(warning);
         }
         group.append(quota);
+      }
+      const snapshot = providers[index];
+      const count = globalThis.providerLimitResetCount(snapshot, now);
+      if (count === undefined) continue;
+      const resets = document.createElement("p");
+      resets.className = "limits-reset-count";
+      resets.textContent = t("limits.available_resets", { count: new Intl.NumberFormat(localization.locale).format(count) });
+      group.append(resets);
+      const expirations = count > 0 ? snapshot.resetCreditExpirations?.filter(time => time === null || time > now) : undefined;
+      if (expirations?.length) {
+        const list = document.createElement("ul");
+        list.className = "limits-reset-credits";
+        for (const time of expirations) {
+          const item = document.createElement("li");
+          item.textContent = time === null ? t("limits.reset_expiry_unknown") :
+            t("limits.reset_expires", { time: new Date(time).toLocaleString(localization.locale) });
+          list.append(item);
+        }
+        group.append(list);
       }
     }
     panel.replaceChildren(content);

@@ -24,6 +24,36 @@ test("reset count comes from the numeric total even without complete details or 
   assert.equal(visibleCount(empty, now - 1), undefined);
   assert.equal(visibleCount(empty, now + 180_001), undefined);
 });
+
+test("only available reset details with usable expiration dates reach the panel", () => {
+  const observedAt = 10_000;
+  const credit = (expiresAt: unknown, status = "available") => ({ status, expiresAt });
+  const credits = [
+    credit(25),
+    credit(null),
+    credit(30),
+    credit(40, "consumed"),
+    credit(10),
+    credit("30"),
+    credit("30x"),
+    credit("3e1"),
+    credit(undefined),
+    credit(NaN),
+    credit(Infinity),
+    credit(8.64e12 + 1),
+    null,
+  ];
+  const snapshot = (availableCount: number, details: unknown = credits) =>
+    codexLimitSnapshot({ rateLimitResetCredits: { availableCount, credits: details } }, observedAt);
+
+  assert.equal(snapshot(5).availableResetCount, 5);
+  assert.deepEqual(snapshot(5).resetCreditExpirations, [25_000, null, 30_000]);
+  assert.equal(snapshot(0).availableResetCount, 0);
+  assert.equal(snapshot(0).resetCreditExpirations, undefined);
+  assert.equal(snapshot(5, null).availableResetCount, 5);
+  assert.equal(snapshot(5, null).resetCreditExpirations, undefined);
+});
+
 test('available windows only; used becomes remaining, multi-bucket supersedes legacy', () => {
  const bucket={limitId:'codex',primary:{usedPercent:77,windowDurationMins:300,resetsAt:2000000000},secondary:{usedPercent:100,windowDurationMins:10080}};
  assert.deepEqual(codexLimitWindows({rateLimits:bucket}).map(w=>w.remaining),[23,0]);

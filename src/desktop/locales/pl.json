@@ -1209,6 +1209,8 @@
   "limits.duration": "Limit na {duration}",
   "limits.window": "Limit",
   "limits.unknown": "Brak danych",
+  "limits.reset_expires": "Wygasa {time}",
+  "limits.reset_expiry_unknown": "Nie podano terminu ważności",
   "limits.available_resets": "Dostępne resety: {count}",
   "limits.auth": "Wymagane logowanie",
   "limits.error": "Nie udało się odczytać limitów",

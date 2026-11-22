@@ -1193,6 +1193,8 @@
   "limits.duration": "{duration}の上限",
   "limits.window": "上限",
   "limits.unknown": "データなし",
+  "limits.reset_expires": "有効期限: {time}",
+  "limits.reset_expiry_unknown": "有効期限の情報なし",
   "limits.available_resets": "利用可能なリセット回数: {count}",
   "limits.auth": "ログインが必要です",
   "limits.error": "上限を取得できませんでした",

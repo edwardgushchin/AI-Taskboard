@@ -237,11 +237,17 @@ app.whenReady().then(async () => {
       observedAt: Date.now(),
       windows: [{ ...codex.windows[0], resetsAt: dailyReset }, weekly],
     };
-    for (const [count, filename] of [[3, "positive"], [0, "zero"]]) {
-      await set([{ ...resetFixture, availableResetCount: count }]);
+    const resetCreditExpirations = [weekly.resetsAt + 86_400_000, weekly.resetsAt + 172_800_000, null];
+    for (const [count, filename] of [[4, "positive"], [0, "zero"]]) {
+      await set([{ ...resetFixture, availableResetCount: count, resetCreditExpirations }]);
       await check(`(() => {
         const counters = popup.querySelectorAll("section > .limits-reset-count");
         const dates = [...popup.querySelectorAll(".limits-window > .limits-reset")];
+        const items = [...popup.querySelectorAll(".limits-reset-credits > li")];
+        const expectedItems = ${count} ? ${JSON.stringify(resetCreditExpirations)}.map(time =>
+          time === null ? "Срок действия не указан" :
+            "Действует до " + new Date(time).toLocaleString(taskboardLocalization.locale)
+        ) : [];
         const expectedDates = [${dailyReset}, ${weekly.resetsAt}].map(time =>
           taskboardLocalization.text("limits.reset", {
             time: new Date(time).toLocaleString(taskboardLocalization.locale),
@@ -250,8 +256,15 @@ app.whenReady().then(async () => {
         return innerWidth === 1280 && innerHeight === 900 && popup.matches(":popover-open") &&
           counters.length === 1 && counters[0].textContent === "Доступно сбросов: ${count}" &&
           dates.length === 2 && dates.every((row, index) => row.textContent === expectedDates[index]) &&
+          [...popup.querySelectorAll(".limits-window")].every(window =>
+            window.getBoundingClientRect().bottom <= counters[0].getBoundingClientRect().top
+          ) &&
+          items.length === expectedItems.length && items.every((item, index) =>
+            item.textContent === expectedItems[index] &&
+            item.getBoundingClientRect().top >= counters[0].getBoundingClientRect().bottom
+          ) &&
           !query("button, a, input");
-      })()`, `1280×900: one read-only reset count (${count}) and the date of each quota window`);
+      })()`, `1280×900: one reset count (${count}) below both quota windows, window dates, and credit expirations`);
       const area = await evaluate(`(() => {
         const rect = popup.getBoundingClientRect();
         const x = Math.max(0, Math.floor(rect.left) - 8);
@@ -261,24 +274,43 @@ app.whenReady().then(async () => {
       await evaluate("document.fonts.ready.then(() => true)");
       writeFileSync(join(artifacts, `codex-resets-${filename}.png`), (await page.capturePage(area)).toPNG());
     }
-    await set([resetFixture]);
-    await check('!query(".limits-reset-count") && popup.querySelectorAll(".limits-reset").length === 2',
-      "A legacy response clears the counter and keeps both window dates");
+    await set([{ ...resetFixture, resetCreditExpirations }]);
+    await check('!query(".limits-reset-count, .limits-reset-credits") && popup.querySelectorAll(".limits-reset").length === 2',
+      "An absent count hides credit details and keeps both window dates");
     for (const count of ["5e1", "3x", null, -1, 1.5]) {
-      await set([{ ...resetFixture, availableResetCount: count }]);
-      await check('!query(".limits-reset-count")', `Malformed count is hidden: ${JSON.stringify(count)}`);
+      await set([{ ...resetFixture, availableResetCount: count, resetCreditExpirations }]);
+      await check('!query(".limits-reset-count, .limits-reset-credits")', `Malformed count is hidden: ${JSON.stringify(count)}`);
     }
     await set([{ ...resetFixture, availableResetCount: 3 }]);
-    await check('query(".limits-reset-count").textContent === "Доступно сбросов: 3"',
-      "Restoring a valid count after unavailable values restores the line");
+    await check('query(".limits-reset-count").textContent === "Доступно сбросов: 3" && !query(".limits-reset-credits")',
+      "Without a list, the valid count appears by itself");
+    const alternateExpiration = weekly.resetsAt + 259_200_000;
+    await set([{
+      ...resetFixture,
+      availableResetCount: 2,
+      resetCreditExpirations: [Date.now() - 1000, alternateExpiration],
+    }]);
+    await check(`query(".limits-reset-count").textContent === "Доступно сбросов: 2" &&
+      query(".limits-reset-credits > li:only-child")?.textContent ===
+        "Действует до " + new Date(${alternateExpiration}).toLocaleString(taskboardLocalization.locale)`,
+    "Replacing the response removes earlier and already expired rows without changing the reported count");
+    await set([{ ...resetFixture, availableResetCount: 4, resetCreditExpirations }]);
     await evaluate('taskboardLocalization.select("en"); renderProviderLimits()');
-    await check('query(".limits-reset-count").textContent === "Available resets: 3"',
-      "English localization uses the same count");
+    await check(`query(".limits-reset-count").textContent === "Available resets: 4" &&
+      query(".limits-reset-credits > li").textContent ===
+        "Expires " + new Date(${resetCreditExpirations[0]}).toLocaleString(taskboardLocalization.locale) &&
+      query(".limits-reset-credits > li:last-child").textContent === "Expiration not provided"`,
+    "Restored data shows the original count and dates in English");
     await evaluate('taskboardLocalization.select("ru"); renderProviderLimits()');
+    await check(`query(".limits-reset-count").textContent === "Доступно сбросов: 4" &&
+      query(".limits-reset-credits > li").textContent ===
+        "Действует до " + new Date(${resetCreditExpirations[0]}).toLocaleString(taskboardLocalization.locale) &&
+      query(".limits-reset-credits > li:last-child").textContent === "Срок действия не указан"`,
+    "Restoring Russian restores the count, caption and date format");
 
-    await set([{ ...codex, observedAt: Date.now() - 181_000, availableResetCount: 3 }]);
+    await set([{ ...codex, observedAt: Date.now() - 181_000, availableResetCount: 4, resetCreditExpirations }]);
     await check(`popup.textContent.includes(taskboardLocalization.text("limits.stale")) && !query("meter") &&
-      !query(".limits-reset-count") && button.textContent.includes("?")`, "Old observations show only the stale state");
+      !query(".limits-reset-count, .limits-reset-credits") && button.textContent.includes("?")`, "Old observations show only the stale state");
     await set([{ ...codex, windows: [{ ...weekly, resetsAt: Date.now() - 1 }] }]);
     await check('popup.textContent.includes(taskboardLocalization.text("limits.stale")) && !query("meter")',
       "An elapsed reset also shows the stale state");
@@ -309,7 +341,7 @@ app.whenReady().then(async () => {
     await check('!popup.matches(":popover-open")', "The status button closes the open panel");
     const report = [
       `Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, ${process.platform} ${process.arch}`,
-      "Command: node scripts/check-provider-limits.mjs --artifacts .tasks/qa/codex-resets",
+      "Command: node scripts/check-provider-limits.mjs --artifacts .tasks/qa/codex-resets-expiry",
       "Production markup, styles and renderer with fixture responses at the providerLimits boundary.",
       "Codex reset screenshots show the panel and status bar cropped from a 1280×900 content viewport.",
       "The renderer check covers the counter transition and recovery. Account identity, shared main-process reads and RPC methods are verified separately.",
