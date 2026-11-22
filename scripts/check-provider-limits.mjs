@@ -229,17 +229,73 @@ app.whenReady().then(async () => {
         `${theme}: ${width}px, unknown Codex plan is hidden`);
     }
 
-    await set([{ ...codex, observedAt: Date.now() - 181_000 }]);
+    win.setContentSize(1280, 900);
+    nativeTheme.themeSource = "dark";
+    const dailyReset = weekly.resetsAt - 18 * 3_600_000;
+    const resetFixture = {
+      ...codex,
+      observedAt: Date.now(),
+      windows: [{ ...codex.windows[0], resetsAt: dailyReset }, weekly],
+    };
+    for (const [count, filename] of [[3, "positive"], [0, "zero"]]) {
+      await set([{ ...resetFixture, availableResetCount: count }]);
+      await check(`(() => {
+        const counters = popup.querySelectorAll("section > .limits-reset-count");
+        const dates = [...popup.querySelectorAll(".limits-window > .limits-reset")];
+        const expectedDates = [${dailyReset}, ${weekly.resetsAt}].map(time =>
+          taskboardLocalization.text("limits.reset", {
+            time: new Date(time).toLocaleString(taskboardLocalization.locale),
+          })
+        );
+        return innerWidth === 1280 && innerHeight === 900 && popup.matches(":popover-open") &&
+          counters.length === 1 && counters[0].textContent === "Доступно сбросов: ${count}" &&
+          dates.length === 2 && dates.every((row, index) => row.textContent === expectedDates[index]) &&
+          !query("button, a, input");
+      })()`, `1280×900: one read-only reset count (${count}) and the date of each quota window`);
+      const area = await evaluate(`(() => {
+        const rect = popup.getBoundingClientRect();
+        const x = Math.max(0, Math.floor(rect.left) - 8);
+        const y = Math.max(0, Math.floor(rect.top) - 8);
+        return { x, y, width: Math.min(innerWidth, Math.ceil(rect.right) + 8) - x, height: innerHeight - y };
+      })()`);
+      await evaluate("document.fonts.ready.then(() => true)");
+      writeFileSync(join(artifacts, `codex-resets-${filename}.png`), (await page.capturePage(area)).toPNG());
+    }
+    await set([resetFixture]);
+    await check('!query(".limits-reset-count") && popup.querySelectorAll(".limits-reset").length === 2',
+      "A legacy response clears the counter and keeps both window dates");
+    for (const count of ["5e1", "3x", null, -1, 1.5]) {
+      await set([{ ...resetFixture, availableResetCount: count }]);
+      await check('!query(".limits-reset-count")', `Malformed count is hidden: ${JSON.stringify(count)}`);
+    }
+    await set([{ ...resetFixture, availableResetCount: 3 }]);
+    await check('query(".limits-reset-count").textContent === "Доступно сбросов: 3"',
+      "Restoring a valid count after unavailable values restores the line");
+    await evaluate('taskboardLocalization.select("en"); renderProviderLimits()');
+    await check('query(".limits-reset-count").textContent === "Available resets: 3"',
+      "English localization uses the same count");
+    await evaluate('taskboardLocalization.select("ru"); renderProviderLimits()');
+
+    await set([{ ...codex, observedAt: Date.now() - 181_000, availableResetCount: 3 }]);
     await check(`popup.textContent.includes(taskboardLocalization.text("limits.stale")) && !query("meter") &&
-      button.textContent.includes("?")`, "Old observations show the stale state");
+      !query(".limits-reset-count") && button.textContent.includes("?")`, "Old observations show only the stale state");
     await set([{ ...codex, windows: [{ ...weekly, resetsAt: Date.now() - 1 }] }]);
     await check('popup.textContent.includes(taskboardLocalization.text("limits.stale")) && !query("meter")',
       "An elapsed reset also shows the stale state");
-    for (const state of ["unknown", "no_windows", "unsupported", "auth", "error"]) {
+    for (const state of ["unknown", "auth", "error"]) {
       await set([{ provider: "Codex", state, windows: [] }]);
       await check(`popup.textContent.includes(taskboardLocalization.text("limits.${state}")) &&
-        !query("meter") && !query(".limits-plan") && button.textContent.includes("?")`, `Unavailable state: ${state}`);
+        !query("meter") && !query(".limits-plan") && !query(".limits-reset-count") &&
+        button.textContent.includes("?")`, `Unavailable state: ${state}`);
     }
+    for (const state of ["no_windows", "unsupported"]) {
+      await set([{ provider: "Codex", state, windows: [] }]);
+      await check('Boolean(query("section > header:only-child")) && button.textContent.includes("?")',
+        `Unavailable quota windows have no replacement message: ${state}`);
+    }
+    await set([{ ...resetFixture, state: "no_windows", windows: [], availableResetCount: 3 }]);
+    await check('query("section > p:only-of-type")?.textContent === "Доступно сбросов: 3" && !query("meter")',
+      "A confirmed count can be shown when quota windows are absent");
     await set([]);
     await check('Boolean(query(".limits-overview")) && !query("section") && button.textContent.includes("?")',
       "No connected providers shows the summary");
@@ -253,11 +309,14 @@ app.whenReady().then(async () => {
     await check('!popup.matches(":popover-open")', "The status button closes the open panel");
     const report = [
       `Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, ${process.platform} ${process.arch}`,
-      "Command: node scripts/check-provider-limits.mjs --artifacts .tasks/qa",
+      "Command: node scripts/check-provider-limits.mjs --artifacts .tasks/qa/codex-resets",
       "Production markup, styles and renderer with fixture responses at the providerLimits boundary.",
+      "Codex reset screenshots show the panel and status bar cropped from a 1280×900 content viewport.",
+      "The renderer check covers the counter transition and recovery. Account identity, shared main-process reads and RPC methods are verified separately.",
       "Accent screenshots show the lower-left crop of the 1280×800 Electron viewport with keyboard focus.",
       "SHA-256 of the tested files as read from the checkout (raw bytes):",
       ...["index.html", "themes.css", "styles.css", "provider-limits.js", "localization.cjs",
+        "locales/en.json", "locales/ru.json",
         "vendor/codicons/codicon.css", "vendor/codicons/codicon.ttf"].map(name => {
         const bytes = readFileSync(new URL("../src/desktop/" + name, import.meta.url));
         return `${createHash("sha256").update(bytes).digest("hex")}  src/desktop/${name}`;
@@ -268,7 +327,7 @@ app.whenReady().then(async () => {
       }),
       ...results.map(result => "PASS " + result),
     ].join("\n");
-    writeFileSync(join(artifacts, "provider-limits-check.txt"), report + "\n");
+    writeFileSync(join(artifacts, "codex-resets-check.txt"), report + "\n");
     win.destroy();
     app.exit(0);
   } catch (error) {

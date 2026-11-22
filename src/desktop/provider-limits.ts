@@ -8,6 +8,7 @@ export interface ProviderLimits {
   state: "ready" | "unknown" | "no_windows" | "unsupported" | "auth" | "error" | "stale";
   windows: LimitWindow[];
   observedAt?: number;
+  availableResetCount?: number;
   incomplete?: boolean;
   plan?: string;
 }
@@ -61,9 +62,12 @@ export function codexLimitSnapshot(data: unknown, observedAt = Date.now()): Prov
   const reported = buckets.flatMap(bucket => windowKeys.map(key => bucket?.[key])).filter(window => window != null);
   const incomplete = reported.length !== windows.length ||
     buckets.some(bucket => !bucket || typeof bucket !== "object" || Array.isArray(bucket));
+  const count = (data as { rateLimitResetCredits?: { availableCount?: unknown } } | null)?.rateLimitResetCredits?.availableCount;
+  const availableResetCount = typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : undefined;
   return {
     provider: "Codex", state: codexLimitState(data, windows), windows, observedAt,
     ...(incomplete ? { incomplete: true } : {}),
+    ...(availableResetCount !== undefined ? { availableResetCount } : {}),
   };
 }
 

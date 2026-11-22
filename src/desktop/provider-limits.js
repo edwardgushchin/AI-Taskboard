@@ -15,6 +15,13 @@ globalThis.providerLimitSummary = (providers, now = Date.now()) => {
     unavailable: fresh.filter(provider => provider.state !== "ready").length };
 };
 
+globalThis.providerLimitResetCount = (provider, now = Date.now()) => {
+  const { state, observedAt, availableResetCount } = provider;
+  if (!["ready", "no_windows", "unknown"].includes(state)) return;
+  if (observedAt === undefined || observedAt > now || now - observedAt > 180_000) return;
+  if (Number.isSafeInteger(availableResetCount) && availableResetCount >= 0) return availableResetCount;
+};
+
 globalThis.providerLimitWindowLabel = (minutes, locale) => {
   const t = (key, parameters) => globalThis.taskboardLocalization.text(key, parameters, globalThis.taskboardLocalization.resolve([locale]));
   if (minutes === 10080) return t("limits.weekly");
@@ -37,7 +44,8 @@ if (typeof document !== "undefined") {
     if (!localization.state().english) return;
     const label = t("limits.label");
     panel.setAttribute("aria-label", label);
-    const summary = globalThis.providerLimitSummary(providers);
+    const now = Date.now();
+    const summary = globalThis.providerLimitSummary(providers, now);
     const lowest = summary.lowest;
     control.querySelector("span").textContent = lowest ? `${label} ${Math.floor(lowest.remaining)}%` : label + " ?";
     const warning = lowest && lowest.remaining <= 10 ? t("limits.low") : "";
@@ -54,7 +62,7 @@ if (typeof document !== "undefined") {
       overview.textContent = overviewText;
       content.append(overview);
     }
-    for (const provider of summary.providers) {
+    for (const [index, provider] of summary.providers.entries()) {
       const group = document.createElement("section");
       const header = document.createElement("header");
       header.className = "limits-header";
@@ -69,6 +77,14 @@ if (typeof document !== "undefined") {
       }
       group.append(header);
       content.append(group);
+      const count = globalThis.providerLimitResetCount(providers[index], now);
+      if (count !== undefined) {
+        const resets = document.createElement("p");
+        resets.className = "limits-reset-count";
+        resets.textContent = t("limits.available_resets", { count: new Intl.NumberFormat(localization.locale).format(count) });
+        group.append(resets);
+      }
+      if (provider.state === "unsupported" || provider.state === "no_windows") continue;
       if (provider.state !== "ready") {
         const status = document.createElement("p");
         status.textContent = t("limits." + provider.state);
