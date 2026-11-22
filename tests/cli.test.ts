@@ -91,6 +91,313 @@ function cli(root: string, args: string[], input?: unknown, expectedCode?: strin
   return payload.data;
 }
 
+test("draft dependency reads and writes require the owner's decision for the named prerequisite", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const expected = cli(root, ["create"], { title: "Account for managed heap" });
+  const unrelated = cli(root, ["create"], { title: "Measure CPU allocations" });
+  const chat = { model: "fixture", effort: "low" };
+  const request = `Required dependency: ${expected.title}`;
+
+  for (const autoMode of [false, true]) {
+    cli(root, ["settings"], { autoMode });
+    const source = cli(root, ["create"], { title: "Report memory usage", description: request });
+    const ownerText = "Use bytes in the UI.";
+    const owner = cli(root, ["chat", source.id], { ...chat, text: ownerText });
+    const question = cli(root, ["expert-message", source.id], { actor: "agent", to: "manager", kind: "question", text: request });
+    const command = ["draft-dependency", source.id];
+    const reference = { revision: owner.revision, replyTo: question.sequence, ownerSequence: owner.history.length, ownerText };
+    cli(root, command, { ...reference, authorizeOnly: true }, "USER_DIRECTION_REQUIRED");
+    cli(root, command, { ...reference, existingId: expected.id }, "USER_DIRECTION_REQUIRED");
+    assert.deepEqual(cli(root, ["show", source.id]).dependencies ?? [], []);
+
+    const decision = cli(root, ["chat", source.id], { ...chat, text: request });
+    const followUp = cli(root, ["expert-message", source.id], { actor: "agent", to: "manager", kind: "question", text: request });
+    const authorized = {
+      revision: decision.revision, replyTo: followUp.sequence, ownerSequence: decision.history.length, ownerText: request,
+    };
+    assert.deepEqual(cli(root, command, { ...authorized, authorizeOnly: true }), { subject: expected.title });
+    cli(root, command, { ...authorized, existingId: unrelated.id }, "USER_DIRECTION_REQUIRED");
+    cli(root, command, { ...authorized, draft: plannedDraft({ title: unrelated.title, tags: ["Memory"] }) }, "USER_DIRECTION_REQUIRED");
+    const selection = { ...authorized, existingId: expected.id };
+    cli(root, command, selection, "REVISION_CONFLICT");
+    cli(root, command, { ...selection, reviewedMatches: { [expected.id]: String(expected.revision) } }, "REVISION_CONFLICT");
+    const saved = cli(root, command, { ...selection, reviewedMatches: { [expected.id]: expected.revision } });
+    assert.equal(saved.dependencyId, expected.id);
+    assert.deepEqual(cli(root, ["show", source.id]).dependencies, [expected.id]);
+  }
+});
+
+test("a named cancellation ends a saved draft dependency request after unrelated owner chat", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const source = cli(root, ["create"], { title: "Report memory usage" });
+  const chat = { model: "fixture", effort: "low" };
+  const subject = "Account for managed heap";
+  const text = `Required dependency: ${subject}`;
+  const owner = cli(root, ["chat", source.id], { ...chat, text });
+  const question = cli(root, ["expert-message", source.id], { actor: "agent", to: "manager", kind: "question", text });
+  onBoard(locateBoard(root), store => {
+    const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+    pending.history.at(-1)!.draftDependency = {
+      subject, question: question.sequence, ownerMessage: owner.history.length,
+      draft: plannedDraft({ title: subject, tags: ["Memory"] }),
+    };
+    store.save(pending);
+  });
+  const inbox = () => cli(root, ["manager-inbox"]);
+  cli(root, ["chat", source.id], { ...chat, text: "Use bytes in the UI." });
+  assert.equal(inbox().find((entry: { sequence: number }) => entry.sequence === question.sequence)?.draftDependencyPending, true);
+  cli(root, ["chat", source.id], { ...chat, text: `Cancel required dependency: ${subject}` });
+
+  const command = ["draft-dependency", source.id];
+  const replay = { replyTo: question.sequence };
+  const cancelled = cli(root, command, replay);
+  assert.equal(cancelled.cancelled, true);
+  assert.deepEqual(cli(root, command, replay), cancelled);
+  assert.equal(inbox().length, 0);
+  const card = cli(root, ["show", source.id]);
+  assert.deepEqual(card.dependencies ?? [], []);
+  assert.equal(card.draftDiscussion.managerReply, cancelled.sequence);
+  assert.equal(cli(root, ["list"]).tasks.length, 1);
+});
+
+test("draft dependency retry rechecks new matches and skips cancelled drafts", async t => {
+  for (const { previouslyCreated, matchingCard } of [
+    { previouslyCreated: false, matchingCard: true },
+    { previouslyCreated: true, matchingCard: true },
+    { previouslyCreated: true, matchingCard: false },
+  ]) {
+    await t.test(`previously created: ${previouslyCreated}, new match: ${matchingCard}`, subtest => {
+      const root = fixture(subtest);
+      cli(root, ["init"]);
+      const prior = cli(root, ["create"], { title: "Measure CPU" });
+      const source = cli(root, ["create"], { title: "Report memory", dependencies: [prior.id] });
+      const subject = "Account for managed heap";
+      const text = `Required dependency: ${subject}`;
+      const owner = cli(root, ["chat", source.id], { model: "fixture", effort: "low", text });
+      const question = cli(root, ["expert-message", source.id], {
+        actor: "agent", to: "manager", kind: "question", text,
+      });
+      let cancelledId: string | undefined;
+      if (previouslyCreated) {
+        const dependency = cli(root, ["create"], { title: subject });
+        cancelledId = dependency.id;
+        onBoard(locateBoard(root), store => {
+          const created = store.card(dependency.id);
+          created.history[0].draftDependencySource = { id: source.id, question: question.sequence };
+          store.save(created);
+        });
+        cli(root, ["cancel", dependency.id], { revision: dependency.revision, reason: "Use a different card." });
+      }
+      onBoard(locateBoard(root), store => {
+        const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+        pending.history.at(-1)!.draftDependency = {
+          subject, question: question.sequence, ownerMessage: owner.history.length,
+          draft: plannedDraft({ title: subject, tags: ["Memory"] }),
+        };
+        store.save(pending);
+      });
+      const existing = matchingCard ? cli(root, ["create"], { title: subject }) : undefined;
+      const command = ["draft-dependency", source.id];
+      const replay = { replyTo: question.sequence };
+      let saved;
+      if (existing) {
+        assert.deepEqual(cli(root, command, replay), { searchRequired: true });
+        const before = cli(root, ["show", source.id]);
+        assert.deepEqual(before.dependencies, [prior.id]);
+        saved = cli(root, command, {
+          ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText: text,
+          existingId: existing.id,
+          reviewedMatches: { [existing.id]: existing.revision },
+        });
+        assert.equal(saved.dependencyId, existing.id);
+      } else {
+        saved = cli(root, command, replay);
+      }
+      assert.notEqual(saved.dependencyId, cancelledId);
+      assert.equal(cli(root, ["show", saved.dependencyId]).status, "draft");
+      assert.deepEqual(cli(root, command, replay), saved);
+      assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, saved.dependencyId]);
+      const available = cli(root, ["list"]).tasks.filter((card: Task) => card.title === subject && card.status !== "cancelled");
+      assert.deepEqual(available.map((card: Task) => card.id), [saved.dependencyId]);
+    });
+  }
+});
+
+test("retry of a cancelled existing dependency respects title and ID authorizations", async t => {
+  for (const scenario of ["title with replacement", "title without replacement", "specific ID"] as const) {
+    await t.test(scenario, subtest => {
+      const root = fixture(subtest);
+      cli(root, ["init"]);
+      const prior = cli(root, ["create"], { title: "Check allocations" });
+      const source = cli(root, ["create"], { title: "Report memory", dependencies: [prior.id] });
+      const selected = cli(root, ["create"], { title: "Account for managed heap" });
+      const replacement = scenario === "title without replacement"
+        ? undefined : cli(root, ["create"], { title: selected.title });
+      const subject = scenario === "specific ID" ? selected.id : selected.title;
+      const ownerText = `Required dependency: ${subject}`;
+      const chat = { model: "fixture", effort: "low" };
+      const owner = cli(root, ["chat", source.id], { ...chat, text: ownerText });
+      const question = cli(root, ["expert-message", source.id], {
+        actor: "agent", to: "manager", kind: "question", text: ownerText,
+      });
+      onBoard(locateBoard(root), store => {
+        const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+        pending.history.at(-1)!.draftDependency = {
+          subject, question: question.sequence, ownerMessage: owner.history.length, existingId: selected.id,
+        };
+        store.save(pending);
+      });
+      cli(root, ["cancel", selected.id], { revision: selected.revision, reason: "Cancelled while the write was unavailable." });
+      const before = cli(root, ["show", source.id]);
+      cli(root, ["approve", source.id], { revision: before.revision }, "PENDING_OPERATION");
+
+      const command = ["draft-dependency", source.id];
+      const replay = { replyTo: question.sequence };
+      if (scenario === "specific ID") {
+        const stopped = cli(root, command, replay);
+        assert.equal(stopped.requiresChoice, true);
+        assert.deepEqual(cli(root, command, replay), stopped);
+        assert.equal(cli(root, ["manager-inbox"]).some((entry: { id: string }) => entry.id === source.id), false);
+        const waiting = cli(root, ["show", source.id]);
+        assert.deepEqual(waiting.dependencies, [prior.id]);
+        assert.equal(waiting.draftDiscussion.managerReply, stopped.sequence);
+        assert.equal(waiting.history.at(-1).draftDependencyRequiresChoice, true);
+        assert.match(waiting.history.at(-1).text, new RegExp(selected.id + " was cancelled"));
+        const running = cli(root, ["draft-discussion", source.id], { revision: waiting.revision, phase: "running" });
+        const ask = cli(root, ["chat", source.id], {
+          ...chat, actor: "agent", text: "Which dependency should replace the cancelled card?",
+          revision: running.revision, draftDiscussion: true, managerReply: stopped.sequence, awaitingAnswer: false,
+        });
+        assert.equal(ask.awaitingAnswer, true);
+        assert.equal(ask.draftConfirmed, false);
+        cli(root, ["approve", source.id], { revision: ask.revision }, "TASK_AWAITING_ANSWER");
+
+        const nextChoice = `Required dependency: ${replacement.id}`;
+        const nextOwner = cli(root, ["chat", source.id], { ...chat, text: nextChoice });
+        const nextQuestion = cli(root, ["expert-message", source.id], {
+          actor: "agent", to: "manager", kind: "question", text: nextChoice,
+        });
+        const linked = cli(root, command, {
+          revision: nextOwner.revision, ownerSequence: nextOwner.history.length, ownerText: nextChoice,
+          replyTo: nextQuestion.sequence, existingId: replacement.id,
+        });
+        assert.equal(linked.dependencyId, replacement.id);
+        assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, replacement.id]);
+      } else {
+        assert.deepEqual(cli(root, command, replay), { searchRequired: true });
+        const reference = {
+          ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText,
+        };
+        cli(root, command, { ...reference, ownerSequence: String(reference.ownerSequence), authorizeOnly: true },
+          "USER_DIRECTION_REQUIRED");
+        assert.deepEqual(cli(root, command, { ...reference, authorizeOnly: true }), { subject });
+        const target = replacement ? { existingId: replacement.id, reviewedMatches: { [replacement.id]: replacement.revision } } :
+          { draft: plannedDraft({ title: subject, tags: ["Memory"] }) };
+        const linked = cli(root, command, { ...reference, ...target });
+        assert.notEqual(linked.dependencyId, selected.id);
+        if (replacement) assert.equal(linked.dependencyId, replacement.id);
+        assert.deepEqual(cli(root, command, replay), linked);
+        assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, linked.dependencyId]);
+        const matchingCards = cli(root, ["list"]).tasks.filter((card: Task) =>
+          card.title === subject && card.status !== "cancelled");
+        assert.deepEqual(matchingCards.map((card: Task) => card.id), [linked.dependencyId]);
+      }
+    });
+  }
+});
+
+test("draft dependency retry asks the manager to resolve changes in title matches", async t => {
+  for (const scenario of [
+    "renamed title",
+    "edited brief",
+    "unchanged",
+    "legacy selection",
+    "multiple matches",
+    "renamed explicit ID",
+    "unsuitable single match",
+  ] as const) {
+    await t.test(scenario, subtest => {
+      const root = fixture(subtest);
+      cli(root, ["init"]);
+      const prior = cli(root, ["create"], { title: "Check allocations" });
+      const source = cli(root, ["create"], { title: "Report memory", dependencies: [prior.id] });
+      const title = "Account for managed heap";
+      const needsDraft = scenario === "multiple matches" || scenario === "unsuitable single match";
+      const selected = needsDraft ? undefined : cli(root, ["create"], { title });
+      const subject = scenario === "renamed explicit ID" ? selected.id : title;
+      const ownerText = `Required dependency: ${subject}`;
+      const owner = cli(root, ["chat", source.id], { model: "fixture", effort: "low", text: ownerText });
+      const question = cli(root, ["expert-message", source.id], {
+        actor: "agent", to: "manager", kind: "question", text: ownerText,
+      });
+      onBoard(locateBoard(root), store => {
+        const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+        pending.history.at(-1)!.draftDependency = {
+          question: question.sequence, ownerMessage: owner.history.length, subject,
+          ...(selected ? { existingId: selected.id } : { draft: plannedDraft({ title, tags: ["Memory"] }) }),
+          ...(selected && scenario !== "legacy selection" ?
+            { reviewedMatches: { [selected.id]: selected.revision } } : {}),
+        };
+        store.save(pending);
+      });
+      if (scenario === "renamed title" || scenario === "renamed explicit ID") {
+        cli(root, ["update", selected.id], { revision: selected.revision, title: "Check garbage collection latency" });
+      } else if (scenario === "edited brief") {
+        cli(root, ["update", selected.id], {
+          revision: selected.revision,
+          description: "Changes a label.",
+          criteria: ["The label fits in the dialog."],
+        });
+      } else if (scenario === "multiple matches") {
+        cli(root, ["create"], { title, description: "Only measures allocation volume." });
+      }
+      const replacement = cli(root, ["create"], {
+        title,
+        description: scenario === "unsuitable single match" ? "Changes a label." : "Measures the managed heap and the peak.",
+      });
+      const before = cli(root, ["show", source.id]);
+      const cardCount = cli(root, ["list"]).tasks.length;
+      const command = ["draft-dependency", source.id];
+      const replay = { replyTo: question.sequence };
+      let linked;
+      if (scenario === "renamed explicit ID" || scenario === "unchanged") {
+        linked = cli(root, command, replay);
+        assert.equal(linked.dependencyId, selected.id);
+      } else {
+        assert.deepEqual(cli(root, command, replay), { searchRequired: true });
+        assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id]);
+        const reference = {
+          ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText,
+        };
+        assert.deepEqual(cli(root, command, { ...reference, authorizeOnly: true }), { subject: title });
+        if (scenario === "unsuitable single match") {
+          const draft = plannedDraft({ title, description: "Measures the managed heap and the peak.", tags: ["Memory"] });
+          cli(root, command, { ...reference, draft }, "DEPENDENCY_MATCH_FOUND");
+          const staleReview = { [replacement.id]: replacement.revision };
+          const edited = cli(root, ["update", replacement.id], { revision: replacement.revision, description: "Changes a tooltip." });
+          cli(root, command, { ...reference, draft, reviewedMatches: staleReview }, "DEPENDENCY_MATCH_FOUND");
+          linked = cli(root, command, { ...reference, draft, reviewedMatches: { [edited.id]: edited.revision } });
+          assert.notEqual(linked.dependencyId, replacement.id);
+          assert.equal(cli(root, ["show", linked.dependencyId]).description, draft.description);
+        } else {
+          linked = cli(root, command, {
+            ...reference, existingId: replacement.id,
+            reviewedMatches: { [replacement.id]: replacement.revision },
+          });
+          assert.equal(linked.dependencyId, replacement.id);
+        }
+      }
+      assert.deepEqual(cli(root, command, replay), linked);
+      assert.equal(cli(root, ["list"]).tasks.length, cardCount + (scenario === "unsuitable single match" ? 1 : 0));
+      const resolved = cli(root, ["show", source.id]);
+      assert.deepEqual(resolved.dependencies, [prior.id, linked.dependencyId]);
+      assert.equal(resolved.draftDiscussion.managerReply, linked.sequence);
+    });
+  }
+});
+
 test("approval waits for the last saved clarification to close", t => {
   const root = fixture(t);
   cli(root, ["init"]);

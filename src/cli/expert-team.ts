@@ -7,7 +7,7 @@ import { isManual } from "./manual-board.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
 import { artifactSource } from "./artifacts.ts";
-import { currentReviewApproval, draftManagerQuestion, draftManagerReply } from "./task-messages.ts";
+import { currentReviewApproval, draftManagerQuestion, draftManagerReply, pendingDraftDependency } from "./task-messages.ts";
 import { runtimeEntries } from "../desktop/board-runtime.ts";
 
 type Phase = NonNullable<TaskEvent["expertPhase"]>;
@@ -358,8 +358,9 @@ export function teamInbox(store: BoardStore, taskId: string, recipient: string, 
       (recipient === "reviewer" && [event.expertMessage.to, event.expertMessage.from].some(address => address.startsWith("review:"))))
     ? [{ sequence: index + 1, at: event.at, text: event.text, kind: event.messageKind, ...event.expertMessage }] : []) };
 }
-export function sendTeamMessage(store: BoardStore, taskId: string, sender: string, input: Record<string, unknown>) {
-  const parent = teamRoot(store, taskId);
+export function sendTeamMessage(store: BoardStore, taskId: string, sender: string, input: Record<string, unknown>,
+  dependency?: { parent: Task; id?: string; requiresChoice?: true }) {
+  const parent = dependency?.parent ?? teamRoot(store, taskId);
   requireState(parent, ["draft", "ready", "in_progress", "blocked", "review"]);
   const members = [parent.id, ...(parent.expertStages ?? []).map(s => s.taskId), "manager", "owner", "reviewer",
     ...expertStagesStatus(parent, "work").map(stage => stage.address), ...expertStagesStatus(parent, "review").map(stage => stage.address)];
@@ -380,10 +381,15 @@ export function sendTeamMessage(store: BoardStore, taskId: string, sender: strin
   if (answersDraft) {
     const existing = draftManagerReply(parent, replyTo, to);
     if (existing) return { parentId: parent.id, sequence: existing, at: parent.history[existing - 1].at };
+    if (!dependency && pendingDraftDependency(parent, replyTo)) {
+      throw new TaskboardError("PENDING_OPERATION", "Finish the saved dependency action before answering this question.");
+    }
   }
   const event: Task["history"][number] = { at: new Date().toISOString(), action: "coordination",
     actor: sender === "owner" ? "user" : sender === "manager" || sender === "reviewer" ? sender : "agent", text: message,
-    messageKind: kind as "update", expertMessage: { from: sender, to, replyTo } };
+    messageKind: kind as "update", expertMessage: { from: sender, to, replyTo },
+    ...(dependency?.id ? { draftDependencyId: dependency.id } : {}),
+    ...(dependency?.requiresChoice ? { draftDependencyRequiresChoice: true } : {}) };
   const sequence = parent.history.length + 1;
   store.save({
     ...parent,

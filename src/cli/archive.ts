@@ -274,8 +274,10 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
     requireRevision(task, input.revision, true);
   }
-  const draftReply = actor === "agent" && task.status === "draft" && typeof input.awaitingAnswer === "boolean";
-  const confirmsDraft = input.awaitingAnswer === false && (draftDiscussion || input.confirmsDraft === true);
+  const requiresChoice = managerReply !== undefined && task.history[managerReply - 1].draftDependencyRequiresChoice;
+  const awaitingAnswer = requiresChoice ? true : input.awaitingAnswer;
+  const draftReply = actor === "agent" && task.status === "draft" && typeof awaitingAnswer === "boolean";
+  const confirmsDraft = awaitingAnswer === false && (draftDiscussion || input.confirmsDraft === true);
   const usage = actor === "agent" && input.usage !== undefined ? object(input.usage) : undefined;
   const commentary = actor === "agent" && input.commentary !== undefined ? strings(input.commentary, "commentary") : [];
   const durationMs = actor === "agent" && input.durationMs !== undefined ? number(input.durationMs, "durationMs", 0) : undefined;
@@ -298,9 +300,9 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
         current.draftDiscussion = undefined;
       }
     }
-    if (typeof input.awaitingAnswer === "boolean") current.awaitingAnswer = input.awaitingAnswer;
+    if (typeof awaitingAnswer === "boolean") current.awaitingAnswer = awaitingAnswer;
     if (draftReply) {
-      current.draftConfirmed = confirmsDraft || (!draftDiscussion && input.awaitingAnswer === false &&
+      current.draftConfirmed = confirmsDraft || (!draftDiscussion && awaitingAnswer === false &&
         current.draftConfirmed === true);
       if (draftDiscussion) {
         current.draftDiscussion = pendingManagerReply === managerReply
