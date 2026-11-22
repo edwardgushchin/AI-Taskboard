@@ -14,6 +14,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { nextScheduledRun, record } from "../src/cli/model.ts";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
+import { writeBoardProjectRules } from "../src/cli/board-agents.ts";
 import { applyDesktopAcceptance } from "../src/cli/acceptance.ts";
 import { restoreChangesOnStart, saveLocalChanges, inspectLocalChanges } from "../src/cli/saved-changes.ts";
 import { maxWorklogPartBytes } from "../src/cli/worklog-files.ts";
@@ -53,7 +54,8 @@ function fixture(t: TestContext, repository = false): string {
     git(root, "config", "maintenance.auto", "false");
     writeFileSync(join(root, ".gitignore"), "*.local\n");
     writeFileSync(join(root, "source.txt"), "baseline\n");
-    git(root, "add", ".gitignore", "source.txt");
+    writeBoardProjectRules(root);
+    git(root, "add", ".gitignore", "source.txt", "AGENTS.md");
     git(root, "commit", "-m", "chore: initialize test repository");
   }
   return root;
@@ -1924,7 +1926,8 @@ test("creating a board can initialize Git in the selected folder without changin
   assert.ok(!existsSync(join(parent, ".tasks")));
   const task = cli(selected, ["create"], { title: "Keep this task" });
   assert.equal(cli(selected, ["init"], { git: true }).tasks[0].id, task.id);
-  assert.equal(git(selected, "status", "--porcelain"), "");
+  assert.equal(git(selected, "status", "--porcelain"), "?? AGENTS.md");
+  assert.match(readFileSync(join(selected, "AGENTS.md"), "utf8"), /## AI Taskboard workflow/);
 });
 
 test("doctor restores an unindexed task with its tags and numbering does not reuse it", t => {

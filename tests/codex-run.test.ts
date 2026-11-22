@@ -14,6 +14,7 @@ import { executorFullAccess } from "../src/desktop/codex.ts";
 import { CodexRpcRejection, codexRpc, watchCodexQuotaExceeded } from "../src/desktop/codex-rpc.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { createTask } from "../src/cli/tasks.ts";
+import { readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
 import type { RunActivity } from "../src/cli/model.ts";
 import type { TokenUsageReport } from "../src/cli/token-usage.ts";
 
@@ -109,10 +110,15 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   mkdirSync(join(folder, ".worktrees"), { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: folder, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-b", "main");
-  git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "--no-gpg-sign", "-m", "Initial");
+  assert.equal((await callCli(folder, ["init"])).ok, true);
+  const oldRules = writeBoardProjectRules(folder, {
+    text: "Executor OLD rule", revision: readBoardProjectRules(folder).revision,
+  });
+  git("add", "AGENTS.md");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--no-gpg-sign", "-m", "Initial");
   const base = git("rev-parse", "HEAD");
   git("worktree", "add", "-b", "ai-taskboard/T-0001", worktree);
-  assert.equal((await callCli(folder, ["init"])).ok, true);
+  writeBoardProjectRules(folder, { text: "Executor CURRENT rule", revision: oldRules.revision });
   const stub = join(folder, "codex.cjs");
   const capture = join(folder, "captured.json");
   const thread = "01234567-1234-5678-1234-123456789012";
@@ -355,6 +361,10 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.ok(!("projectId" in started.params));
   assert.equal(started.params.cwd, worktree);
   assert.equal(turn.params.effort, "high");
+  const suppliedRules = turn.params.additionalContext.ai_taskboard_project_rules.value;
+  assert.match(suppliedRules, /Executor CURRENT rule/);
+  assert.doesNotMatch(suppliedRules, /Executor OLD rule/);
+  assert.match(readFileSync(join(worktree, "AGENTS.md"), "utf8"), /Executor OLD rule/);
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);
   assert.ok(started.params.developerInstructions.includes(russianWriting));
@@ -442,7 +452,9 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   for (const [status, rationale] of [["denied", "This destination is outside the project scope."], ["approved", "Read public documentation."]]) {
     activity.length = 0;
     assert.equal(await (await launch("review-" + status)).completion, undefined);
-    assert.deepEqual(activity.filter(item => item.type === "autoApprovalReview").map(({ at, ...item }) => item), [
+    const approvals = activity.filter(item => item.type === "autoApprovalReview");
+    assert.ok(approvals.every(item => item.threadId === thread && item.stageSessionId));
+    assert.deepEqual(approvals.map(({ at, threadId, stageSessionId, ...item }) => item), [
       { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: "", status: "inProgress" },
       { id: "approval:access-1", type: "autoApprovalReview", title: "docs.example.com:443", text: rationale, status },
     ]);

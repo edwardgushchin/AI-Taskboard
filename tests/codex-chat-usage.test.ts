@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { codexRpc } from "../src/desktop/codex-rpc.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
+import { boardProjectRulesPrompt, readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
+import { reviewModeInstruction } from "../src/desktop/chat-actions.ts";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
@@ -26,6 +28,10 @@ test("task discussion streams task usage before success, provider failure, or a 
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   mkdirSync(join(folder, ".tasks"));
   writeFileSync(join(folder, ".tasks", "board.json"), JSON.stringify({ settings: { boardType: "manual" } }));
+  const oldRules = writeBoardProjectRules(folder, {
+    text: "Reviewer OLD rule", revision: readBoardProjectRules(folder).revision,
+  });
+  writeBoardProjectRules(folder, { text: "Reviewer CURRENT rule", revision: oldRules.revision });
   const stub = join(folder, "server.cjs");
   writeFileSync(stub, `
     const send = value => console.log(JSON.stringify(value));
@@ -65,7 +71,11 @@ test("task discussion streams task usage before success, provider failure, or a 
       if (method === "turn/start") {
         require("node:assert/strict").deepEqual(params.sandboxPolicy, { type: "readOnly", networkAccess: false });
         if (outcome.startsWith("review")) {
-          require("node:assert/strict").ok(params.outputSchema.required.includes("verifyRisk"));
+          const assert = require("node:assert/strict");
+          assert.ok(params.outputSchema.required.includes("verifyRisk"));
+          const rules = params.additionalContext.ai_taskboard_project_rules.value;
+          assert.match(rules, /Reviewer CURRENT rule/);
+          assert.doesNotMatch(rules, /Reviewer OLD rule/);
         }
         send({ method: "turn/started", params: { threadId: "root", turn: { id: "turn-1" } } });
         const counts = { totalTokens: 120, inputTokens: 100, cachedInputTokens: 50, cacheWriteInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10 };
@@ -95,7 +105,9 @@ test("task discussion streams task usage before success, provider failure, or a 
         send({ method: "turn/started", params: { threadId: "child", turn: { id: "child-turn" } } });
         if (outcome !== "unknown") send({ method: "thread/tokenUsage/updated", params: { threadId: "child", turnId: "child-turn", tokenUsage: { total: counts, last: counts } } });
         send({ method: "turn/completed", params: { threadId: "child", turn: { id: "child-turn", status: "completed" } } });
-        const text = outcome.startsWith("review") ? JSON.stringify({ summary: "Verified", findings: [], evidence: ["Checked"], needsHuman: false, verifyRisk: false }) : "Reply";
+        const text = outcome.startsWith("review") ?
+          JSON.stringify({ summary: "Verified", findings: [], evidence: ["Checked"], needsHuman: false, verifyRisk: false }) :
+          JSON.stringify({ text: "Reply", awaitingAnswer: false });
         send({ method: "item/completed", params: { threadId: "root", item: { id: "final", type: "agentMessage", phase: "final_answer", text } } });
         send({ method: "turn/completed", params: { threadId: "root", turn: { id: "turn-1", status: outcome === "failed" ? "failed" : "completed", error: { message: "Provider failed" } } } });
         return;
@@ -108,8 +120,10 @@ test("task discussion streams task usage before success, provider failure, or a 
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
+      boardProjectRulesPrompt, reviewModeInstruction,
       executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool, leadInstructions, phaseStageReporter, subagentInstructions,
+      leadSkillInstructions: async () => [], watchTeamMail: () => () => {},
       callCli: async (_project: string, args: string[]) => {
         assert.equal(args[0], "expert-context");
         return { ok: true, data: [{ prompt: "QA lead" }] };

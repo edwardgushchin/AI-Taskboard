@@ -12,6 +12,7 @@ import type { Repository } from "./git.ts";
 import { boardAgentRoles, codexThreadPattern, defaultBoardAgents, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validDueDate, validScheduleDate } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 import { parseUsageReport, tokenFields, totalTokenUsage } from "./token-usage.ts";
+import { writeBoardProjectRules } from "./board-agents.ts";
 
 function stat(path: string) {
   try {
@@ -213,6 +214,10 @@ export function withLock<T>(directoryPath: string, callback: (lockWaitMs: number
 
 export function withRuntimeLock<T>(directoryPath: string, callback: () => T, timeoutMs: 0 | 15_000 = 15_000): T {
   return withSqliteLock(join(directoryPath, ".runtime.sqlite"), timeoutMs, callback);
+}
+
+export function withProjectRulesLock<T>(location: BoardLocation, callback: () => T): T {
+  return withSqliteLock(join(location.directory, ".project-rules.sqlite"), 0, callback);
 }
 
 function taskStartLockPath(location: BoardLocation, id: string): string {
@@ -611,6 +616,7 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
         settings: { boardType, ...(boardType === "manual" ? { manualColumns: defaultColumns(), autoMode: false } : {}), archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...defaultBoardAgents },
         tags: [], tasks: {}, archive: {},
       };
+      withProjectRulesLock(location, () => writeBoardProjectRules(location.root));
       writeJson(path, board);
     }
     const store = new BoardStore(location);
