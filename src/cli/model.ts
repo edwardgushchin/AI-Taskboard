@@ -113,6 +113,7 @@ export interface TaskEvent {
     subject?: string;
     existingId?: string;
     draft?: Record<string, unknown>;
+    reviewedMatches?: Record<string, number>;
   };
   draftDependencySource?: { id: string; question: number };
   draftDependencyId?: string;

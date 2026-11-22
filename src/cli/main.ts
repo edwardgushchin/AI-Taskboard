@@ -258,9 +258,9 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     task.history[0].draftDependencySource = { id, question };
     return task;
   };
-  const target = (targetId: string) => {
+  const target = (targetId: string, createdForRequest = false) => {
     const card = readTask(store, targetId);
-    if (!matchesDraftDependency(subject, card, legacy)) {
+    if (!createdForRequest && !matchesDraftDependency(subject, card, legacy)) {
       throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the dependency chosen by the owner.");
     }
     if (card.status === "cancelled") {
@@ -275,8 +275,10 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
       card.id !== id && card.status !== "cancelled" && matchesDraftDependency(subject, card, legacy));
   };
   const previouslyCreated = () => store.storedCards().find(card => card.status !== "cancelled" &&
-    matchesDraftDependency(subject, card, legacy) && card.history[0]?.draftDependencySource?.id === id &&
+    card.history[0]?.draftDependencySource?.id === id &&
     card.history[0].draftDependencySource.question === question);
+  const hasUnreviewedMatch = (reviewed: Record<string, unknown>) =>
+    matches().some(card => reviewed[card.id] !== readTask(store, card.id).revision);
 
   let saved = pendingDraftDependency(source, question);
   if (saved && input.authorizeOnly !== true && cancellation > saved.ownerMessage) {
@@ -292,8 +294,8 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   const renamed = savedId !== undefined && !unavailable && !byId &&
     !matchesDraftDependency(subject, readTask(store, savedId), legacy);
   const created = saved?.draft ? previouslyCreated() : undefined;
-  const available = saved?.draft && !created ? matches() : [];
-  const searchAgain = !byId && (unavailable || renamed || available.length > 1);
+  const unreviewed = saved?.draft && !created && hasUnreviewedMatch(saved.reviewedMatches ?? {});
+  const searchAgain = !byId && (unavailable || renamed || unreviewed);
   if (unavailable && byId && input.authorizeOnly !== true) {
     const reason = savedStatus === "cancelled" ? "was cancelled" : "is no longer on the board";
     const reply = sendTeamMessage(store, id, "manager", {
@@ -319,14 +321,17 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     if (Boolean(existingId) === Boolean(draft)) {
       throw new TaskboardError("INVALID_INPUT", "Supply either an existing dependency ID or one new draft.");
     }
+    let reviewedMatches: Record<string, number> | undefined;
     if (existingId) target(existingId);
     if (draft) {
       prepareDraft(draft);
-      if (matches().length) {
-        throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Search for the existing named dependency and select its ID.");
+      const reviewed = input.reviewedMatches === undefined ? {} : object(input.reviewedMatches);
+      if (hasUnreviewedMatch(reviewed)) {
+        throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Inspect each current match before creating a new dependency draft.");
       }
+      reviewedMatches = Object.fromEntries(matches().map(card => [card.id, reviewed[card.id] as number]));
     }
-    saved = { question, ownerMessage: decision, subject, existingId, draft };
+    saved = { question, ownerMessage: decision, subject, existingId, draft, reviewedMatches };
     source = record({ ...source, draftConfirmed: false }, "draft-dependency-request", "manager");
     source.history.at(-1)!.draftDependency = saved;
     store.save(source);
@@ -342,8 +347,7 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
     if (created && !store.index.tasks[created.id] && !store.index.archive[created.id]) {
       store.create(created);
     }
-    const candidate = created ?? available[0];
-    dependency = candidate ? target(candidate.id) :
+    dependency = created ? target(created.id, true) :
       createWithAttachments(store, assignTags(store, prepareDraft(saved.draft!)), undefined);
   }
   const dependencies = source.dependencies ?? [];

@@ -157,7 +157,7 @@ test("a named cancellation ends a saved draft dependency request after unrelated
   assert.equal(cli(root, ["list"]).tasks.length, 1);
 });
 
-test("draft dependency retry reuses new matches and skips cancelled drafts", async t => {
+test("draft dependency retry rechecks new matches and skips cancelled drafts", async t => {
   for (const { previouslyCreated, matchingCard } of [
     { previouslyCreated: false, matchingCard: true },
     { previouslyCreated: true, matchingCard: true },
@@ -196,9 +196,20 @@ test("draft dependency retry reuses new matches and skips cancelled drafts", asy
       const existing = matchingCard ? cli(root, ["create"], { title: subject }) : undefined;
       const command = ["draft-dependency", source.id];
       const replay = { replyTo: question.sequence };
-      const saved = cli(root, command, replay);
+      let saved;
+      if (existing) {
+        assert.deepEqual(cli(root, command, replay), { searchRequired: true });
+        const before = cli(root, ["show", source.id]);
+        assert.deepEqual(before.dependencies, [prior.id]);
+        saved = cli(root, command, {
+          ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText: text,
+          existingId: existing.id,
+        });
+        assert.equal(saved.dependencyId, existing.id);
+      } else {
+        saved = cli(root, command, replay);
+      }
       assert.notEqual(saved.dependencyId, cancelledId);
-      if (existing) assert.equal(saved.dependencyId, existing.id);
       assert.equal(cli(root, ["show", saved.dependencyId]).status, "draft");
       assert.deepEqual(cli(root, command, replay), saved);
       assert.deepEqual(cli(root, ["show", source.id]).dependencies, [prior.id, saved.dependencyId]);
@@ -292,14 +303,15 @@ test("retry of a cancelled existing dependency respects title and ID authorizati
 });
 
 test("draft dependency retry asks the manager to resolve changes in title matches", async t => {
-  for (const scenario of ["renamed title", "multiple matches", "renamed explicit ID"] as const) {
+  for (const scenario of ["renamed title", "multiple matches", "renamed explicit ID", "unsuitable single match"] as const) {
     await t.test(scenario, subtest => {
       const root = fixture(subtest);
       cli(root, ["init"]);
       const prior = cli(root, ["create"], { title: "Check allocations" });
       const source = cli(root, ["create"], { title: "Report memory", dependencies: [prior.id] });
       const title = "Account for managed heap";
-      const selected = scenario === "multiple matches" ? undefined : cli(root, ["create"], { title });
+      const needsDraft = scenario === "multiple matches" || scenario === "unsuitable single match";
+      const selected = needsDraft ? undefined : cli(root, ["create"], { title });
       const subject = scenario === "renamed explicit ID" ? selected.id : title;
       const ownerText = `Required dependency: ${subject}`;
       const owner = cli(root, ["chat", source.id], { model: "fixture", effort: "low", text: ownerText });
@@ -316,10 +328,13 @@ test("draft dependency retry asks the manager to resolve changes in title matche
       });
       if (selected) {
         cli(root, ["update", selected.id], { revision: selected.revision, title: "Check garbage collection latency" });
-      } else {
+      } else if (scenario === "multiple matches") {
         cli(root, ["create"], { title, description: "Only measures allocation volume." });
       }
-      const replacement = cli(root, ["create"], { title, description: "Measures the managed heap and the peak." });
+      const replacement = cli(root, ["create"], {
+        title,
+        description: scenario === "unsuitable single match" ? "Changes a label." : "Measures the managed heap and the peak.",
+      });
       const before = cli(root, ["show", source.id]);
       const cardCount = cli(root, ["list"]).tasks.length;
       const command = ["draft-dependency", source.id];
@@ -335,11 +350,22 @@ test("draft dependency retry asks the manager to resolve changes in title matche
           ...replay, revision: before.revision, ownerSequence: owner.history.length, ownerText,
         };
         assert.deepEqual(cli(root, command, { ...reference, authorizeOnly: true }), { subject: title });
-        linked = cli(root, command, { ...reference, existingId: replacement.id });
-        assert.equal(linked.dependencyId, replacement.id);
+        if (scenario === "unsuitable single match") {
+          const draft = plannedDraft({ title, description: "Measures the managed heap and the peak.", tags: ["Memory"] });
+          cli(root, command, { ...reference, draft }, "DEPENDENCY_MATCH_FOUND");
+          const staleReview = { [replacement.id]: replacement.revision };
+          const edited = cli(root, ["update", replacement.id], { revision: replacement.revision, description: "Changes a tooltip." });
+          cli(root, command, { ...reference, draft, reviewedMatches: staleReview }, "DEPENDENCY_MATCH_FOUND");
+          linked = cli(root, command, { ...reference, draft, reviewedMatches: { [edited.id]: edited.revision } });
+          assert.notEqual(linked.dependencyId, replacement.id);
+          assert.equal(cli(root, ["show", linked.dependencyId]).description, draft.description);
+        } else {
+          linked = cli(root, command, { ...reference, existingId: replacement.id });
+          assert.equal(linked.dependencyId, replacement.id);
+        }
       }
       assert.deepEqual(cli(root, command, replay), linked);
-      assert.equal(cli(root, ["list"]).tasks.length, cardCount);
+      assert.equal(cli(root, ["list"]).tasks.length, cardCount + (scenario === "unsuitable single match" ? 1 : 0));
       const resolved = cli(root, ["show", source.id]);
       assert.deepEqual(resolved.dependencies, [prior.id, linked.dependencyId]);
       assert.equal(resolved.draftDiscussion.managerReply, linked.sequence);

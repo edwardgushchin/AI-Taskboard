@@ -179,6 +179,13 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
     });
     assert.equal(wrongDraft.error?.code, "USER_DIRECTION_REQUIRED", JSON.stringify(wrongDraft));
     const expectedDescription = scenario?.description ?? "Измерять память управляемой кучи.";
+    if (scenario?.noSuitableMatch && candidates.length) {
+      const prematureDraft = await run("draft_dependency", {
+        ...reference, operation: "save",
+        draft: plannedDraft({ title: expectedTitle, description: expectedDescription, tags: ["Memory"] }),
+      });
+      assert.equal(prematureDraft.error?.code, "DEPENDENCY_MATCH_FOUND", JSON.stringify(prematureDraft));
+    }
     let candidate;
     for (const entry of candidates) {
       const inspected = await run("draft_dependency", { ...reference, operation: "inspect", existingId: entry.id });
@@ -188,7 +195,9 @@ globalThis.dependencyManager = async (_profile, cwd, prompt, _images, run, _tool
         candidate = entry;
       }
     }
-    if (candidates.length) assert.ok(candidate, "A suitable candidate must be inspected before saving");
+    if (candidates.length && !scenario?.noSuitableMatch) {
+      assert.ok(candidate, "A suitable candidate must be inspected before saving");
+    }
     const target = candidate ? { existingId: candidate.id } : {
       draft: plannedDraft({ title: expectedTitle, description: expectedDescription, tags: ["Memory"] }),
     };
@@ -460,11 +469,13 @@ async function run() {
     const { id, dependencyId, priorId, completeId } = state;
     await verifyOutcome(id, dependencyId, priorId, [ownerText, unrelatedText]);
     assert.equal(handoffs.get(completeId), undefined);
-    assert.equal(cards().filter(card => card.title === dependencyTitle && card.status !== "cancelled").length, 1);
-    pass("После несвязанного уточнения владельца и перезапуска очередь завершила сохранённое действие без вызова провайдера менеджера. ID созданной до сбоя карточки сохранён, продолжение произошло один раз.");
+    assert.equal(show(dependencyId).title, state.renamedCreatedTitle);
+    assert.equal(cards().some(card => card.title === dependencyTitle && card.status !== "cancelled"), false);
+    pass("После EIO созданный черновик переименовали, а владелец уточнил другую часть задачи. После перезапуска очередь восстановила исходный ID по метке происхождения и продолжила разбор один раз без повторного создания.");
 
     for (const scenario of retryTargets.values()) {
       const { sourceId, initialId, replacementId, request, questionSequence } = scenario;
+      let linkedId = replacementId;
       if (scenario.explicitId) {
         await until(() => show(sourceId).history.some(event => event.chat && event.text === choiceQuestion(initialId)),
           "request a new explicit dependency ID");
@@ -478,12 +489,22 @@ async function run() {
         assert.equal(handoffs.get(sourceId), 1);
         pass("Указанная владельцем карточка отменена после EIO. Агент получил её ID и причину, по которой нужен новый выбор. Действующее совпадение по названию не было привязано без решения владельца.");
       } else {
-        await verifyOutcome(sourceId, replacementId, priorId, [request]);
+        if (scenario.noSuitableMatch) {
+          await until(() => show(sourceId).dependencies.length === 2, "created suitable dependency");
+          linkedId = show(sourceId).dependencies[1];
+          assert.ok(!scenario.candidateIds.includes(linkedId));
+          assert.equal(show(linkedId).description, scenario.description);
+        }
+        await verifyOutcome(sourceId, linkedId, priorId, [request]);
         assert.equal(replies(show(sourceId))[0].expertMessage.replyTo, questionSequence);
         if (scenario.renamedTitle) {
           assert.equal(show(initialId).title, scenario.renamedTitle);
           assert.equal(show(initialId).status, "draft");
           pass("После ошибки записи выбранную по названию карточку переименовали. После перезапуска менеджер повторил поиск с исходным решением владельца и связал действующее совпадение один раз.");
+        } else if (scenario.noSuitableMatch) {
+          pass("После EIO до создания появился один одноимённый кандидат с другой постановкой. Менеджер проверил его, создал один подходящий черновик и передал его ID агенту.");
+        } else if (scenario.singleMatch) {
+          pass("После EIO до создания появился один подходящий кандидат. Менеджер проверил его постановку и переиспользовал карточку.");
         } else if (scenario.beforeCreation) {
           pass("Ошибку вызвали до создания карточки, затем появились два совпадения. После перезапуска менеджер получил исходный запрос, просмотрел оба совпадения и связал подходящее. Лишняя карточка не создана.");
         } else {
@@ -493,7 +514,8 @@ async function run() {
       if (initialId && !scenario.renamedTitle) assert.equal(show(initialId).status, "cancelled");
       assert.equal(cli(["manager-inbox"]).some(entry => entry.id === sourceId && entry.sequence === questionSequence), false);
       const matchingIds = cards().filter(card => card.title === scenario.title && card.status !== "cancelled").map(card => card.id);
-      assert.deepEqual(new Set(matchingIds), new Set(scenario.candidateIds));
+      const expectedIds = scenario.noSuitableMatch ? [...scenario.candidateIds, linkedId] : scenario.candidateIds;
+      assert.deepEqual(new Set(matchingIds), new Set(expectedIds));
     }
     const expectedQuestions = [...retryTargets.values()].filter(scenario => !scenario.explicitId)
       .map(scenario => ({ id: scenario.sourceId, sequence: scenario.questionSequence }));
@@ -597,6 +619,8 @@ async function run() {
     { title: "Сохранять пиковый размер буфера", explicitId: true },
     { title: "Проверять границы буфера", renamedTitle: "Проверять границы очереди" },
     { title: "Проверять рост буфера", beforeCreation: true },
+    { title: "Измерять заполнение буфера", beforeCreation: true, singleMatch: true },
+    { title: "Измерять ёмкость буфера", beforeCreation: true, noSuitableMatch: true },
   ]) {
     const { title, explicitId, renamedTitle, beforeCreation } = fixture;
     const description = "Подтвердить показания штатного счётчика буфера.";
@@ -624,16 +648,24 @@ async function run() {
     } else {
       cli(["cancel", initial.id], { revision: show(initial.id).revision, reason: "Проверить повтор с отменённой карточкой." });
     }
-    const wrongCandidate = beforeCreation ? create(title, { description: "Настроить подпись буфера в интерфейсе." }) : undefined;
-    const replacement = create(title, { description });
-    scenario.replacementId = replacement.id;
-    scenario.candidateIds = wrongCandidate ? [wrongCandidate.id, replacement.id] : [replacement.id];
+    const candidates = [];
+    if (beforeCreation && !fixture.singleMatch) {
+      candidates.push(create(title, { description: "Настроить подпись буфера в интерфейсе." }).id);
+    }
+    if (!fixture.noSuitableMatch) {
+      scenario.replacementId = create(title, { description }).id;
+      candidates.push(scenario.replacementId);
+    }
+    scenario.candidateIds = candidates;
     assert.deepEqual(show(source.id).dependencies, [prior.id]);
   }
 
+  const renamedCreatedTitle = "Измерять текущую и пиковую память управляемой кучи";
+  cli(["update", dependency.id], { revision: show(dependency.id).revision, title: renamedCreatedTitle });
   writeFileSync(fixtureState, JSON.stringify({
     id: pending.id,
     dependencyId: dependency.id,
+    renamedCreatedTitle,
     priorId: prior.id,
     completeId: reusable.id,
     retryTargets: [...retryTargets.values()],
