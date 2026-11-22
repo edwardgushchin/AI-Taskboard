@@ -1,4 +1,5 @@
 import { isManual } from "../cli/manual-board.ts";
+import { CodexRoutingTimeout } from "./codex-routing-timeout.ts";
 import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { deleteGitHubMilestone } from "../cli/repository.ts";
 import { boardReviewMode, defaultBoardAgents, hexTagColor, reviewVerifier, TaskboardError, taskIdPattern, usesIndependentReviewer } from "../cli/model.ts";
@@ -841,6 +842,10 @@ export function boardActions(project: string, attachments: { path: string; name:
           return { ok: true, data: { ...data, reviewer, executorRunning: isTaskRunning(id), reviewerRunning } };
         } catch (error) {
           if (error instanceof TaskboardError && error.code === "REVIEW_MODE_CHANGED") return cliFailure(error.code, error.message);
+          if (error instanceof CodexRoutingTimeout) return cliFailure("CODEX_ROUTING_TIMEOUT", error.message);
+          if ((error as { code?: string }).code === "CODEX_START_UNCONFIRMED") {
+            return cliFailure("CODEX_START_UNCONFIRMED", (error as Error).message);
+          }
           return cliFailure("REVIEW_FAILED", (error as Error).message);
         }
       }

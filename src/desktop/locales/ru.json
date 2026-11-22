@@ -569,6 +569,8 @@
   "ui.retry_executor_launch": "Повторить запуск",
   "ui.write_probe_retry_condition": "Нажмите «Повторить запуск» в карточке, чтобы снова проверить запись.",
   "ui.write_probe_retry_timed_out": "Проверка записи Codex превысила лимит в 15 секунд в обеих попытках.",
+  "ui.waiting_for_codex_retry": "Ожидание повтора Codex",
+  "ui.retry_review": "Повторить ревью",
   "ui.write_probe_retry_interrupted": "Автоматический повтор проверки записи Codex прерван.",
   "ui.write_probe_retry_access_changed": "Полный доступ отозван до повтора проверки записи Codex.",
   "ui.write_probe_recovery_thread_missing": "Исходный чат Codex отсутствует. Доска не может подтвердить запуск хода.",

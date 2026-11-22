@@ -10,7 +10,7 @@ import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } 
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWriteProbeRetry, recordQueuedTurn,
+import { exhaustExecutorRoutingRetry, forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueExecutorRoutingRetry, queueWriteProbeRetry, recordQueuedTurn,
   recordWriteProbeRetryFailure, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import type { RuntimeEntry } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
@@ -56,6 +56,8 @@ import { transcribeVoice } from "./voice-transcription.ts";
 import { startWindowsDictation } from "./windows-dictation.ts";
 import { linkedDraftManagerReply, needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
+import { routingRetryDelayMs } from "./codex-routing-timeout.ts";
+import { reviewDecisionSequence } from "../cli/expert-team.ts";
 import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
 import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
@@ -79,7 +81,7 @@ interface Board {
   expertCatalogVersion?: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { activity?: ReturnType<typeof taskActivity>; historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; mergeRepair?: true; unfinishedDependencies?: string[];
+  tasks: (Task & { activity?: ReturnType<typeof taskActivity>; historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; reviewSubmissionSequence?: number; reviewDecision?: number; mergeRepair?: true; unfinishedDependencies?: string[];
     expertWorkPlanned?: boolean; expertReviewPlanned?: boolean })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
@@ -327,11 +329,18 @@ function frame(state: ProjectTab) {
       const failedRevision = subscriptions.get(state.project ?? "")?.failedDiscussionStarts?.get(task.id);
       return task.status === "in_progress" && ((task.discussionReturn !== undefined && (failedRevision ?? -1) < task.revision) ||
         sharedRuns.some(entry => matchesQueuedExecutor(entry, task) &&
-          (!entry.quotaPaused || entry.reviewReturn || entry.earlyLaunch || entry.writeProbeRetry || quotaWait || state.board?.settings.autoMode))) &&
+          (!entry.quotaPaused || entry.reviewReturn || entry.earlyLaunch || entry.writeProbeRetry ||
+            entry.routingRetryAt || quotaWait || state.board?.settings.autoMode))) &&
         !runningTasks.has(key) && !replyingTasks.has(key) && !sharedRuns.some(entry => entry.kind === "slot" && entry.task === task.id);
     }).map(task => task.id),
     reviewingTasks,
     waitingReviewTasks,
+    routingRetries: Object.fromEntries(state.board?.tasks.flatMap(task => {
+      const reviewRetry = reviewRetryFor(task, state.board!.settings, sharedRuns);
+      if (reviewRetry) return [[task.id, { reason: reviewRetry.reason, exhausted: Boolean(reviewRetry.exhausted) }]];
+      const queued = sharedRuns.find(entry => entry.routingRetryAt !== undefined && matchesQueuedExecutor(entry, task));
+      return queued ? [[task.id, { reason: "", exhausted: false }]] : [];
+    }) ?? []),
     runActivity: Object.fromEntries(state.board?.tasks.flatMap(task => {
       const log = runActivityByTask.get(state.project + "\0" + task.id);
       return log ? [[task.id, log.items]] : [];
@@ -1787,7 +1796,7 @@ function scheduleAgentWork() {
         const { project, tasks, settings } = watch.board;
         if (closingProjects.has(project)) continue;
         for (const entry of agentSlots.entries(project)) {
-          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch, writeProbeRetry } = entry;
+          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch, writeProbeRetry, routingRetryAt } = entry;
           if (kind !== "queue" || !id || revision === undefined) continue;
           const task = tasks.find(task => task.id === id);
           // The queue can be saved before the watch sees the new card revision.
@@ -1799,8 +1808,8 @@ function scheduleAgentWork() {
           }
           const role = task.mergeRepair ? "reviewer" : "executor";
           const key = project + "\0" + id;
-          if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch && !writeProbeRetry) ||
-              (writeProbeRetry && writeProbeRetry.notBefore > Date.now()) || queuedRecoveryDelay.has(key) ||
+          if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch && !writeProbeRetry && !routingRetryAt) ||
+              Math.max(writeProbeRetry?.notBefore ?? 0, routingRetryAt ?? 0) > Date.now() || queuedRecoveryDelay.has(key) ||
               !agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
           const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
           void launchTask(project, id, undefined, false, task.revision, continuation,
@@ -3942,19 +3951,34 @@ function reviewAttempt(task: Task & { reviewDecision?: number; reviewTargetHead?
     task.revision, task.reviewDecision, task.reviewTargetHead]);
 }
 
+function reviewRetryBinding(task: Task & { reviewSubmissionSequence?: number; reviewDecision?: number }, settings: Board["settings"]) {
+  return JSON.stringify([task.reviewSubmissionSequence, task.reviewDecision,
+    taskReviewMode(task, settings), taskReviewModeVersion(task, settings)]);
+}
+
+function reviewRetryFor(task: Board["tasks"][number], settings: Board["settings"], entries: RuntimeEntry[]) {
+  if (task.status !== "review" || task.reviewApproved || task.reviewNoted) return;
+  const retry = entries.find(entry => entry.kind === "review-retry" && entry.task === "review-retry:" + task.id)?.reviewRetry;
+  if (retry?.binding === reviewRetryBinding(task, settings)) return retry;
+}
+
 function readyReviews(watch: BoardWatch) {
   const { project, tasks, settings } = watch.board;
+  const entries = agentSlots.entries(project);
   return tasks.filter(task => {
     if (task.status !== "review") return false;
     const mode = taskReviewMode(task, settings);
     const independent = usesIndependentReviewer(mode);
     const pending = independent ? watch.reviewReports.get(task.id)?.pendingDecision : undefined;
+    const retry = independent ? reviewRetryFor(task, settings, entries) : undefined;
+    const attempt = retry ? !retry.exhausted && retry.notBefore <= Date.now() :
+      watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings);
     return (settings.autoMode || independent) && mode !== "human" && (!task.reviewPending || pending) &&
       (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
       task.expertReviewPlanned && (!independent || (!task.reviewApproved && !task.reviewNoted)) &&
       (pending
         ? pending.retryAfter <= Date.now()
-        : watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings)) &&
+        : attempt) &&
       ((independent && task.reviewHasCommit) || !executorBusy(project, task.id));
   });
 }
@@ -4023,6 +4047,18 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     return;
   }
   const { board: { project }, reviewReports: reports } = watch;
+  const task = watch.board.tasks.find(task => task.id === id);
+  if (!task) return;
+  const binding = reviewRetryBinding(task, watch.board.settings);
+  const retry = reviewRetryFor(task, watch.board.settings, agentSlots.entries(project));
+  if (retry && (retry.exhausted || retry.notBefore > Date.now())) return;
+  const setRetry = (next?: NonNullable<RuntimeEntry["reviewRetry"]>) => {
+    runtimeTransaction(project, entries => {
+      const index = entries.findIndex(entry => entry.kind === "review-retry" && entry.task === "review-retry:" + id);
+      if (index >= 0) entries.splice(index, 1);
+      if (next) entries.push({ id: "review-retry:" + id, task: "review-retry:" + id, kind: "review-retry", owner: 0, reviewRetry: next });
+    });
+  };
   const key = project + "\0" + id;
   if (returningDrafts.has(key)) return;
   const operation = beginOperation(project, t("ui.reviewer_50c42665") + " · " + id, true);
@@ -4050,11 +4086,17 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     }
   };
   let usage: TokenUsageReport | undefined;
+  let checkpointToRemove: string | undefined;
   const review = boardActions(project, [], [], signal, async () => cliFailure("INVALID_INPUT", t("errors.6c4fab5f39631a35")),
     () => undefined, id => executorBusy(project, id), () => () => {}, async () => false, undefined, () => signal,
     (settings, context, call, reviewSignal, submissionSequence) => {
       const evidence = JSON.parse(context);
       if (evidence.reviewMode !== expectedMode) throw new TaskboardError("REVIEW_MODE_CHANGED", "The review mode changed before the reviewer started.");
+      if (retry && (submissionSequence !== task.reviewSubmissionSequence ||
+          (evidence.reviewDecision ?? 0) !== (task.reviewDecision ?? 0) ||
+          evidence.reviewModeVersion !== taskReviewModeVersion(task, watch.board.settings))) {
+        throw new TaskboardError("REVIEW_MODE_CHANGED", "The submission changed before the reviewer started.");
+      }
       const startedAtMs = Date.now();
       const started = performance.now();
       return withReviewerChat(project, id, () => broadcastBoardChat(project, "reviewer-chat", { id }), async onActivity => {
@@ -4069,16 +4111,21 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
           };
         };
         reviewSignal.throwIfAborted();
-        // The saved checkpoint belongs to one submission, target, and review configuration.
+        // A manual retry starts fresh even if shutdown left the exhausted turn's checkpoint behind.
         const path = join(runtimeLocation(project).directory, "reviewer-quota-" + id + ".json");
-        const binding = JSON.stringify([submissionSequence, evidence.targetHead, expectedMode, settings]);
-        let checkpoint: { binding: string; threadId?: string; candidate?: Partial<ReviewReport> } = { binding };
+        const binding = JSON.stringify([
+          submissionSequence, evidence.targetHead, expectedMode, settings,
+          ...(retry?.manual ? ["manual"] : []),
+        ]);
+        let checkpoint: { binding: string; threadId?: string; candidate?: Partial<ReviewReport>;
+          turn?: { clientId: string; turnId?: string } } = { binding };
         try {
           const saved = readJson(path) as typeof checkpoint;
           if (saved.binding === binding) checkpoint = saved;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
+        if (retry) checkpointToRemove = path;
         const reviewPass = (model: Parameters<typeof reviewWithCodex>[2], prompt: string,
           activity: (items: RunActivity[]) => void) =>
           reviewWithCodex(app.getPath("userData"), project, model, prompt, reviewerTools, call, reviewSignal,
@@ -4089,6 +4136,13 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
                 checkpoint.threadId = threadId;
                 writeJson(path, checkpoint);
               },
+              ...(retry ? {
+                turn: checkpoint.turn,
+                saveTurn: (turn?: typeof checkpoint.turn) => {
+                  checkpoint.turn = turn;
+                  writeJson(path, checkpoint);
+                },
+              } : {}),
             });
 
         try {
@@ -4113,7 +4167,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
           return await reviewPass(reviewVerifier, JSON.stringify({ ...evidence, candidateReview: candidate }),
             items => onActivity([...previous, ...items]));
         } finally {
-          if (signal.reason !== quotaInterruption) {
+          if (!retry && signal.reason !== quotaInterruption) {
             try { rmSync(path, { force: true }); }
             catch (error) { console.warn("Could not remove the completed reviewer checkpoint.", error); }
           }
@@ -4194,6 +4248,28 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         result = await review("task_review", { id });
       }
       if (!result.ok) {
+        if (retry && result.error.code === "BOARD_BUSY") return;
+        if (!signal.aborted && result.error.code === "CODEX_ROUTING_TIMEOUT") {
+          const exhausted = Boolean(retry && !retry.manual);
+          // Keep the turn available for reconciliation until the queue records its outcome.
+          setRetry({
+            binding,
+            reason: result.error.message,
+            notBefore: Date.now() + routingRetryDelayMs,
+            ...(exhausted ? { exhausted: true } : {}),
+          });
+          if (checkpointToRemove) rmSync(checkpointToRemove, { force: true });
+          if (exhausted) notify(result.error.message);
+          return;
+        }
+        if (!signal.aborted && retry && result.error.code === "CODEX_START_UNCONFIRMED") {
+          setRetry({ ...retry, notBefore: Date.now() + routingRetryDelayMs });
+          return;
+        }
+        if (!signal.aborted && retry && !transientChange.includes(result.error.code)) {
+          if (checkpointToRemove) rmSync(checkpointToRemove, { force: true });
+          setRetry();
+        }
         if (!["INVALID_TRANSITION", "REVISION_CONFLICT", "REVIEW_MODE_CHANGED"].includes(result.error.code)) notify(result.error.message);
         return;
       }
@@ -4214,11 +4290,22 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         revision, targetHead, reviewMode, reviewModeVersion, reviewDecision: reviewDecision ?? 0,
         retryAfter: 0, reviewerUsage: usage,
       };
+      if (retry) {
+        const completed = reports.get(id)!;
+        completed.pendingDecision = decision;
+        saveReviewReports(project, reports);
+        setRetry();
+        if (checkpointToRemove) rmSync(checkpointToRemove, { force: true });
+      }
       const decided = await recordDecision(reviewer, decision);
       if (!decided.ok && decided.error.code === "BOARD_BUSY") {
         postpone(reports.get(id)!, decision);
         usage = undefined;
         return;
+      }
+      if (retry) {
+        delete reports.get(id)?.pendingDecision;
+        saveReviewReports(project, reports);
       }
       if (decided.ok) {
         usage = undefined;
@@ -4258,6 +4345,26 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     }
   }
 }
+ipcMain.handle("board:retryReview", (event, id: unknown) => {
+  const { board } = stateOf(event);
+  if (!board || typeof id !== "string" || !taskIdPattern.test(id)) return;
+  const { project } = board;
+  onBoard(runtimeLocation(project), store => {
+    const task = store.card(id);
+    const settings = store.index.settings;
+    if (task.status !== "review" || !usesIndependentReviewer(taskReviewMode(task, settings))) return;
+    const submission = task.history.findLastIndex(item => item.action === "submit" && item.to === "review") + 1;
+    const binding = reviewRetryBinding({ ...task, reviewSubmissionSequence: submission,
+      reviewDecision: reviewDecisionSequence(task) }, settings);
+    runtimeTransaction(project, entries => {
+      const entry = entries.find(item => item.kind === "review-retry" && item.task === "review-retry:" + id);
+      if (entry?.reviewRetry?.binding !== binding || !entry.reviewRetry.exhausted) return;
+      entry.reviewRetry = { binding, reason: entry.reviewRetry.reason, notBefore: 0, manual: true };
+    });
+  });
+  notifyRunChange(project);
+  scheduleAgentWork();
+});
 ipcMain.handle("board:create", async (event, type: unknown) => {
   if (type !== "agent" && type !== "manual") return cliFailure("INVALID_INPUT", "Выберите тип доски в приложении.");
   return pickProject(stateOf(event), type);
@@ -4819,12 +4926,16 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   let earlyLaunch = false;
   let earlyThreadId: string | undefined;
   let writeProbeRetry: RuntimeEntry["writeProbeRetry"];
+  let routingRetryAt: number | undefined;
   let rejectedWriteProbeTurn: { revision: number; reason: string } | undefined;
   let probeLaunch: Pick<NonNullable<RuntimeEntry["writeProbeRetry"]>, "cwd" | "fullAccess" | "windowsSandbox"> &
     { task: LaunchState; slotId: string } | undefined;
   let currentRevisionAfterStart = revision;
   const blockUnconfirmedTurn = (revision: number, reason: string) => callCli<LaunchState>(project, ["block", id, "--compact"], {
     revision, reason, unconfirmedTurn: true, condition: t("ui.write_probe_recovery_condition"),
+  });
+  const blockRoutingRetry = (revision: number, reason: string) => callCli<LaunchState>(project, ["block", id, "--compact"], {
+    revision, reason, retryExecutor: true, condition: t("ui.resolve_the_reported_issue_and_resume_the_task_2b49bf6d"),
   });
   let release: ((restart?: boolean | "quota") => void) | undefined;
   let updateTimer: NodeJS.Timeout | undefined;
@@ -4939,6 +5050,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         ? current.data.codexThreadId ?? pending.linkedThread?.codexThreadId : undefined;
       threadChoice = pending.newThread ?? newThread;
       writeProbeRetry = pending.writeProbeRetry;
+      routingRetryAt = pending.routingRetryAt;
+      continuation = pending.continuation ?? continuation;
+      if (pending.routingRetryFailure) return await blockRoutingRetry(task.revision, pending.routingRetryFailure);
       if (writeProbeRetry?.unconfirmedTurn && writeProbeRetry.failure) {
         return await blockUnconfirmedTurn(task.revision, writeProbeRetry.failure);
       }
@@ -5059,6 +5173,9 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     currentRevisionAfterStart = linked.revision;
     if (returnedRevision !== undefined) returnedRevision = linked.revision;
     const cwd = "cwd" in started.data ? started.data.cwd : started.data.worktree;
+    if (routingRetryAt !== undefined && restart && projectIdentity(restart.cwd) !== projectIdentity(cwd)) {
+      throw new Error("The working directory changed while the Codex retry was queued.");
+    }
     // Quota can interrupt this launch before Codex has opened or linked a thread.
     releaseSlot.run(() => rememberExecutor(project, task, cwd, continuation, threadChoice || undefined));
     signal.throwIfAborted();
@@ -5119,6 +5236,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (writeProbeRetry) recoveringThreadId = pending.threadId;
       return {
         ...pending,
+        requireCompletion: routingRetryAt !== undefined,
         accepted: (turnId: string) => recordQueuedTurn(project, id, pending.clientId, turnId),
         rejected: writeProbeRetry && slotId ? (reason: string) => {
           // An explicit RPC rejection settles this request even if the server closes next.
@@ -5183,9 +5301,42 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         await saveActivity();
         return;
       }
+      if (routingRetryAt !== undefined && outcome?.unconfirmed && !stopRequested && !signal.aborted) {
+        queuedRecoveryDelay.add(key);
+        setTimeout(() => queuedRecoveryDelay.delete(key), routingRetryDelayMs).unref();
+        await saveActivity();
+        return;
+      }
+      if (routingRetryAt !== undefined && outcome?.routingTimeout && slotId && !stopRequested && !signal.aborted &&
+          exhaustExecutorRoutingRetry(project, slotId, id, outcome.reason)) {
+        await saveActivity();
+        const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
+        if (!stopRequested && !signal.aborted && current.ok && current.data.status === "in_progress" &&
+            current.data.codexThreadId === codexThreadId) {
+          await blockRoutingRetry(current.data.revision, outcome.reason);
+        }
+        return;
+      }
+      if (routingRetryAt !== undefined && !signal.aborted) {
+        agentSlots.defer(project, id, undefined, queuedRevision);
+      }
+      if (outcome?.routingTimeout && routingRetryAt === undefined && role === "executor" &&
+          slotId && !stopRequested && !signal.aborted && !returningDrafts.has(key)) {
+        const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
+        if (current.ok && current.data.status === "in_progress" && current.data.codexThreadId === codexThreadId &&
+            !stopRequested && !signal.aborted &&
+            queueExecutorRoutingRetry(project, slotId, current.data, cwd, Date.now() + routingRetryDelayMs, continuation)) {
+          await saveActivity();
+          return;
+        }
+        if (current.ok && current.data.status !== "in_progress") {
+          await saveActivity();
+          return;
+        }
+      }
       if (run.recovered && !stopRequested && (!outcome || outcome.interrupted) &&
-          (recoveringWriteProbeTurn || !restart || outcome?.interrupted)) {
-        requeueRecoveredTurn = Boolean(!recoveringWriteProbeTurn && restart && outcome?.interrupted);
+          (routingRetryAt !== undefined || recoveringWriteProbeTurn || !restart || outcome?.interrupted)) {
+        requeueRecoveredTurn = Boolean(routingRetryAt === undefined && !recoveringWriteProbeTurn && restart && outcome?.interrupted);
         await saveActivity();
         return;
       }
@@ -5291,7 +5442,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         operation.finish();
       }
     });
-    if (queued && signal.reason !== quotaInterruption) {
+    if (queued && routingRetryAt === undefined && signal.reason !== quotaInterruption) {
       try {
         const pending = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, linked));
         if (pending?.revision !== undefined) agentSlots.defer(project, id, undefined, pending.revision);
@@ -5330,7 +5481,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         return await blockUnconfirmedTurn(task.revision, reason);
       }
     }
-    if ((recoveringThreadId && (writeProbeRetry || (!restart && !missingCodexThread((error as Error).message, earlyThreadId)))) ||
+    if ((recoveringThreadId && (routingRetryAt !== undefined || writeProbeRetry || (!restart && !missingCodexThread((error as Error).message, earlyThreadId)))) ||
         code === "CODEX_START_UNCONFIRMED") {
       queuedRecoveryDelay.add(key);
       setTimeout(() => queuedRecoveryDelay.delete(key), 5_000).unref();

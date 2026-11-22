@@ -3,6 +3,9 @@ import { readBoardSettings, locateBoard } from "../cli/storage.ts";
 import { responseLanguageInstructions } from "./board-agent-hooks.ts";
 import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { findQueuedTurn } from "./codex-queued-turn.ts";
+import { CodexRoutingTimeout, isRoutingTimeout } from "./codex-routing-timeout.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
@@ -156,11 +159,18 @@ export function chatModels(profile: string, project: string) {
   })));
 }
 
+type ReviewThread = {
+  id?: string;
+  save: (id: string) => void;
+  turn?: { clientId: string; turnId?: string };
+  saveTurn?: (turn?: { clientId: string; turnId?: string }) => void;
+};
+
 export async function reviewWithCodex(profile: string, project: string, settings: ChatSettings | null | undefined,
   context: string, tools: object[], runAction: RunAction, signal: AbortSignal,
   onTokenUsage: (report: TokenUsageReport) => Promise<void>, taskId?: string,
   onActivity?: (items: RunActivity[]) => void, plan?: ExpertPhase, targetHead?: string | null, submissionSequence = 0,
-  reviewThread?: { id?: string; save: (id: string) => void }) {
+  reviewThread?: ReviewThread) {
   let usage: TokenUsageReport | undefined;
   let stopMail: (() => void) | undefined;
   const worklog = boardWorklog(project, "reviewer", taskId);
@@ -265,7 +275,7 @@ async function changeGoal(request: Request, threadId: string, action: BoardGoalA
 interface TurnNotification {
   threadId?: string;
   turnId?: string | null;
-  turn?: { id: string; status: string; error?: { message?: string } };
+  turn?: { id: string; status: string; error?: { message?: string } | null };
   goal?: BoardGoal;
   item?: { type: string; text?: string; phase?: string } & Partial<ChatImage>;
   tokenUsage?: { last?: { totalTokens?: number }; modelContextWindow?: number };
@@ -744,7 +754,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   onActivity?: (items: RunActivity[]) => void;
   onControl?: (control: AgentControl) => void; signal?: AbortSignal; imageDirectory?: string; imageLimit?: number;
   session?: BoardSession;
-  reviewThread?: { id?: string; save: (id: string) => void };
+  reviewThread?: ReviewThread;
   finalAnswerSchema?: object;
   webSearch?: boolean;
   mcp?: BoardMcpConnection;
@@ -966,12 +976,32 @@ function reply(profile: string, project: string, prompt: string, images: string[
       let turn: TurnNotification["turn"];
       if (!session?.resumeGoal) {
         signal?.throwIfAborted();
+        const reviewThread = options.reviewThread;
+        if (reviewThread?.turn) {
+          const saved = await findQueuedTurn(request, thread.id, { ...reviewThread.turn, requireCompletion: true });
+          if (!saved || saved.status === "inProgress") {
+            throw Object.assign(new Error("Codex has not confirmed the reviewer turn's completion."),
+              { code: "CODEX_START_UNCONFIRMED" });
+          }
+          if (isRoutingTimeout(saved)) throw new CodexRoutingTimeout(saved.error!.message!);
+          if (saved.status !== "completed") throw new Error(saved.error?.message ?? "Codex did not complete the review.");
+          turn = saved;
+          for (const item of saved.items) {
+            if (item.type === "agentMessage" && item.phase !== "commentary" && item.text) answers.push(item.text);
+          }
+        }
+      }
+      if (!session?.resumeGoal && !turn) {
+        const reviewThread = options.reviewThread;
         session?.onTurnStarting?.();
+        const reviewClientId = reviewThread?.saveTurn ? randomUUID() : undefined;
+        if (reviewClientId) reviewThread?.saveTurn?.({ clientId: reviewClientId });
         const response = await request<{ turn: NonNullable<TurnNotification["turn"]> }>("turn/start", {
           threadId: thread.id, effort,
           ...(!research ? { sandboxPolicy: { type: "readOnly", networkAccess: false } } : {}),
           ...(options.finalAnswerSchema ? { outputSchema: options.finalAnswerSchema } : {}),
           ...(session?.messageId ? { clientUserMessageId: session.messageId } : {}),
+          ...(reviewClientId ? { clientUserMessageId: reviewClientId } : {}),
           ...(options.worklog || session?.attachmentContext ? { additionalContext: {
             ...(options.worklog ? { ai_taskboard_worklog: { value: worklogReminder, kind: "application" } } : {}),
             ...(session?.attachmentContext ? { ai_taskboard_attachments: {
@@ -984,9 +1014,13 @@ function reply(profile: string, project: string, prompt: string, images: string[
           if (session?.onTurnRejected && error instanceof CodexRpcRejection) {
             session.onTurnRejected();
           }
+          if (reviewClientId && !(error instanceof CodexRpcRejection) && !signal?.aborted) {
+            throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
+          }
           throw error;
         });
         turn = response.turn;
+        if (reviewClientId) reviewThread?.saveTurn?.({ clientId: reviewClientId, turnId: turn.id });
         options.worklog?.start(thread.id, turn.id);
         refreshTimeout(currentGoal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
         tokens.save(tokens.begin(thread.id, turn.id), onTokenUsage);
@@ -1033,7 +1067,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
       while (!turn || turn.status === "inProgress" ||
         (followingGoal && !session?.iterativeGoal && !session?.finishGoalTurn?.() &&
           turn.status === "completed" && currentGoal?.status === "active" && !stopping)) {
-        const { method, params } = await receive(notify);
+        const { method, params } = await receive(notify).catch(error => {
+          if (options.reviewThread?.saveTurn && !signal?.aborted) {
+            throw Object.assign(error as Error, { code: "CODEX_START_UNCONFIRMED" });
+          }
+          throw error;
+        });
         const data = params as TurnNotification | undefined;
         if (data?.threadId !== thread.id) continue;
         if (method === "turn/started" && data.turn) {
@@ -1059,6 +1098,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       const goalStatus: GoalStatus | "cleared" | undefined = followingGoal ? currentGoal?.status ?? "cleared" : undefined;
       const goalStopped = turn.status === "interrupted" && (goalStatus === "paused" || goalStatus === "cleared");
       if (stopping || (turn.status === "interrupted" && !goalStopped)) return { interrupted: true as const };
+      if (options.role === "reviewer" && isRoutingTimeout(turn)) throw new CodexRoutingTimeout(turn.error!.message!);
       if (turn.status !== "completed" && !goalStopped) throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
       completed = !goalStopped;
       const text = answers.join("\n\n").trim();

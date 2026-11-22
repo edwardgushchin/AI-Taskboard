@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   openWorktree: id => ipcRenderer.invoke("board:openWorktree", id),
   revealArtifact: (id, source, sha256) => ipcRenderer.invoke("board:revealArtifact", id, source, sha256),
   launchTask: (id, options) => ipcRenderer.invoke("board:launchTask", id, options),
+  retryReview: id => ipcRenderer.invoke("board:retryReview", id),
   subscribe: listener => { ipcRenderer.on("board:changed", (_event, frame) => listener(frame)); },
   themes: () => ipcRenderer.invoke("appearance:themes"),
   setLanguage: language => ipcRenderer.invoke("appearance:language", language),
