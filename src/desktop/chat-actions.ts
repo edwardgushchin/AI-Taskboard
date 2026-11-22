@@ -119,7 +119,9 @@ export function reviewModeReceipt(task: Task & { effectiveReviewMode: ReviewMode
 }
 
 export function taskChatActions(project: string, initial: Task, userText: string, onChange: (revision: number) => void,
-  requestChanges?: (task: Task, reason: string) => Promise<CliReply>) {
+  requestChanges?: (task: Task, reason: string) => Promise<CliReply>,
+  ownerChatSequence = initial.history.findLastIndex(event =>
+    event.action === "chat" && event.actor === "user" && event.text === userText) + 1) {
   let task = initial;
   return async (name: string, args: unknown): Promise<CliReply> => {
     if (name === reviewModeTool.name) {
@@ -155,13 +157,15 @@ export function taskChatActions(project: string, initial: Task, userText: string
     if (typeof authorization !== "string" || !authorization.trim() || !userText.includes(authorization)) {
       return cliFailure("USER_DIRECTION_REQUIRED", "Quote the new information or edit request from the latest user's message.");
     }
-    if ((task.status === "review" || task.closedAt) &&
-        ["title", "description", "criteria", "questions", "subtasks", "dependencies", "expertId"].some(key => Object.hasOwn(fields, key))) {
-      return cliFailure("REQUIREMENTS_LOCKED", "The requirements of submitted or completed work are locked.");
+    const editsBrief = ["description", "criteria"].some(key => Object.hasOwn(fields, key));
+    const otherRequirements = ["title", "questions", "subtasks", "dependencies", "expertId"].some(key => Object.hasOwn(fields, key));
+    if ((task.closedAt && (editsBrief || otherRequirements)) || (task.status === "review" && otherRequirements)) {
+      return cliFailure("REQUIREMENTS_LOCKED", "This field is locked for the current task status.");
     }
     const revision = task.revision;
     const result = await callCli<Task>(project, ["update", task.id], {
       ...fields, actor: "user", note: fields.note ?? authorization, revision, preserveStatus: true,
+      ...(editsBrief && (ownerChatSequence > 0 || task.status !== "draft") ? { ownerChatSequence, authorization } : {}),
     });
     if (!result.ok) return result;
     task = result.data;

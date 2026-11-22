@@ -2,8 +2,10 @@ import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-dra
 // Run the desktop review queue against an isolated Git board and a test provider.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { release } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
@@ -12,19 +14,20 @@ import { electronCheck } from "./electron-check.mjs";
 
 const checks = ["push-review", "push-accept", "approval", "advanced-target", "human", "note",
   "busy-approval", "busy-return", "busy-target", "busy-revision", "busy-mode", "busy-reopen",
-  "busy-failure", "busy-failure-observed", "busy-failure-reopen"];
+  "busy-failure", "busy-failure-observed", "busy-failure-reopen", "owner-requirements"];
 const requested = process.argv.find(arg => arg.startsWith("--scenario="))?.slice("--scenario=".length);
 if (requested && !checks.includes(requested)) throw new Error("Unknown review queue scenario: " + requested);
 const { scratch, artifacts } = electronCheck(import.meta.url, "reviewer-queue", 120_000,
   (requested ? [requested] : checks).map(name => [name]));
 const scenario = process.argv.at(-1);
+const ownerScenario = scenario === "owner-requirements";
 const busyScenario = scenario.startsWith("busy-");
 const failureScenario = scenario.startsWith("busy-failure");
 const reopensBoard = scenario === "busy-reopen" || scenario === "busy-failure-reopen";
 const decisionCommand = scenario === "busy-return" ? "request-changes" : "review-approve";
 const racedCommand = { "push-review": "review", "push-accept": "accept" }[scenario];
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, dialog } = require("electron");
 const { transformSync } = require("esbuild");
 const project = join(scratch, scenario);
 const cliEntry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -36,8 +39,8 @@ const cli = (args, input) => {
   assert.equal(result.ok, true, JSON.stringify(result));
   return result.data;
 };
-async function waitFor(probe, label) {
-  const deadline = Date.now() + 30_000;
+async function waitFor(probe, label, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const value = await probe();
     if (value) return value;
@@ -63,12 +66,16 @@ async function run() {
     git("commit", "--allow-empty", "-m", "Commit to push");
   }
   cli(["init"]);
-  cli(["settings"], { reviewMode: "reviewer", autoMode: !busyScenario && scenario !== "note" });
-  const task = cli(["create"], plannedDraft({ title: "Review a submitted change", criteria: ["Result is present"] }));
+  cli(["settings"], {
+    reviewMode: ownerScenario ? "reviewer-human" : "reviewer",
+    autoMode: !ownerScenario && !busyScenario && scenario !== "note",
+  });
+  const initialCriterion = ownerScenario ? "Панель показывает количество доступных сбросов, включая ноль." : "Result is present";
+  const task = cli(["create"], plannedDraft({ title: "Review a submitted change", criteria: [initialCriterion] }));
   confirmFixtureDraft(project, task.id);
   const ready = cli(["approve", task.id]);
   const started = cli(["start", task.id], { revision: ready.revision });
-  writeFileSync(join(started.worktree, "result.txt"), "Result for review\n");
+  writeFileSync(join(started.worktree, "result.txt"), ownerScenario ? "Доступно сбросов: 2\n" : "Result for review\n");
   cli(["run-log", task.id, "--compact"], { durationMs: 1000, entries: [
     { id: "executor-final", type: "agentMessage", phase: "final_answer", title: "",
       text: "Executor finished.", status: "completed", at: new Date().toISOString() },
@@ -136,11 +143,22 @@ async function run() {
   const modules = join(scratch, "node_modules");
   if (!existsSync(modules)) symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), modules, "junction");
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  const source = readFileSync(sourceUrl, "utf8")
+  let source = readFileSync(sourceUrl, "utf8")
     .replace("replyToTask, reviewWithCodex, updateBoardGoal", "replyToTask, updateBoardGoal")
     .replace("import { callCli,", "import { callCli as realCallCli,")
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
+  if (ownerScenario) {
+    source = source
+      .replace("replyToTask, updateBoardGoal", "updateBoardGoal")
+      .replace("missingCodexThread, startCodexRun", "missingCodexThread")
+      .replace("codexStatus, configuredCodex,", "codexStatus,");
+    source += `
+const configuredCodex = async () => ({});
+const replyToTask = globalThis.ownerDiscussionProvider;
+const startCodexRun = globalThis.ownerExecutorProvider;
+`;
+  }
   const entry = join(scratch, "main-under-test.mjs");
   writeFileSync(entry, transformSync(`const reviewWithCodex = globalThis.reviewQueueProvider;
 const callCli = (...args) => globalThis.reviewQueueCli(realCallCli, ...args);
@@ -215,7 +233,99 @@ globalThis.reviewPendingInWatch = (project, id) =>
     return result;
   };
   const calls = [];
+  const ownerMessage = "Сбросы нужно писать под полосой лимитов и нужно перечислить их со сроком экспирации";
+  const ownerCriterion = "Под полосой лимитов есть список сбросов со сроком каждого.";
+  const zeroDefect = "При нулевом остатке пропадает счётчик.";
+  const listDefect = "В сдаче пропал обязательный список сбросов со сроками.";
+  const ownerQuestion = "Список требуется постановкой, но занимает три строки. Владелец, хотите удалить его из требований?";
+  const reviewInputs = [];
+  const executorInputs = [];
+  const releaseClarifiedReview = Promise.withResolvers();
+  let clarificationReview;
+  const activeCriteria = [initialCriterion, ownerCriterion];
+  const assertBrief = ({ description, criteria }) => {
+    assert.ok(description.includes(ownerMessage));
+    assert.deepEqual(criteria, activeCriteria);
+  };
+  if (ownerScenario) {
+    globalThis.ownerDiscussionProvider = async (_profile, _project, _settings, prompt, _images, _update, call) => {
+      const { latestUserMessage } = JSON.parse(prompt);
+      if (latestUserMessage.text === "Может, переделать список?") {
+        return { text: "Что именно нужно изменить в списке?", awaitingAnswer: true };
+      }
+      assert.equal(latestUserMessage.text, ownerMessage);
+      const updated = await call("task_update", {
+        authorization: ownerMessage, description: task.description + "\n\n" + ownerMessage, criteria: activeCriteria,
+      });
+      assert.ok(updated.ok, JSON.stringify(updated));
+      assert.equal(updated.data.status, "review");
+      const clarified = show();
+      assertBrief(clarified);
+      assert.deepEqual(clarified.history.find(event => event.action === "submit").submissionBrief.criteria, [initialCriterion]);
+      return { text: "Уточнение сохранено.", awaitingAnswer: false };
+    };
+    globalThis.ownerExecutorProvider = async (_client, board, cwd, input, _activity, _usage, _signal, beforeTurn) => {
+      assert.equal(board, project);
+      assertBrief(input);
+      const index = executorInputs.length;
+      assert.equal(input.feedback, [listDefect, zeroDefect, listDefect][index]);
+      executorInputs.push(input.feedback);
+      const threadId = input.codexThreadId ?? "20000000-0000-0000-0000-000000000001";
+      const queued = await beforeTurn(threadId, index === 0);
+      queued?.accepted("fixture-turn-" + index);
+      const results = [
+        "Доступно сбросов: 2\nСрок: 2026-12-01\nСрок: 2026-12-02\n",
+        "Доступно сбросов: 0\n",
+        "Доступно сбросов: 0\nСрок: 2026-12-01\n",
+      ];
+      const completion = delay(100).then(() => {
+        writeFileSync(join(cwd, "result.txt"), results[index]);
+        submit();
+      });
+      return { threadId, completion, interrupt: async () => {} };
+    };
+  }
   globalThis.reviewQueueProvider = async (_profile, board, _settings, context, _tools, _call, _signal, _usage, id, publish) => {
+    if (ownerScenario) {
+      const input = JSON.parse(context);
+      if (!input.feedback) {
+        if (input.criteria.length === 1) {
+          assert.deepEqual(input.criteria, [initialCriterion]);
+          assert.match(git("show", input.submitted + ":result.txt"), /Доступно сбросов: 2/);
+          return {
+            summary: "Счётчик подтверждён.",
+            needsHuman: false,
+            findings: [],
+            evidence: ["Сдача показывает счётчик."],
+          };
+        }
+        assertBrief(input);
+        clarificationReview ??= input;
+        await releaseClarifiedReview.promise;
+        assert.doesNotMatch(git("show", input.submitted + ":result.txt"), /Срок:/);
+        return {
+          summary: "Проверена исходная сдача по уточнённой постановке.",
+          needsHuman: false,
+          findings: [listDefect],
+          evidence: ["Сдача показывает счётчик.", null],
+        };
+      }
+      assertBrief(input);
+      const result = git("show", input.submitted + ":result.txt");
+      const findings = [];
+      const hasZero = result.includes("Доступно сбросов: 0");
+      const hasList = result.includes("Срок:");
+      if (!hasZero) findings.push(zeroDefect);
+      if (!hasList) findings.push(listDefect);
+      if (!input.candidateReview) reviewInputs.push({ feedback: input.feedback, hasZero, hasList, findings });
+      return {
+        summary: "Проверены счётчик и список сбросов.",
+        needsHuman: false,
+        findings,
+        evidence: [hasZero ? "Нулевой счётчик есть." : null, hasList ? "Сроки сбросов есть." : null],
+        ownerQuestion: hasList ? ownerQuestion : null,
+      };
+    }
     const { submitted: submission, targetHead, revision, reviewModeVersion, candidateReview } = JSON.parse(context);
     if (!candidateReview) startedReviews.push({ revision, targetHead, reviewModeVersion });
     calls.push({ board, id, submission, targetHead });
@@ -241,6 +351,119 @@ globalThis.reviewPendingInWatch = (project, id) =>
     return win && !win.webContents.isLoading() && await win.webContents.executeJavaScript(
       "window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)") && win;
   }, "the isolated board");
+  if (ownerScenario) {
+    const inspect = () => cli(["review", task.id, "--compact"]);
+    const send = text => window.webContents.executeJavaScript(
+      `window.taskboard.chatSend(${JSON.stringify(task.id)}, ${JSON.stringify({ text, files: [], model: "fixture", effort: "low" })})`);
+    const unclear = await send("Может, переделать список?");
+    assert.ok(unclear.saved && unclear.result.ok, JSON.stringify(unclear));
+    assert.ok(show().awaitingAnswer);
+    assert.deepEqual(show().criteria, [initialCriterion]);
+    const initial = submit();
+    const approved = await waitFor(() => {
+      const review = inspect();
+      return review.awaitingHumanAcceptance && review;
+    }, "approval under the initial brief");
+    assert.equal(approved.submitted, initial.git.submission.sha);
+    const correction = await send(ownerMessage);
+    assert.ok(correction.saved && correction.result.ok, JSON.stringify(correction));
+    const updatedReview = inspect();
+    assert.equal(updatedReview.submitted, approved.submitted);
+    assert.ok(updatedReview.revision > approved.revision);
+    assert.equal(updatedReview.reviewerApproval, undefined);
+    assert.equal(updatedReview.awaitingHumanAcceptance, false);
+    assert.equal(show().history.filter(event => event.action === "request-changes").length, 0);
+    const prematureAcceptance = await window.webContents.executeJavaScript(
+      `window.taskboard.command("accept", ${JSON.stringify(task.id)}, ${JSON.stringify({
+        revision: updatedReview.revision, targetHead: updatedReview.targetHead, reviewModeVersion: updatedReview.reviewModeVersion,
+      })})`);
+    assert.equal(prematureAcceptance.error.code, "REVIEW_REQUIRED");
+    await waitFor(() => clarificationReview, "automatic re-review after clarification");
+    assert.ok(clarificationReview.revision > approved.revision);
+    // The review can start before the agent's acknowledgement is added to history.
+    assert.ok(clarificationReview.revision <= updatedReview.revision);
+    assert.equal(clarificationReview.submitted, approved.submitted);
+    assertBrief(clarificationReview);
+    releaseClarifiedReview.resolve();
+    const waiting = await waitFor(() => {
+      if (reviewInputs.length !== 3) return;
+      const review = inspect();
+      return review.awaitingHumanAcceptance && review;
+    }, "approval of the repaired submission", 60_000).catch(error => {
+      const card = show();
+      console.error(JSON.stringify({
+        status: card.status, executorInputs, reviewInputs, autoErrors, blocked: card.blocked,
+        events: card.history.map(event => event.action),
+      }));
+      throw error;
+    });
+    assert.deepEqual(executorInputs, [listDefect, zeroDefect, listDefect]);
+    assert.deepEqual(reviewInputs, [
+      { feedback: listDefect, hasZero: false, hasList: true, findings: [zeroDefect] },
+      { feedback: zeroDefect, hasZero: true, hasList: false, findings: [listDefect] },
+      { feedback: listDefect, hasZero: true, hasList: true, findings: [] },
+    ]);
+    const reviewed = show();
+    const submissions = reviewed.history.filter(event => event.action === "submit");
+    assert.equal(submissions.length, 4);
+    const approvals = reviewed.history.filter(event => event.action === "review-approve");
+    assert.ok(approvals.some(event => event.reviewApproval.revision === approved.revision));
+    assert.equal(approvals.at(-1).reviewApproval.revision, waiting.revision);
+    assert.deepEqual(submissions[0].submissionBrief.criteria, [initialCriterion]);
+    assert.deepEqual(submissions.slice(1).map(event => event.submissionBrief.criteria), [activeCriteria, activeCriteria, activeCriteria]);
+    assert.equal(git("show", initial.git.submission.sha + ":result.txt"), "Доступно сбросов: 2");
+    const proposal = reviewed.history.findLast(event => event.expertMessage?.to === "owner");
+    assert.equal(proposal?.text, ownerQuestion);
+    assert.equal(proposal.messageKind, "question");
+    assert.equal(head(), initialHead);
+    let response = 0;
+    let confirmationCount = 0;
+    dialog.showMessageBox = async () => {
+      confirmationCount++;
+      return { response };
+    };
+    const acceptInput = {
+      revision: waiting.revision, targetHead: waiting.targetHead, reviewModeVersion: waiting.reviewModeVersion,
+      message: "fix: integrate expiration list",
+    };
+    const accept = () => window.webContents.executeJavaScript(
+      `window.taskboard.command("accept", ${JSON.stringify(task.id)}, ${JSON.stringify(acceptInput)})`);
+    assert.equal((await accept()).error.code, "ACCEPTANCE_CANCELLED");
+    assert.equal(show().status, "review");
+    response = 1;
+    assert.equal((await accept()).data.status, "done");
+    assert.equal(confirmationCount, 2);
+    assert.equal(show().history.filter(event => event.action === "accept").length, 1);
+    assert.match(git("show", "HEAD:result.txt"), /Срок: 2026-12-01/);
+    assert.deepEqual(autoErrors, []);
+    const paths = [
+      "scripts/check-reviewer-queue.mjs", "scripts/electron-check.mjs",
+      "src/cli/acceptance.ts", "src/cli/expert-team.ts", "src/cli/main.ts", "src/cli/model.ts", "src/cli/tasks.ts",
+      "src/desktop/board-actions.ts", "src/desktop/chat-actions.ts", "src/desktop/codex-chat.ts",
+      "src/desktop/codex-run.ts", "src/desktop/main.ts",
+    ];
+    const sourceHash = path => {
+      const bytes = readFileSync(new URL("../" + path, import.meta.url), "utf8");
+      return createHash("sha256").update(bytes.replace(/\r\n/g, "\n"), "utf8").digest("hex");
+    };
+    const report = [
+      "PASS T-0333. Изолированный Git-проект и Windows Electron с тестовыми провайдерами.",
+      `ОС ${process.platform} ${release()} ${process.arch}; Electron ${process.versions.electron}, Node ${process.versions.node}.`,
+      "Команда: node scripts/check-reviewer-queue.mjs --scenario=owner-requirements --artifacts .tasks/qa",
+      "Неоднозначная фраза открыла вопрос и сохранила критерии. Первая сдача получила одобрение. Точное уточнение T-0319 обновило описание и критерии, сняло одобрение и заблокировало ручную приёмку.",
+      "Диалог не вызывал возврат. Автоматическое ревью получило ту же сдачу и новые критерии и вернуло отсутствие списка как дефект.",
+      "Три запуска исполнителя и три последующих ревью получили уточнение в постановке и отдельное замечание.",
+      "Подтверждённый дефект нулевого счётчика вернул сдачу. Контрольная сдача с нулевым счётчиком без списка вернулась с дефектом списка.",
+      "История всех четырёх сдач и снимок постановки первой сохранены. Восстановленная сдача одобрена при открытом вопросе владельцу.",
+      "Ручная приёмка через IPC Electron проверена с заглушкой кнопок нативного диалога: отмена сохранила ревью, подтверждение интегрировало результат.",
+      "Linux и macOS не запускались. Содержимое панели заменено текстовой фикстурой. Живые модели не вызывались.",
+      "SHA-256 исходников, UTF-8 с переводами строк LF после нормализации CRLF:",
+      ...paths.map(path => sourceHash(path) + "  " + path),
+    ].join("\n") + "\n";
+    writeFileSync(join(artifacts, "owner-requirement-approval-check.txt"), report);
+    console.log(report);
+    return;
+  }
   if (busyScenario) {
     const frameReady = win => !win.webContents.isLoading() && win.webContents.executeJavaScript(
       "window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)");

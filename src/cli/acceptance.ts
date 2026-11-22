@@ -201,6 +201,7 @@ export function inspectReview(store: BoardStore, task: Task, snapshot: ReturnTyp
     awaitingHumanAcceptance: reviewMode === "reviewer-human" && !stale && approval?.reviewApproval?.targetHead === head,
   });
   const details = compact ? { title: task.title, description: task.description, criteria: task.criteria,
+    feedback: task.history.findLast(event => event.action === "request-changes")?.text,
     artifacts: snapshot.artifacts,
     submissionSequence: task.history.findLastIndex(event => event.action === "submit" && event.to === "review") + 1,
     ...(approval?.reviewApproval ? { reviewerApproval: { summary: approval.text, ...approval.reviewApproval } } : {}),

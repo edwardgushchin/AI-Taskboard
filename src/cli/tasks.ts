@@ -320,6 +320,19 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const actor = boardActor(input);
       const requirementsChanged = updated.description !== task.description ||
         JSON.stringify(updated.criteria) !== JSON.stringify(task.criteria);
+      const source = input.ownerChatSequence;
+      if (source !== undefined) {
+        requireRevision(task, input.revision, true);
+        const latest = task.history.findLastIndex(event => event.action === "chat" && event.actor === "user");
+        const authorization = text(input.authorization, "owner authorization", true);
+        if (actor !== "user" || latest < 0 || source !== latest + 1 ||
+            !task.history[latest].text?.includes(authorization)) {
+          throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the current owner message to change the task brief.");
+        }
+        if (requirementsChanged && task.history.some(event => event.ownerBriefSource === source)) {
+          throw new TaskboardError("USER_DIRECTION_REQUIRED", "This owner message has already been applied to the brief.");
+        }
+      }
       let status: TaskState = task.status;
       let note = input.note === undefined ? undefined : text(input.note, "note", true);
       if (requirementsChanged && task.status !== "draft") {
@@ -330,13 +343,28 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
           throw new TaskboardError("CRITERIA_REQUIRED", "An approved task needs acceptance criteria.");
         }
         note = text(input.note, "note", true);
-        if (status === "review") status = "ready";
+        if (status === "review") {
+          if (source === undefined) status = "ready";
+          else updated.acceptanceWait = undefined;
+        }
       }
       if (input.preserveStatus === true && status !== task.status) {
         throw new TaskboardError("STATUS_CHANGE_REQUIRED", "These requirements would reopen the task. Ask the user to apply the changes on the board.");
       }
       if (input.preserveStatus === true && isDeepStrictEqual(updated, task)) return task;
       const result = record(updated, action, actor, status, note);
+      if (requirementsChanged && typeof source === "number") {
+        result.history.at(-1)!.ownerBriefSource = source;
+        if (task.status === "review") {
+          const index = task.history.findLastIndex(event => event.action === "submit" && event.to === "review");
+          const submission = result.history[index];
+          if (submission && !submission.submissionBrief) {
+            result.history[index] = { ...submission, submissionBrief: {
+              title: task.title, description: task.description, criteria: [...task.criteria],
+            } };
+          }
+        }
+      }
       if (task.codexThreadId && task.codexThreadId !== updated.codexThreadId) {
         result.history.at(-1)!.previousCodexThreadId = task.codexThreadId;
       }
