@@ -4111,9 +4111,12 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
           };
         };
         reviewSignal.throwIfAborted();
-        // The saved checkpoint belongs to one submission, target, and review configuration.
+        // A manual retry starts fresh even if shutdown left the exhausted turn's checkpoint behind.
         const path = join(runtimeLocation(project).directory, "reviewer-quota-" + id + ".json");
-        const binding = JSON.stringify([submissionSequence, evidence.targetHead, expectedMode, settings]);
+        const binding = JSON.stringify([
+          submissionSequence, evidence.targetHead, expectedMode, settings,
+          ...(retry?.manual ? ["manual"] : []),
+        ]);
         let checkpoint: { binding: string; threadId?: string; candidate?: Partial<ReviewReport>;
           turn?: { clientId: string; turnId?: string } } = { binding };
         try {
@@ -4247,10 +4250,16 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       if (!result.ok) {
         if (retry && result.error.code === "BOARD_BUSY") return;
         if (!signal.aborted && result.error.code === "CODEX_ROUTING_TIMEOUT") {
+          const exhausted = Boolean(retry && !retry.manual);
+          // Keep the turn available for reconciliation until the queue records its outcome.
+          setRetry({
+            binding,
+            reason: result.error.message,
+            notBefore: Date.now() + routingRetryDelayMs,
+            ...(exhausted ? { exhausted: true } : {}),
+          });
           if (checkpointToRemove) rmSync(checkpointToRemove, { force: true });
-          setRetry({ binding, reason: result.error.message, notBefore: Date.now() + routingRetryDelayMs,
-            ...(retry && !retry.manual ? { exhausted: true } : {}) });
-          if (retry && !retry.manual) notify(result.error.message);
+          if (exhausted) notify(result.error.message);
           return;
         }
         if (!signal.aborted && retry && result.error.code === "CODEX_START_UNCONFIRMED") {

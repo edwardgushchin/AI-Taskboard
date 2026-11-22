@@ -10,7 +10,7 @@ import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
-const phases = [["--seed"], ["--restore"], ["--reconcile"]];
+const phases = [["--seed"], ["--review-crash"], ["--restore"], ["--reconcile"]];
 const { scratch, artifacts } = electronCheck(import.meta.url, "codex-routing-retry", 160_000, phases);
 const { app, BrowserWindow } = await import("electron");
 const require = createRequire(import.meta.url);
@@ -22,9 +22,11 @@ const log = join(scratch, "provider.jsonl");
 const casesPath = join(scratch, "cases.json");
 const providerPath = join(scratch, "provider.cjs");
 const seed = process.argv.includes("--seed");
+const reviewCrash = process.argv.includes("--review-crash");
 const restore = process.argv.includes("--restore");
 const timeout = "workspace routing discovery timed out";
 const evidencePath = join(scratch, "evidence.json");
+const reviewCrashPath = join(scratch, "review-crash.json");
 
 function cli(command, id, input) {
   const args = [cliPath, "--project", project, "--json", command];
@@ -264,10 +266,29 @@ function instrument(name, transform) {
   writeFileSync(output, require("esbuild").transformSync(code, { loader: "ts", format: "esm" }).code);
   return output;
 }
+function interceptReviewCleanup(code) {
+  const cleanup = /(result\.error\.code === "CODEX_ROUTING_TIMEOUT"\) \{[\s\S]*?)(rmSync\(checkpointToRemove, \{ force: true \}\))/g;
+  assert.equal([...code.matchAll(cleanup)].length, 1, "instrument exactly one routing timeout checkpoint removal");
+  return code.replace(cleanup, '$1globalThis.routingCheckCrash(checkpointToRemove)');
+}
+globalThis.routingCheckCrash = path => {
+  const testCase = cases.success;
+  assert.equal(reviewCrash, true);
+  assert.equal(path, reviewCheckpoint(testCase.id));
+  assert.equal(reviewTurns().length, 2, "stop after the second reviewer turn");
+  const checkpoint = readFileSync(path);
+  assert.equal(JSON.parse(checkpoint).turn?.turnId, "turn-2");
+  const retry = runtimeEntries(project).find(entry => entry.task === "review-retry:" + testCase.id)?.reviewRetry;
+  writeFileSync(reviewCrashPath, JSON.stringify({
+    pid: process.pid, checkpoint: createHash("sha256").update(checkpoint).digest("hex"),
+    exhausted: retry?.exhausted === true, reason: retry?.reason, notBefore: retry?.notBefore,
+  }));
+  app.exit(0);
+};
 const chat = instrument("codex-chat", code =>
   code.replace("configuredCodex, executorFullAccess", "executorFullAccess")
     .concat("\nconst configuredCodex = async () => globalThis.routingCheckClient;"));
-const entry = instrument("main", code => code
+const entry = instrument("main", code => (reviewCrash ? interceptReviewCleanup(code) : code)
   .replace("codexStatus, configuredCodex,", "codexStatus,")
   .replace("providerLimitSource, readCodexLimits,", "providerLimitSource,")
   .replace("const notify = (error: string) => {", 'const notify = (error: string) => {\n    console.error("Fixture reviewer error:", error);')
@@ -284,6 +305,8 @@ const records = () => existsSync(log)
   : [];
 const turns = testCase => records().filter(event => event.cwd === testCase.cwd && event.method === "turn/start");
 const histories = testCase => records().filter(event => event.cwd === testCase.cwd && event.method === "thread/turns/list");
+const reviewTurns = () => records().filter(event => event.cwd === project && event.method === "turn/start");
+const reviewCheckpoint = id => join(project, ".tasks", "reviewer-quota-" + id + ".json");
 const frame = window => window.webContents.executeJavaScript("window.taskboard?.bootstrap()");
 const invoke = (window, method, ...args) =>
   window.webContents.executeJavaScript("window.taskboard." + method + "(..." + JSON.stringify(args) + ")");
@@ -377,7 +400,7 @@ async function checkSeed(window) {
   writeFileSync(evidencePath, JSON.stringify({ viewport, seedPid: process.pid, snapshot: sourceSnapshot() }));
 }
 
-async function checkRestore(window) {
+async function checkBeforeReviewCrash(window) {
   const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
   assert.notEqual(process.pid, evidence.seedPid);
   await until(async () => (await card(window, cases.success))?.status === "review", "submission after restart");
@@ -395,7 +418,13 @@ async function checkRestore(window) {
   evidence.delay = second.at - first.at;
   await released();
   console.log("PASS: executor retry restored with its Git worktree, stages and single submission");
-  await checkReview(window);
+  await checkReviewWaiting(window, evidence);
+  await until(() => false, "intentional Electron exit before reviewer checkpoint cleanup");
+}
+
+async function checkRestore(window) {
+  const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+  await checkReviewAfterCrash(window, evidence.review);
   cli("settings", null, { reviewMode: "human" });
   console.log("PASS: independent review retried and approved the original submission");
   const { window: secondWindow } = globalThis.routingCheck.createWindow([project], project);
@@ -487,13 +516,17 @@ async function checkReconcile(window) {
   writeReport(evidence);
 }
 
-async function checkReview(window) {
+function readReview(id) {
+  return cli("review", id, { compact: true, includeReviewerSettings: true });
+}
+
+async function checkReviewWaiting(window, evidence) {
   const testCase = cases.success;
-  const review = () => cli("review", testCase.id, { compact: true, includeReviewerSettings: true });
-  const initial = review();
+  const initial = readReview(testCase.id);
   assert.equal(initial.stale, false, JSON.stringify(initial));
   assert.ok(initial.submissionSequence > 0, JSON.stringify(initial));
-  const reviewTurns = () => records().filter(event => event.cwd === project && event.method === "turn/start");
+  evidence.review = { submitted: initial.submitted, submissionSequence: initial.submissionSequence };
+  writeFileSync(evidencePath, JSON.stringify(evidence));
   cli("settings", null, {
     autoMode: false, reviewMode: "reviewer-human", reviewer: { model: "fixture", effort: "low" },
   });
@@ -507,30 +540,44 @@ async function checkReview(window) {
     const retry = (await frame(window))?.routingRetries?.[testCase.id];
     return reviewTurns().length === 1 && retry?.reason === timeout && !retry.exhausted;
   }, "independent review queued after the first timeout");
-  await until(async () => (await frame(window))?.routingRetries?.[testCase.id]?.exhausted,
-    "independent review reaches its retry limit");
+}
+
+async function checkReviewAfterCrash(window, initial) {
+  const testCase = cases.success;
+  const crash = JSON.parse(readFileSync(reviewCrashPath, "utf8"));
+  assert.notEqual(process.pid, crash.pid, "a new Electron process opened the board");
+  assert.equal(crash.exhausted, true, "the exhausted flag must be on disk before checkpoint cleanup");
+  assert.equal(crash.reason, timeout);
+  const persistedRetry = () => runtimeEntries(project).find(entry => entry.task === "review-retry:" + testCase.id)?.reviewRetry;
+  assert.equal(persistedRetry()?.exhausted, true, "the restarted process sees the exhausted flag");
+  const unchangedCheckpoint = () => createHash("sha256").update(readFileSync(reviewCheckpoint(testCase.id))).digest("hex");
+  assert.equal(unchangedCheckpoint(), crash.checkpoint, "the earlier checkpoint survived the interrupted cleanup");
   await released();
   assert.equal(reviewTurns().length, 2);
   assert.ok(reviewTurns()[1].at - reviewTurns()[0].at >= 5_000);
   assert.equal((await card(window, testCase)).status, "review");
-  const exhausted = review();
+  const exhausted = readReview(testCase.id);
   assert.equal(exhausted.submissionSequence, initial.submissionSequence);
   assert.equal(exhausted.submitted, initial.submitted);
   await show(window, testCase);
   await until(() => window.webContents.executeJavaScript(`(() => {
-    const button = [...document.querySelectorAll("button")]
-      .find(button => button.getClientRects().length && /Повторить ревью|Retry review/.test(button.textContent));
-    if (!button || !document.body.innerText.includes(${JSON.stringify(timeout)})) return false;
-    button.click();
-    return true;
-  })()`), "visible reason and manual review retry action");
+    const status = document.querySelector("#task-agent-run");
+    const button = status?.querySelector("button");
+    return button?.checkVisibility() && /Повторить ревью|Retry review/.test(button.innerText) &&
+      status.innerText.includes(${JSON.stringify(timeout)});
+  })()`), "visible reason and manual review retry action after restart");
+  await wait(5_600);
+  assert.ok(Date.now() >= crash.notBefore, "pass the saved deadline");
+  assert.equal(reviewTurns().length, 2, "restart must not start a third review after the deadline");
+  assert.equal(unchangedCheckpoint(), crash.checkpoint, "manual retry starts with the old checkpoint still on disk");
+  await clickVisible(window, "#task-agent-run button");
   const approved = await until(async () => {
     const current = await card(window, testCase);
     return current?.reviewApproved && current;
   }, "review approved after manual retry");
   assert.equal(approved.status, "review");
   assert.equal(reviewTurns().length, 3);
-  const final = review();
+  const final = readReview(testCase.id);
   assert.equal(final.submitted, initial.submitted);
   assert.equal(final.submissionSequence, initial.submissionSequence);
   assert.ok(reviewTurns().every(event => Number(event.submissionSequence) === initial.submissionSequence));
@@ -585,7 +632,8 @@ function writeReport({ viewport, delay, snapshot }) {
     "Остановка из второго окна и отмена через CLI прекратили ожидание. Другая ошибка была записана как причина блокировки без повтора.",
     "Со включённым авторежимом при неизвестном исходе повторного хода приложение ждало историю. После ещё одного перезапуска и появления хода в истории очередь снялась, нового запроса turn/start не было.",
     "После циклов запуска, выхода и сверки все PID тестовых провайдеров завершились, слоты и временные каталоги исполнителей освобождены.",
-    "Независимое ревью повторило исходную сдачу после задержки. Второй тайм-аут оставил карточку на проверке с причиной и действием «Повторить ревью». Ручной повтор одобрил ту же сдачу. Событие submit осталось единственным.",
+    "Независимое ревью повторило исходную сдачу после задержки. На втором тайм-ауте стенд прервал Electron перед удалением контрольной точки. Исчерпание попыток уже было записано на диск.",
+    "После перезапуска та же контрольная точка осталась на диске. Карточка осталась на проверке, в ней видны причина и действие «Повторить ревью». После срока повтора было ровно два запуска ревью. Нажатие кнопки запустило одно ревью той же сдачи и сохранило одобрение. Событие submit осталось единственным.",
     "Тестовый App Server передаёт ошибку завершения по JSON-RPC. Живая модель, Linux, macOS и установщики не проверялись.",
     "",
     "Git HEAD перед проверкой — " + snapshot.base + ". SHA-256 по байтам файлов рабочей копии:",
@@ -602,6 +650,7 @@ void app.whenReady().then(async () => {
   window.webContents.setZoomFactor(1);
   window.webContents.setBackgroundThrottling(false);
   if (seed) await checkSeed(window);
+  else if (reviewCrash) await checkBeforeReviewCrash(window);
   else if (restore) await checkRestore(window);
   else await checkReconcile(window);
   app.exit(0);
