@@ -1279,7 +1279,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       project, card, card.history[target.index]?.text ?? "", revision => {
         target.revision = revision;
         notify({ type: "changed" });
-      }, requestChanges,
+      }, requestChanges, target.index + 1,
     );
     let runAction = actionsFor(task, replyTarget);
     const ready = Promise.withResolvers<AgentControl>();
@@ -4207,7 +4207,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         // A manual retry starts fresh even if shutdown left the exhausted turn's checkpoint behind.
         const path = join(runtimeLocation(project).directory, "reviewer-quota-" + id + ".json");
         const binding = JSON.stringify([
-          submissionSequence, evidence.targetHead, expectedMode, settings,
+          submissionSequence, evidence.reviewDecision, evidence.targetHead, expectedMode, settings,
           ...(retry?.manual ? ["manual"] : []),
         ]);
         let checkpoint: { binding: string; threadId?: string; candidate?: Partial<ReviewReport>;
@@ -4273,7 +4273,8 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
   const queueRetry = { retryBusy: false };
   const recordDecision = async (report: ReviewReport, pending: PendingReviewDecision) => {
     const { retryAfter: _retryAfter, ...binding } = pending;
-    const input = { ...binding, reviewModeVersion: binding.reviewModeVersion ?? null, actor: "reviewer" };
+    const input = { ...binding, reviewModeVersion: binding.reviewModeVersion ?? null, actor: "reviewer",
+      ownerQuestion: report.ownerQuestion ?? undefined };
     const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], { ...input, summary }, queueRetry);
     const needsMoreEvidence = !report.findings.length && (!report.evidence.length || report.evidence.includes(null));
     if (report.needsHuman || needsMoreEvidence) return note(report.summary);

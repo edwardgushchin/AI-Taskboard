@@ -545,6 +545,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Если доступ отклонён, продолжай разрешённым способом и запроси у менеджера смену режима, если она нужна для обязательного шага. При исчерпании доступных способов заблокируй задачу. В причине укажи шаг, нужный ресурс и причину отказа, в условии разблокировки — конкретное действие для продолжения.",
       "Рабочая папка: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria, summary: task.summary, nextStep: task.nextStep }),
+      "Use the current description and criteria as active requirements. Resolve confirmed defects in the feedback within that scope. If a remark conflicts with an explicit requirement, preserve the requirement and ask the owner to decide.",
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;

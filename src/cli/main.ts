@@ -874,6 +874,18 @@ function run(
     ["tags", "revision", "actor", "note", "preserveStatus"].includes(key));
   const task = tagsOnly || command === "return-to-draft" ? readTask(store, id) : store.card(id);
   let decisionTiming: ReviewDecisionTiming | undefined;
+  const withOwnerQuestion = (card: Task) => {
+    if (input.ownerQuestion === undefined) return card;
+    const question = text(input.ownerQuestion, "owner question", true);
+    if (question.length > 4000) throw new TaskboardError("INVALID_INPUT", "Owner questions are limited to 4000 characters.");
+    const submission = card.history.findLastIndex(event => event.action === "submit" && event.to === "review");
+    if (card.history.slice(submission + 1).some(event => event.expertMessage?.from === "reviewer" &&
+        event.expertMessage.to === "owner" && event.messageKind === "question" && event.text === question)) return card;
+    return { ...card, history: [...card.history, {
+      at: new Date().toISOString(), action: "coordination", actor: "reviewer" as const, text: question,
+      messageKind: "question" as const, expertMessage: { from: "reviewer", to: "owner" },
+    }] };
+  };
   const withReviewerUsage = (card: Task) => {
     if (input.reviewerUsage === undefined) return card;
     try {
@@ -945,13 +957,13 @@ function run(
           const version = taskReviewModeVersion(task, store.index.settings);
           const approval = currentReviewApproval(task, store.index.settings)?.reviewApproval;
           if (approval?.targetHead === targetHead) {
-            const recorded = withReviewerUsage(task);
+            const recorded = withReviewerUsage(withOwnerQuestion(task));
             if (recorded !== task) store.save(recorded);
             return filters.compact ? taskReceipt(recorded) : recorded;
           }
           const approved = record(task, command, "reviewer", task.status, summary);
           approved.history.at(-1)!.reviewApproval = { revision: task.revision, targetHead, evidence, reviewModeVersion: version };
-          const saved = store.save(withReviewerUsage({ ...approved, revision: task.revision }));
+          const saved = store.save(withReviewerUsage(withOwnerQuestion({ ...approved, revision: task.revision })));
           return filters.compact ? taskReceipt(saved) : saved;
         }
         const version = taskReviewModeVersion(task, store.index.settings);
@@ -963,7 +975,7 @@ function run(
           noted = { ...record(task, "review-note", "reviewer", task.status, summary), revision: task.revision };
           noted.history.at(-1)!.reviewNote = { revision: task.revision, targetHead, reviewMode: mode, reviewModeVersion: version, decision };
         }
-        const recorded = withReviewerUsage(noted);
+        const recorded = withReviewerUsage(withOwnerQuestion(noted));
         if (recorded !== task) store.save(recorded);
         return filters.compact ? taskReceipt(recorded) : recorded;
       }
@@ -1073,6 +1085,7 @@ function run(
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
   if (command === "request-changes" && !discussionReturn) {
+    if (input.actor === "reviewer") updated = withOwnerQuestion(updated);
     // Publish the request first. It becomes eligible only when the matching return is saved.
     updated.reviewReturn = updated.revision;
     deferExecutor(store.location.root, id, { revision: updated.reviewReturn, reviewReturn: true });
