@@ -290,6 +290,7 @@ export interface BoardSettings {
   executor?: BoardAgentSettings | null;
   reviewer?: BoardAgentSettings | null;
   taskLimits?: Partial<AgentLimits>;
+  codexDailyTokens?: number;
   reviewMode?: ReviewMode;
   reviewModeVersion?: number;
   autoReview?: boolean;

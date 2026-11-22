@@ -1312,6 +1312,12 @@
     "many": "{count} файлов"
   },
   "limits.label": "Лимиты",
+  "limits.board.setting": "Дневной бюджет Codex в токенах (пусто — без ограничения)",
+  "limits.board.invalid": "Введите целое положительное число токенов десятичными цифрами или очистите поле.",
+  "limits.board.title": "Дневной бюджет Codex этой доски",
+  "limits.board.tokens": "Токены: осталось {remaining} из {limit}, израсходовано {spent}",
+  "limits.board.exhausted": "Дневной бюджет Codex исчерпан",
+  "limits.board.unknown": "Ожидание данных о расходе Codex за сегодня",
   "limits.provider": "Лимиты {provider}",
   "limits.weekly": "Неделя",
   "limits.daily": "Суточный лимит",

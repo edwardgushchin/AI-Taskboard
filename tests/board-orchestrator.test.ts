@@ -59,7 +59,8 @@ const source = (file: string) => readFileSync(new URL("../src/desktop/" + file, 
 const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""));
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
-  text.startsWith("const autoBoards =") || text.startsWith("function scheduleAutoBoard(")).join("\n"));
+  text.startsWith("const autoBoards =") || text.startsWith("const managerNoticeKey =") ||
+  text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
   /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|parseOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -151,6 +152,7 @@ function fixture(t: TestContext) {
   let quotaPaused = false;
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     get quotaWait() { return quotaPaused ? {} : undefined; },
+    boardBudgetFailure: () => undefined, boardCodexBudget: () => undefined, saveDailyUsage: () => {},
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, currentManagerGoal: managerGoalState, managerGoalBinding,
     acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit,
@@ -770,7 +772,7 @@ test("acceptance of a converted queue hold dispatches once when a slot opens", {
         const board = await cli(["list", "--compact"]);
         const watch = { board, tabs: new Set(windows.map(window => ({ window }))), reviewerRuns: new Map() };
         const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
-          quotaWait: undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
+          quotaWait: undefined, boardBudgetFailure: () => undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
           subscriptions: new Map([[f.project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
           nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
           currentActiveGoal: activeManagerGoal, readBoardThread: () => goalId ? { id: goalId } : undefined,
@@ -868,7 +870,7 @@ test("release dispatch rechecks the queue and milestone under the start lock", {
   const windows = [window(), window()];
   const watch = { board: await cli(["list", "--compact"]), tabs: new Set(windows), reviewerRuns: new Map() };
   const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
-    quotaWait: undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
+    quotaWait: undefined, boardBudgetFailure: () => undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
     subscriptions: new Map([[f.project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
     nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
     currentActiveGoal: () => undefined,
@@ -1000,7 +1002,7 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   let automationPaused = false;
   const goalWork = new Map();
   const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
-    applicationUpdates: { installing: false }, quotaWait: undefined, closingProjects: new Set(),
+    applicationUpdates: { installing: false }, quotaWait: undefined, boardBudgetFailure: () => undefined, closingProjects: new Set(),
     subscriptions: new Map([[project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
     nextReadyTask, pendingReviewApprovals, projectIdentity: (key: string) => key,
     agentSlots: {

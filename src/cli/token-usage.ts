@@ -8,7 +8,12 @@ export const tokenFields = [
 ] as const;
 export type TokenCounts = Record<typeof tokenFields[number], number | null>;
 export type ModelTokenUsage = TokenCounts & { model: string | null; incomplete: boolean };
-export type TokenUsageRecord = ModelTokenUsage & { threadId: string; turnId: string };
+export type TokenUsageRecord = ModelTokenUsage & {
+  threadId: string;
+  turnId: string;
+  completedAt?: number;
+  dailyTokens?: number | null;
+};
 const taskUsageRoles = ["executor", "discussion", "reviewer"] as const;
 export type TaskUsageRole = typeof taskUsageRoles[number];
 export type ReviewDecisionTiming = { lockWaitMs: number; verificationMs: number };
@@ -28,6 +33,10 @@ export function parseTokenUsage(value: unknown): TokenUsageRecord {
   };
   if (typeof entry.incomplete !== "boolean") throw new TaskboardError("INVALID_INPUT", "incomplete must be a boolean.");
   for (const key of tokenFields) result[key] = entry[key] === null ? null : number(entry[key], key, 0);
+  if (entry.completedAt !== undefined) result.completedAt = number(entry.completedAt, "completedAt", 0);
+  if (entry.dailyTokens !== undefined) {
+    result.dailyTokens = entry.dailyTokens === null ? null : number(entry.dailyTokens, "dailyTokens", 0);
+  }
   if (tokenFields.some(key => result[key] === null) && !result.incomplete ||
       result.inputTokens !== null && [result.cachedInputTokens, result.cacheWriteInputTokens].some(value => value !== null && value > result.inputTokens!) ||
       result.outputTokens !== null && result.reasoningOutputTokens !== null && result.reasoningOutputTokens > result.outputTokens) {

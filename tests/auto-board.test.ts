@@ -13,8 +13,10 @@ import { reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion, usesInd
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
-const code = parsed.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === "scheduleAutoBoard" ||
-  ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === "autoBoards"))
+const code = parsed.statements.filter(node => ts.isFunctionDeclaration(node) &&
+  (node.name?.text === "scheduleAutoBoard" || node.name?.text === "resumeDeferredBoardGoal") ||
+  ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) &&
+    (d.name.text === "autoBoards" || d.name.text === "managerNoticeKey")))
   .map(node => node.getText(parsed)).join("\n");
 
 function fixture(mode = "human") {
@@ -28,9 +30,11 @@ function fixture(mode = "human") {
   const launches: string[] = [], accepted: string[] = [], reviews: string[] = [], notices: any[] = [], calls: string[][] = [], errors: string[] = [];
   let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, afterReviewRead: (() => void) | undefined, launchError: string | undefined;
   let noticeError: string | undefined;
+  let budgetWaiting = false;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
     quotaWait: undefined,
+    boardBudgetFailure: () => budgetWaiting ? fail("BOARD_CODEX_BUDGET") : undefined,
     applicationUpdates: { installing: false },
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
@@ -115,10 +119,69 @@ function fixture(mode = "human") {
   };
   return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers, dialogues,
     failNotice: (code: string) => { noticeError = code; },
+    waitForBudget: (value: boolean) => { budgetWaiting = value; },
     afterLaunch: (callback: () => void) => { afterLaunch = callback; }, beforeAccept: (callback: () => void) => { beforeAccept = callback; },
     afterReviewRead: (callback: () => void) => { afterReviewRead = callback; },
     failLaunch: (code: string) => { launchError = code; } };
 }
+
+test("the daily budget defers dispatch until the next eligible scheduler pass", async () => {
+  const first = fixture();
+  const second = fixture();
+  first.add("T-0001");
+  second.add("T-0002");
+  first.waitForBudget(true);
+  await Promise.all([first.tick(), second.tick()]);
+  assert.deepEqual(first.launches, []);
+  assert.deepEqual(second.launches, ["T-0002"]);
+  first.waitForBudget(false);
+  await first.tick();
+  await first.tick();
+  assert.deepEqual(first.launches, ["T-0001"]);
+});
+
+test("a budget-deferred native goal wakes with auto mode off and respects an owner pause", () => {
+  const settings = { autoMode: false, autoQueue: { paused: true } };
+  const watch = {
+    board: { project: "project", settings },
+    tabs: new Set([{ window: { isDestroyed: () => false, webContents: {} } }]),
+  };
+  const goal = { status: "active", objective: "Plan a release" };
+  const resumes = new Map<string, boolean>();
+  const launched: string[] = [];
+  let budgetWaiting = true;
+  let deferred = true;
+  const resume = runInNewContext(stripTypeScriptTypes(code) + "\nresumeDeferredBoardGoal", {
+    applicationUpdates: { installing: false },
+    quotaWait: undefined,
+    closingProjects: new Set(),
+    isManual: () => false,
+    projectIdentity: (project: string) => project,
+    boardWorkRequests: new Map(),
+    boardGoalResumes: resumes,
+    boardGoalClears: new Map(),
+    boardThreadPath: () => "binding",
+    readBoardThread: () => ({ budgetDeferred: deferred, goal }),
+    boardBudgetFailure: () => budgetWaiting ? {} : undefined,
+    resumeBoardGoal: (_sender: unknown, _board: unknown, objective: string, expectedDeferred: boolean) => {
+      assert.equal(expectedDeferred, true);
+      launched.push(objective);
+      resumes.set("project", true);
+    },
+  });
+  resume(watch);
+  budgetWaiting = false;
+  goal.status = "paused";
+  resume(watch);
+  assert.deepEqual(launched, []);
+  goal.status = "active";
+  resume(watch);
+  resume(watch);
+  resumes.clear();
+  deferred = false;
+  resume(watch);
+  assert.deepEqual(launched, ["Plan a release"]);
+});
 
 test("acknowledged approval wakes one manager after dialogue release and retries a refused start", async () => {
   const f = fixture("reviewer");
