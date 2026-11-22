@@ -248,7 +248,8 @@ function boardError(error) {
     return t("draft_discussion.confirmation_required");
   }
   if (error.code === "TASK_AWAITING_ANSWER") {
-    return t("task_question.approval_blocked");
+    return t(error.details?.questionAudience === "manager" ? "task_question.approval_waiting_for_manager" :
+      "task_question.approval_blocked");
   }
   if (error.code === "BOARD_BUSY") {
     return t("ui.the_board_is_busy_with_another_operation_try_aga_e9c8de78");
@@ -1124,13 +1125,17 @@ function blockerBanner({ reason, condition }) {
 }
 
 function quotaLabel() {
+  if (!frame.quotaWait && frame.dailyBudget?.reason) {
+    return t("limits.board." + frame.dailyBudget.reason);
+  }
   return frame.quotaWait?.resetsAt
     ? t("ui.waiting_for_provider_quota_until", { time: new Date(frame.quotaWait.resetsAt).toLocaleString(frame.localization?.locale) })
     : t("ui.waiting_for_provider_quota");
 }
 
 function card(task) {
-  const needsAnswer = task.status !== "cancelled" && task.awaitingAnswer === true;
+  const audience = task.questionAudience;
+  const questionDescription = audience === "owner" ? "task_question.open_dialogue" : "task_question.waiting_for_manager";
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
   const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
@@ -1138,16 +1143,16 @@ function card(task) {
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id), frame.routingRetries?.[task.id],
-    frame.quotaTasks?.includes(task.id) ? frame.quotaWait : null, task.status, task.mergeRepair, task.acceptanceRepair,
+    frame.quotaTasks?.includes(task.id) ? quotaLabel() : null, task.status, task.mergeRepair, task.acceptanceRepair,
     task.acceptanceWaitUnchanged, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, needsAnswer,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, audience,
     manualColumns().find(c => c.id === task.status)]);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
-  card.dataset.awaitingAnswer = String(needsAnswer);
+  card.dataset.awaitingAnswer = String(audience === "owner");
   const oldDetails = card.querySelector(".task-card-details");
   const oldImage = card.querySelector(".task-card-cover");
   if (oldDetails) cardCovers.unobserve(oldDetails);
@@ -1163,11 +1168,11 @@ function card(task) {
   }
   const subtasks = task.subtasks ?? [];
   const completed = subtasks.filter(entry => entry.done).length;
-  if (hasPriority || subtasks.length || needsAnswer) {
+  if (hasPriority || subtasks.length || audience) {
     bindLocalized(card, "aria-description", () => [
       hasPriority ? t("ui.priority_b114c9b5") + " · " + priorityName(task.priority) : "",
       subtasks.length ? t("ui.subtasks_b409bda5") + " " + completed + "/" + subtasks.length : "",
-      needsAnswer ? t("task_question.open_dialogue") : "",
+      audience ? t(questionDescription) : "",
     ].filter(Boolean).join(". "), true);
   } else {
     card.removeAttribute("aria-description");
@@ -1205,10 +1210,11 @@ function card(task) {
   const meta = element("span", undefined, "task-meta");
   const id = element("span", task.id, "task-id task-stat");
   meta.append(id);
-  if (needsAnswer) {
+  if (audience) {
     const question = element("span", undefined, "task-question task-stat");
-    question.append(icon("question"), element("span", () => t("task_question.needs_answer")));
-    bindLocalized(question, "title", () => t("task_question.open_dialogue"));
+    const label = audience === "owner" ? "task_question.needs_answer" : "task_question.waiting_for_manager";
+    question.append(icon("question"), element("span", () => t(label)));
+    bindLocalized(question, "title", () => t(questionDescription));
     meta.append(question);
   }
   if (task.milestone) {
@@ -1398,12 +1404,12 @@ function codexTaskAction(task) {
         [t("ui.starting_task_1cd51aaa"), task.id, projectName()].join(" · "));
       else if (sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
     } finally {
-      launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
+      launch.disabled = Boolean(frame.quotaWait || frame.dailyBudget?.reason || task.unfinishedDependencies?.length);
     }
   });
   launch.id = "task-launch";
   launch.hidden = frame.runningTasks?.includes(task.id) ?? false;
-  launch.disabled = Boolean(frame.quotaWait || task.unfinishedDependencies?.length);
+  launch.disabled = Boolean(frame.quotaWait || frame.dailyBudget?.reason || task.unfinishedDependencies?.length);
   return launch;
 }
 
@@ -4638,12 +4644,15 @@ async function showTask(id, dialogue = false) {
       () => act("update", { schedulePaused: !task.schedule.paused })));
   }
   if (task.status === "draft") {
-    if (task.awaitingAnswer === true || !manualBoard() && !hasDraftConfirmation(task)) {
+    if (task.questionAudience || task.awaitingAnswer === true || !manualBoard() && !hasDraftConfirmation(task)) {
       const phase = task.draftDiscussion?.phase;
-      const label = task.awaitingAnswer === true ? "task_question.approval_blocked" :
+      const label = task.questionAudience === "manager" ? "task_question.approval_waiting_for_manager" :
+        task.questionAudience === "owner" ? "task_question.approval_blocked" :
         phase ? "draft_discussion." + phase : "draft_discussion.confirmation_required";
       body.append(element("p", () => t(label, { reason: task.draftDiscussion?.reason }), "muted"));
-      actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
+      if (task.questionAudience !== "manager") {
+        actions.append(button(() => t("task_question.open_dialogue_button"), () => showTask(task.id, true)));
+      }
     } else if (!task.approvalRequirements?.length) {
       actions.append(button(() => t("ui.approve_535c27a7"), () => act("approve"), "primary"));
     }
@@ -5705,6 +5714,7 @@ function boardSettings() {
     ...agentFields.flat(),
     { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
     { name: "reviewerLimit", type: "number", label: () => t("limits.review"), value: current.taskLimits?.reviewer },
+    { name: "codexDailyTokens", label: () => t("limits.board.setting"), value: current.codexDailyTokens },
     { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
         ["ask", t("ui.ask_for_approval_cc8bdc3b")],
@@ -5712,6 +5722,12 @@ function boardSettings() {
         ["full", t("ui.full_access_47d69a72")],
       ] },
   ], () => (t("ui.save_settings_2173b7d7")), async values => {
+    const daily = values.codexDailyTokens;
+    if (daily !== "" && (!/^[0-9]+$/.test(daily) || !Number.isSafeInteger(Number(daily)) || Number(daily) < 1)) {
+      notice(t("limits.board.invalid"));
+      return;
+    }
+    const codexDailyTokens = daily === "" ? null : Number(daily);
     const agents = {};
     const taskLimits = {};
     for (const [role, title] of roles) {
@@ -5731,6 +5747,7 @@ function boardSettings() {
       showCardPreviews: values.showCardPreviews,
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
+      ...(codexDailyTokens !== (current.codexDailyTokens ?? null) ? { codexDailyTokens } : {}),
       ...agents,
     })) {
       if (values.managerAccess !== managerAccess) {
@@ -6414,8 +6431,8 @@ function update(next) {
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
-  window.renderProviderLimits?.();
   frame = next;
+  window.renderProviderLimits?.(frame.dailyBudget);
   const languageSelect = byId("language-select");
   if (languageSelect) languageSelect.value = next.localization?.preference ?? "system";
   if (languageChanged) {
@@ -6498,7 +6515,7 @@ function update(next) {
     const launch = byId("task-launch");
     if (launch) {
       launch.hidden = frame.runningTasks?.includes(taskInSheet.id) ?? false;
-      launch.disabled = Boolean(frame.quotaWait || taskInSheet.unfinishedDependencies?.length);
+      launch.disabled = Boolean(frame.quotaWait || frame.dailyBudget?.reason || taskInSheet.unfinishedDependencies?.length);
     }
     if (tagsChanged) byId("task-sheet-tags")?.replaceChildren(...tagBadges(taskInSheet.tags));
     const task = frame.board?.tasks.find(entry => entry.id === taskInSheet.id);
@@ -6592,8 +6609,8 @@ function renderAutoMode() {
       hint = t(goal.running ? "autoMode.running" : "autoMode.manual");
     } else if (!settings?.autoMode) {
       hint = t("autoMode.autoOff");
-    } else if (frame.quotaWait) {
-      hint = t("autoMode.quota");
+    } else if (frame.quotaWait || frame.dailyBudget?.reason) {
+      hint = frame.quotaWait ? t("autoMode.quota") : quotaLabel();
     } else if (goal.status !== "active") {
       hint = t("autoMode.manual");
     } else if (goal.running) {

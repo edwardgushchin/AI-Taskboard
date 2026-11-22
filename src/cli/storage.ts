@@ -308,6 +308,9 @@ function readIndex(path: string): BoardIndex {
       (index.settings.autoReview !== undefined && typeof index.settings.autoReview !== "boolean") ||
       (index.settings.reviewMode !== undefined && !reviewModes.some(mode => mode === (index.settings as Record<string, unknown>).reviewMode)) ||
       (index.settings.taskLimits !== undefined && !validAgentLimitOverrides(index.settings.taskLimits)) ||
+      (index.settings.codexDailyTokens !== undefined &&
+        (typeof index.settings.codexDailyTokens !== "number" ||
+          !Number.isSafeInteger(index.settings.codexDailyTokens) || index.settings.codexDailyTokens < 1)) ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -388,6 +391,7 @@ export function validateCard(value: unknown, id: string): Task {
         (value.execution.effort !== undefined &&
           (typeof value.execution.effort !== "string" || !reasoningEffortPattern.test(value.execution.effort))))) ||
       (value.awaitingAnswer !== undefined && typeof value.awaitingAnswer !== "boolean") ||
+      (value.awaitingOwnerAnswer !== undefined && typeof value.awaitingOwnerAnswer !== "boolean") ||
       (value.draftConfirmed !== undefined && typeof value.draftConfirmed !== "boolean") ||
       !["criteria", "questions", "subtasks"].every(key => Array.isArray(value[key])) || !isTagList(value.tags) ||
       !Array.isArray(value.attachments) || value.attachments.some(entry => !isRecord(entry) ||

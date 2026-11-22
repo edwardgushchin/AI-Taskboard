@@ -222,6 +222,7 @@ export type ArtifactKind = "png" | "text";
 
 export interface Task {
   awaitingAnswer?: boolean;
+  awaitingOwnerAnswer?: boolean;
   draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
@@ -292,6 +293,7 @@ export interface BoardSettings {
   executor?: BoardAgentSettings | null;
   reviewer?: BoardAgentSettings | null;
   taskLimits?: Partial<AgentLimits>;
+  codexDailyTokens?: number;
   reviewMode?: ReviewMode;
   reviewModeVersion?: number;
   autoReview?: boolean;

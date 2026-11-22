@@ -39,7 +39,7 @@ import { findQueuedTurn, missingCodexThread } from "./codex-queued-turn.ts";
 import { isRoutingTimeout } from "./codex-routing-timeout.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
-type Turn = { id: string; status: string; error?: { message?: string } | null };
+type Turn = { id: string; status: string; completedAt?: number | null; error?: { message?: string } | null };
 type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean; routingTimeout?: boolean; unconfirmed?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
 type QueuedTurn = {
@@ -587,7 +587,10 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     if (assigned.size || task.expertStage || task.expertStages?.length) {
       stopMail = watchTeamMail(project, task.id, control, "agent");
     }
-    tokens.save(tokens.begin(threadId, turn.id), onTokenUsage);
+    const startedUsage = recovered ? tokens.recover(threadId, recovered) : tokens.begin(threadId, turn.id);
+    const terminal = turns.get(turn.id) ?? (turn.status !== "inProgress" ? turn : undefined);
+    const completedUsage = !recovered && terminal ? tokens.completeTurn(threadId, terminal, Date.now()) : undefined;
+    tokens.save(completedUsage ?? startedUsage, onTokenUsage);
     clearTimeout(timeout);
     if (turn.status !== "inProgress") turns.set(turn.id, turn);
     return { threadId, completion: releaseProvider.run(() => monitor(turn.id)), ...control,

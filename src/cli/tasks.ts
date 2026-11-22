@@ -6,6 +6,7 @@ import {
 import { codexThreadPattern } from "./model.ts";
 import type { Actor, Task, TaskScheduleRule, TaskState } from "./model.ts";
 import { taskWorkingDirectory } from "./storage.ts";
+import { taskQuestionAudience } from "./task-messages.ts";
 
 const activeStates = ["draft", "ready", "in_progress", "blocked", "review"] as const;
 
@@ -238,8 +239,11 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
   switch (action) {
     case "approve": {
       requireState(task, ["draft"]);
-      if (task.awaitingAnswer === true || task.draftDiscussion?.managerReply !== undefined) {
-        throw new TaskboardError("TASK_AWAITING_ANSWER", "Finish the clarification in the task dialogue before approving the draft.");
+      const questionAudience = taskQuestionAudience(task);
+      if (task.awaitingAnswer === true || questionAudience) {
+        throw new TaskboardError("TASK_AWAITING_ANSWER", "Finish the clarification in the task dialogue before approving the draft.", {
+          questionAudience,
+        });
       }
       if (boardActor(input, "user") !== "user" &&
           task.history.findLast(event => event.action === "approve" || event.action === "return-to-draft")?.action === "return-to-draft") {

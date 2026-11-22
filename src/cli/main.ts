@@ -33,7 +33,7 @@ import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
-import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencyRequest, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages } from "./task-messages.ts";
+import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencyRequest, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages, taskQuestionAudience, taskQuestionState } from "./task-messages.ts";
 import { taskActivity } from "./task-activity.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -118,6 +118,7 @@ function compactTask(task: Task) {
     coverAttachment, codexThreadId, codexArchivePending: task.codexArchivePending, createdAt, updatedAt, blocked, subtasks, criteria: task.criteria, goalThreadId, managerGoalId, summary, nextStep,
     dependencies, milestone, dueDate: task.dueDate, workingDirectory, schedule, origin, launchRequested, discussionReturn: task.discussionReturn,
     awaitingAnswer: task.awaitingAnswer, draftConfirmed: task.draftConfirmed, reviewReturn: task.reviewReturn,
+    questionAudience: taskQuestionAudience(task),
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
     activity: taskActivity(task),
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
@@ -813,6 +814,10 @@ function run(
       store.index.settings.reviewModeVersion = (store.index.settings.reviewModeVersion ?? 0) + 1;
     }
     const taskLimits = input.taskLimits === undefined ? input.agentLimits : input.taskLimits;
+    if (input.codexDailyTokens !== undefined) {
+      if (input.codexDailyTokens === null) delete store.index.settings.codexDailyTokens;
+      else store.index.settings.codexDailyTokens = number(input.codexDailyTokens, "codexDailyTokens");
+    }
     if (taskLimits !== undefined) {
       if (!validAgentLimitOverrides(taskLimits) || Object.hasOwn(taskLimits, "manager")) {
         throw new TaskboardError("INVALID_INPUT", "Task limits must be non-negative whole numbers for work and review.");
@@ -847,6 +852,7 @@ function run(
     const task = taskWithCurrentWorktree(store, stored);
     const details = {
       artifacts: artifactFiles(store, id), savedChanges: describeSavedChanges(store, task),
+      ...taskQuestionState(task),
       ...(task.status === "draft" ? { approvalRequirements: approvalRequirements(task, store.index.settings) } : {}),
       ...(task.expertTeam ? { expertStageStatus: {
         work: expertStagesStatus(task, "work"), review: expertStagesStatus(task, "review"),

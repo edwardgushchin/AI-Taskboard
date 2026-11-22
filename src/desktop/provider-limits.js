@@ -33,6 +33,7 @@ if (typeof document !== "undefined") {
   const t = (key, parameters) => localization.text(key, parameters);
   panel.tabIndex = -1;
   let providers = [];
+  let boardBudget;
   function render() {
     if (!localization.state().english) return;
     const label = t("limits.label");
@@ -107,6 +108,32 @@ if (typeof document !== "undefined") {
         group.append(quota);
       }
     }
+    if (boardBudget) {
+      const { limit, spent, remaining, resetsAt, reason } = boardBudget;
+      const format = new Intl.NumberFormat(localization.locale);
+      const quota = document.createElement("section");
+      quota.className = "limits-window";
+      const title = document.createElement("strong");
+      title.textContent = t("limits.board.title");
+      const details = document.createElement("p");
+      details.textContent = t("limits.board.tokens", {
+        limit: format.format(limit), spent: format.format(spent), remaining: format.format(remaining),
+      });
+      const meter = document.createElement("meter");
+      meter.max = limit;
+      meter.value = remaining;
+      meter.setAttribute("aria-label", details.textContent);
+      const reset = document.createElement("small");
+      reset.className = "limits-reset";
+      reset.textContent = t("limits.reset", { time: new Date(resetsAt).toLocaleString(localization.locale) });
+      quota.append(title, details, meter, reset);
+      if (reason) {
+        const waiting = document.createElement("p");
+        waiting.textContent = t("limits.board." + reason);
+        quota.append(waiting);
+      }
+      content.append(quota);
+    }
     panel.replaceChildren(content);
   }
   async function refresh() {
@@ -129,7 +156,10 @@ if (typeof document !== "undefined") {
   control.setAttribute("aria-controls", panel.id);
   control.setAttribute("aria-expanded", "false");
   window.taskboard.onProviderLimitsChanged(() => { providers = []; render(); void refresh(); });
-  window.renderProviderLimits = render;
+  window.renderProviderLimits = budget => {
+    boardBudget = budget;
+    render();
+  };
   void refresh();
   setInterval(refresh, 60_000);
   setInterval(() => {

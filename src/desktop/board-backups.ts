@@ -13,6 +13,7 @@ const temporaryFile = /^\..+\.[0-9a-f-]{36}\.tmp$/;
 const folders = new Set([
   "tasks", "archive", "attachments", "artifacts", "worklog", "experts", "manager-chat",
   "manager-images", "manager-usage", "reviewer-chat", "maintenance-runs", "stage-run-history",
+  "codex-daily-usage",
 ]);
 const files = new Set([
   "board.json", "findings.json", "goal-messages.json", "manager-conversation.json", "manager-dialog.json",

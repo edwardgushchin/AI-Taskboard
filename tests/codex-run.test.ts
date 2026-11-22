@@ -231,6 +231,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread },',
     '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
+    '  } else if (method === "thread/turns/list" && outcome === "recover-usage") {',
+    '    result = { data: [{ id: "turn-1", status: "completed", completedAt: 1730000000, items: [] }] };',
     '  } else if (method === "turn/start") {',
     '    const turnId = outcome === "resumed" || outcome === "legacy-worklog" ? outcome + "-turn" : "turn-1";',
     '    result = { turn: { id: turnId, status: "inProgress" } };',
@@ -642,7 +644,29 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     assert.equal(record.inputTokens, 100);
     assert.equal(record.cachedInputTokens, 50);
     assert.equal(record.incomplete, outcome !== "usage");
+    if (outcome === "usage-closed") {
+      assert.equal(record.completedAt, undefined);
+      assert.equal(record.dailyTokens, undefined);
+    } else {
+      assert.equal(record.dailyTokens, 120);
+      assert.equal(typeof record.completedAt, "number");
+    }
   }
+  const recoveredReports: TokenUsageReport[] = [];
+  const recoveredUsage = await startCodexRun(client("recover-usage"), folder, worktree, { ...task, codexThreadId: thread },
+    undefined, async report => { recoveredReports.push(report); }, undefined,
+    async () => ({
+      clientId: "queued-usage",
+      turnId: "turn-1",
+      requireCompletion: true,
+      recover: true,
+      accepted: turnId => { assert.equal(turnId, "turn-1"); },
+    }));
+  assert.equal(recoveredUsage.recovered, true);
+  assert.equal(await recoveredUsage.completion, undefined);
+  const recoveredRecord = recoveredReports.at(-1)!.records[0];
+  assert.equal(recoveredRecord.completedAt, 1730000000000);
+  assert.equal(recoveredRecord.dailyTokens, null);
   for (const outcome of ["usage", "usage-failed", "usage-closed"]) {
     const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async () => {
       throw new Error("Usage storage denied");

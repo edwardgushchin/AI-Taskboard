@@ -308,7 +308,7 @@ export function replyToTask(
       if (item.type !== "agentMessage" || item.phase !== "final_answer") return item;
       replyAt ??= item.at;
       // Decode only complete JSON string tokens; an unfinished escape waits for the next delta.
-      const match = /^\s*\{\s*(?:"(?:awaitingAnswer|confirmsDraft)"\s*:\s*(?:true|false)\s*,\s*)*"text"\s*:\s*"((?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[\da-fA-F]{4}))*)/.exec(item.text);
+      const match = /^\s*\{\s*(?:"(?:awaitingAnswer|awaitingOwnerAnswer|confirmsDraft)"\s*:\s*(?:true|false)\s*,\s*)*"text"\s*:\s*"((?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[\da-fA-F]{4}))*)/.exec(item.text);
       const text = match ? JSON.parse('"' + match[1] + '"') as string : "";
       return { ...item, text: text.trim() };
     }));
@@ -337,6 +337,7 @@ export function replyToTask(
       ] : []),
       "For a normal reply, return text and awaitingAnswer. Set awaitingAnswer to true when a concrete clarification from the owner or manager is still needed.",
       "Keep it true if any such question remains, including a follow-up after a partial answer. Set it false when the clarification is sufficient or you explicitly close the last question as no longer needed. Reading the chat or receiving a user message alone does not close a question.",
+      "In every result set awaitingOwnerAnswer to true only if a concrete question for the user remains open in the task dialogue, including when a separate manager question is open. Set it to false when waiting only for the manager or when all questions are resolved.",
       ...(draftDialogue ? [
         "Also return confirmsDraft. Set it to true only after reviewing the current saved brief and explicitly confirming it is ready for approval. Set it to false for greetings, acknowledgements, unrelated replies, and whenever you still need clarification. Absence of a question does not establish readiness.",
         "When you save a change with task_update, confirm readiness only if you have reviewed the resulting brief in this turn.",
@@ -360,15 +361,19 @@ export function replyToTask(
     onTokenUsage, onControl, signal,
     imageDirectory: mode === "initial" ? undefined : imageDirectory, imageLimit,
     finalAnswerSchema: mode === "initial" ? {
-      type: "object", properties: { questions: { type: "string" } }, required: ["questions"], additionalProperties: false,
+      type: "object",
+      properties: { questions: { type: "string" }, awaitingOwnerAnswer: { type: "boolean" } },
+      required: ["questions", "awaitingOwnerAnswer"],
+      additionalProperties: false,
     } : {
       type: "object",
       properties: {
         text: { type: "string" },
         awaitingAnswer: { type: "boolean" },
+        awaitingOwnerAnswer: { type: "boolean" },
         ...(draftDialogue ? { confirmsDraft: { type: "boolean" } } : {}),
       },
-      required: ["text", "awaitingAnswer", ...(draftDialogue ? ["confirmsDraft"] : [])],
+      required: ["text", "awaitingAnswer", "awaitingOwnerAnswer", ...(draftDialogue ? ["confirmsDraft"] : [])],
       additionalProperties: false,
     },
   };
@@ -387,16 +392,21 @@ export function replyToTask(
       return result;
     }
     const output = JSON.parse(result.text) as {
-      questions?: unknown; text?: unknown; awaitingAnswer?: unknown; confirmsDraft?: unknown;
+      questions?: unknown; text?: unknown; awaitingAnswer?: unknown; awaitingOwnerAnswer?: unknown; confirmsDraft?: unknown;
     } | null;
+    const owner = output?.awaitingOwnerAnswer;
+    if (owner !== undefined && typeof owner !== "boolean") {
+      throw new Error("Codex returned an invalid question audience.");
+    }
     if (mode === "initial") {
       if (typeof output?.questions !== "string") {
         throw new Error("Codex returned an invalid draft discussion result.");
       }
       const text = output.questions.trim();
-      return { ...result, text, awaitingAnswer: Boolean(text), commentary: [] };
+      if (owner && !text) throw new Error("Codex did not provide the owner question.");
+      return { ...result, text, awaitingAnswer: Boolean(text), awaitingOwnerAnswer: owner, commentary: [] };
     }
-    if (typeof output?.text !== "string" || typeof output.awaitingAnswer !== "boolean" ||
+    if (typeof output?.text !== "string" || typeof output.awaitingAnswer !== "boolean" || (owner && !output.awaitingAnswer) ||
         (mode === "handoff" && !output.text.trim()) ||
         (draftDialogue && (typeof output.confirmsDraft !== "boolean" || (output.confirmsDraft && output.awaitingAnswer)))) {
       throw new Error("Codex returned an invalid task discussion result.");
@@ -405,6 +415,7 @@ export function replyToTask(
       ...result,
       text: output.text.trim(),
       awaitingAnswer: output.awaitingAnswer,
+      awaitingOwnerAnswer: owner,
       ...(draftDialogue ? { confirmsDraft: output.confirmsDraft === true } : {}),
       ...(replyAt ? { at: replyAt } : {}),
     };
@@ -990,6 +1001,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
             throw Object.assign(new Error("Codex has not confirmed the reviewer turn's completion."),
               { code: "CODEX_START_UNCONFIRMED" });
           }
+          tokens.save(tokens.recover(thread.id, saved), onTokenUsage);
           if (isRoutingTimeout(saved)) throw new CodexRoutingTimeout(saved.error!.message!);
           if (saved.status !== "completed") throw new Error(saved.error?.message ?? "Codex did not complete the review.");
           turn = saved;
@@ -1095,6 +1107,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         }
         if (method === "turn/completed" && data.turn && data.turn.id === turn?.id) {
           turn = data.turn;
+          if (followingGoal) await tokens.save(undefined, onTokenUsage);
           if (activityTimer) {
             clearTimeout(activityTimer);
             publish();

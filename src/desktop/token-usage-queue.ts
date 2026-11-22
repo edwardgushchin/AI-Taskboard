@@ -6,10 +6,12 @@ import { parseUsageReport } from "../cli/token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import { callCli } from "./cli.ts";
 import type { CliError } from "./cli.ts";
+import { recordCodexDailyUsage, type CodexBudgetRole } from "./codex-daily-budget.ts";
 
 type PendingReport = {
   project: string;
-  task: string;
+  task?: string;
+  budgetRole?: CodexBudgetRole;
   report: TokenUsageReport;
   failure?: CliError;
 };
@@ -37,11 +39,15 @@ function pendingFailure({ code, message, details }: CliError): CliError {
 export class TokenUsageQueue {
   private readonly directory: string;
   private readonly delays: readonly number[];
+  private readonly budgetChanged?: (project: string) => void;
   private tail = Promise.resolve();
+  private budgetWrites = new Map<string, PendingReport>();
 
-  constructor(profile: string, delays: readonly number[] = [5_000, 30_000]) {
+  constructor(profile: string, delays: readonly number[] = [5_000, 30_000],
+    budgetChanged?: (project: string) => void) {
     this.directory = join(profile, "pending-token-usage");
     this.delays = delays;
+    this.budgetChanged = budgetChanged;
   }
 
   restore(): void {
@@ -51,10 +57,16 @@ export class TokenUsageQueue {
       const path = join(this.directory, name.name);
       try {
         const entry = readJson(path) as PendingReport;
-        if (typeof entry.project !== "string" || !/^T-\d+$/.test(entry.task)) {
+        if (typeof entry.project !== "string" || (!entry.budgetRole && !/^T-\d+$/.test(entry.task ?? ""))) {
           throw new Error("Invalid pending token usage entry.");
         }
-        void this.send(path, { ...entry, report: parseUsageReport(entry.report) }, 0);
+        const parsed = { ...entry, report: parseUsageReport(entry.report) };
+        if (parsed.budgetRole) {
+          this.budgetWrites.set(path, parsed);
+          this.sendBudget(path, parsed, 0);
+        } else {
+          void this.send(path, parsed, 0);
+        }
       } catch {
         console.warn("Could not read a pending token usage report (%s).", name.name);
       }
@@ -70,9 +82,39 @@ export class TokenUsageQueue {
     return this.send(path, entry, 0);
   }
 
+  hasPendingBudget(project: string, midnight: number, now: number): boolean {
+    return [...this.budgetWrites.values()].some(entry => entry.project === project &&
+      entry.report.records.some(record => record.completedAt !== undefined &&
+        record.completedAt >= midnight && record.completedAt <= now));
+  }
+
+  enqueueBudget(project: string, role: CodexBudgetRole, report: TokenUsageReport, task?: string): void {
+    if (!report.records.some(record => record.completedAt !== undefined)) return;
+    const path = join(this.directory, randomUUID() + ".json");
+    const entry = { project, task, report, budgetRole: role };
+    this.budgetWrites.set(path, entry);
+    this.sendBudget(path, entry, 0);
+  }
+
+  private sendBudget(path: string, entry: PendingReport, attempt: number): void {
+    try {
+      mkdirSync(this.directory, { recursive: true });
+      writeJson(path, entry);
+      const changed = recordCodexDailyUsage(entry.project, entry.budgetRole!, entry.report, entry.task);
+      removeFile(path);
+      this.budgetWrites.delete(path);
+      if (changed || attempt) this.budgetChanged?.(entry.project);
+    } catch (error) {
+      console.warn("Could not save the board Codex budget (%s).", (error as NodeJS.ErrnoException).code ?? "UNKNOWN");
+      if (attempt === 0) this.budgetChanged?.(entry.project);
+      const delay = this.delays[attempt];
+      if (delay !== undefined) setTimeout(() => this.sendBudget(path, entry, attempt + 1), delay).unref();
+    }
+  }
+
   private send(path: string, entry: PendingReport, attempt: number): Promise<void> {
     this.tail = this.tail.then(async () => {
-      const result = await callCli(entry.project, ["token-usage", entry.task, "--compact"], entry.report);
+      const result = await callCli(entry.project, ["token-usage", entry.task!, "--compact"], entry.report);
       if (result.ok) {
         removeFile(path);
         return;
