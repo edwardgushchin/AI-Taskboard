@@ -170,3 +170,53 @@ jobs:
             ci-results/
             release/builder-debug.yml
             release/builder-effective-config.yaml
+
+  windows-install:
+    name: Windows installer / ${{ matrix.arch }}
+    if: github.workflow == 'Native CI'
+    needs: package
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, image: windows-2025 }
+          - { arch: arm64, image: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ai-taskboard-*-windows-*
+          path: installers
+          merge-multiple: true
+      - name: Verify installation and architecture rejection
+        shell: pwsh
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          $installer = @(Get-ChildItem installers -Filter "*-windows-$env:TARGET_ARCH.exe")
+          if ($installer.Count -ne 1) {
+            throw "Expected one $env:TARGET_ARCH installer, found $($installer.Count)."
+          }
+          $params = @{
+            Architecture = $env:TARGET_ARCH
+            Installer = $installer[0].FullName
+            ReportDir = 'installer-results'
+          }
+          if ($env:TARGET_ARCH -eq 'x64') {
+            $arm = @(Get-ChildItem installers -Filter '*-windows-arm64.exe')
+            if ($arm.Count -ne 1) {
+              throw "Expected one ARM64 installer, found $($arm.Count)."
+            }
+            $params.IncompatibleInstaller = $arm[0].FullName
+          }
+          ./scripts/check-windows-installer.ps1 @params
+      - name: Upload installer verification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-windows-installer-${{ matrix.arch }}
+          path: installer-results/
