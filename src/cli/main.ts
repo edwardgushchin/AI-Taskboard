@@ -33,7 +33,7 @@ import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
-import { acknowledgeTaskMessages, currentReviewApproval, draftManagerQuestion, draftManagerReply, draftOwnerMessage, managerInbox, pendingDraftDependency, sendTaskMessage, taskMessages } from "./task-messages.ts";
+import { acknowledgeTaskMessages, currentReviewApproval, draftDependencyDecision, draftDependencySubject, draftManagerQuestion, draftManagerReply, managerInbox, matchesDraftDependency, pendingDraftDependency, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import { taskActivity } from "./task-activity.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -229,10 +229,19 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   if (answered) {
     const dependencyId = source.history[answered - 1].draftDependencyId;
     if (dependencyId) return { dependencyId, sequence: answered };
+    if (pendingDraftDependency(source, question)) return { cancelled: true, sequence: answered };
     throw new TaskboardError("INVALID_INPUT", "This draft question already has a reply.");
   }
+  const subject = draftDependencySubject(source.history[question - 1].text);
+  if (!subject) {
+    throw new TaskboardError("USER_DIRECTION_REQUIRED", "The draft question must name the specific required dependency.");
+  }
+  const { sequence: ownerMessage, cancellation } = draftDependencyDecision(source, subject);
 
   const prepareDraft = (draft: Record<string, unknown>) => {
+    if (taskIdPattern.test(subject) || draft.title !== subject) {
+      throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the exact dependency title chosen by the owner.");
+    }
     const description = text(draft.description, "description", true);
     const criteria = strings(draft.criteria, "criteria");
     const tags = strings(draft.tags, "tags");
@@ -247,6 +256,9 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   };
   const target = (targetId: string) => {
     const card = readTask(store, targetId);
+    if (!matchesDraftDependency(subject, card)) {
+      throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the dependency chosen by the owner.");
+    }
     if (card.status === "cancelled") {
       throw new TaskboardError("INVALID_INPUT", "Choose a dependency that has not been cancelled.");
     }
@@ -257,26 +269,40 @@ function draftDependency(store: BoardStore, id: string, input: Record<string, un
   let saved = pendingDraftDependency(source, question);
   if (!saved) {
     const { ownerSequence, ownerText } = input;
-    const ownerMessage = draftOwnerMessage(source);
-    if (!ownerMessage || ownerSequence !== ownerMessage || ownerMessage >= question ||
+    if (ownerMessage <= cancellation || ownerSequence !== ownerMessage || ownerMessage >= question ||
         typeof ownerText !== "string" || !ownerText.trim() || source.history[ownerMessage - 1].text !== ownerText) {
-      throw new TaskboardError("USER_DIRECTION_REQUIRED", "Cite the current saved owner decision that precedes this draft question.");
+      throw new TaskboardError("USER_DIRECTION_REQUIRED", "Cite the saved owner decision for the named dependency that precedes this draft question.");
     }
     requireRevision(source, input.revision, true);
-    if (input.authorizeOnly === true) return { authorized: true };
+    if (input.authorizeOnly === true) return { subject };
     const existingId = input.existingId === undefined ? undefined : text(input.existingId, "existingId", true);
     const draft = input.draft === undefined ? undefined : object(input.draft);
     if (Boolean(existingId) === Boolean(draft)) {
       throw new TaskboardError("INVALID_INPUT", "Supply either an existing dependency ID or one new draft.");
     }
     if (existingId) target(existingId);
-    if (draft) prepareDraft(draft);
-    saved = { question, ownerMessage, existingId, draft };
+    if (draft) {
+      prepareDraft(draft);
+      const { tasks, archived } = store.snapshot();
+      if ([...tasks, ...archived].some(card =>
+        card.id !== id && card.status !== "cancelled" && matchesDraftDependency(subject, card))) {
+        throw new TaskboardError("DEPENDENCY_MATCH_FOUND", "Search for the existing named dependency and select its ID.");
+      }
+    }
+    saved = { question, ownerMessage, subject, existingId, draft };
     source = record({ ...source, draftConfirmed: false }, "draft-dependency-request", "manager");
     source.history.at(-1)!.draftDependency = saved;
     store.save(source);
-  } else if (input.authorizeOnly === true) {
-    return { authorized: true };
+  } else {
+    if (input.authorizeOnly === true) {
+      throw new TaskboardError("PENDING_OPERATION", "The queue will resume the already saved dependency request.");
+    }
+    if (cancellation > saved.ownerMessage) {
+      const reply = sendTeamMessage(store, id, "manager", {
+        to: request.from, replyTo: question, kind: "decision", text: `The owner cancelled the request for a required dependency: ${subject}.`,
+      }, { parent: source });
+      return { cancelled: true, sequence: reply.sequence };
+    }
   }
 
   // A crash after writing the new card can leave its index entry missing.

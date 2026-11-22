@@ -89,6 +89,74 @@ function cli(root: string, args: string[], input?: unknown, expectedCode?: strin
   return payload.data;
 }
 
+test("draft dependency reads and writes require the owner's decision for the named prerequisite", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const expected = cli(root, ["create"], { title: "Account for managed heap" });
+  const unrelated = cli(root, ["create"], { title: "Measure CPU allocations" });
+  const chat = { model: "fixture", effort: "low" };
+  const request = `Required dependency: ${expected.title}`;
+
+  for (const autoMode of [false, true]) {
+    cli(root, ["settings"], { autoMode });
+    const source = cli(root, ["create"], { title: "Report memory usage", description: request });
+    const ownerText = "Use bytes in the UI.";
+    const owner = cli(root, ["chat", source.id], { ...chat, text: ownerText });
+    const question = cli(root, ["expert-message", source.id], { actor: "agent", to: "manager", kind: "question", text: request });
+    const command = ["draft-dependency", source.id];
+    const reference = { revision: owner.revision, replyTo: question.sequence, ownerSequence: owner.history.length, ownerText };
+    cli(root, command, { ...reference, authorizeOnly: true }, "USER_DIRECTION_REQUIRED");
+    cli(root, command, { ...reference, existingId: expected.id }, "USER_DIRECTION_REQUIRED");
+    assert.deepEqual(cli(root, ["show", source.id]).dependencies ?? [], []);
+
+    const decision = cli(root, ["chat", source.id], { ...chat, text: request });
+    const followUp = cli(root, ["expert-message", source.id], { actor: "agent", to: "manager", kind: "question", text: request });
+    const authorized = {
+      revision: decision.revision, replyTo: followUp.sequence, ownerSequence: decision.history.length, ownerText: request,
+    };
+    assert.deepEqual(cli(root, command, { ...authorized, authorizeOnly: true }), { subject: expected.title });
+    cli(root, command, { ...authorized, existingId: unrelated.id }, "USER_DIRECTION_REQUIRED");
+    cli(root, command, { ...authorized, draft: plannedDraft({ title: unrelated.title, tags: ["Memory"] }) }, "USER_DIRECTION_REQUIRED");
+    const saved = cli(root, command, { ...authorized, existingId: expected.id });
+    assert.equal(saved.dependencyId, expected.id);
+    assert.deepEqual(cli(root, ["show", source.id]).dependencies, [expected.id]);
+  }
+});
+
+test("a named cancellation ends a saved draft dependency request after unrelated owner chat", t => {
+  const root = fixture(t);
+  cli(root, ["init"]);
+  const source = cli(root, ["create"], { title: "Report memory usage" });
+  const chat = { model: "fixture", effort: "low" };
+  const subject = "Account for managed heap";
+  const text = `Required dependency: ${subject}`;
+  const owner = cli(root, ["chat", source.id], { ...chat, text });
+  const question = cli(root, ["expert-message", source.id], { actor: "agent", to: "manager", kind: "question", text });
+  onBoard(locateBoard(root), store => {
+    const pending = record(store.card(source.id), "draft-dependency-request", "manager");
+    pending.history.at(-1)!.draftDependency = {
+      subject, question: question.sequence, ownerMessage: owner.history.length,
+      draft: plannedDraft({ title: subject, tags: ["Memory"] }),
+    };
+    store.save(pending);
+  });
+  const inbox = () => cli(root, ["manager-inbox"]);
+  cli(root, ["chat", source.id], { ...chat, text: "Use bytes in the UI." });
+  assert.equal(inbox().find((entry: { sequence: number }) => entry.sequence === question.sequence)?.draftDependencyPending, true);
+  cli(root, ["chat", source.id], { ...chat, text: `Cancel required dependency: ${subject}` });
+
+  const command = ["draft-dependency", source.id];
+  const replay = { replyTo: question.sequence };
+  const cancelled = cli(root, command, replay);
+  assert.equal(cancelled.cancelled, true);
+  assert.deepEqual(cli(root, command, replay), cancelled);
+  assert.equal(inbox().length, 0);
+  const card = cli(root, ["show", source.id]);
+  assert.deepEqual(card.dependencies ?? [], []);
+  assert.equal(card.draftDiscussion.managerReply, cancelled.sequence);
+  assert.equal(cli(root, ["list"]).tasks.length, 1);
+});
+
 test("approval waits for the last saved clarification to close", t => {
   const root = fixture(t);
   cli(root, ["init"]);

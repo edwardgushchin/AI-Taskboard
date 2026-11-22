@@ -1,5 +1,5 @@
 import localization from "../desktop/localization.cjs";
-import { member, number, requireState, taskReviewModeVersion, TaskboardError, text } from "./model.ts";
+import { member, number, requireState, taskIdPattern, taskReviewModeVersion, TaskboardError, text } from "./model.ts";
 import type { BoardSettings, Task, TaskEvent } from "./model.ts";
 
 export function statusNotice(task: Task, event: TaskEvent, language: string | boolean = true) {
@@ -56,14 +56,49 @@ export function draftManagerReply(task: Task, sequence: number, to: string) {
 }
 
 export function pendingDraftDependency(task: Task, question: number) {
-  const saved = task.history.findLast(event => event.draftDependency?.question === question);
-  return saved?.draftDependency?.ownerMessage === draftOwnerMessage(task) ? saved.draftDependency : undefined;
+  const transition = task.history.findLastIndex(event => event.to !== undefined);
+  if (question <= transition + 1) return;
+  return task.history.findLast(event => event.draftDependency?.question === question &&
+    event.draftDependency.subject)?.draftDependency;
 }
 
-export function draftOwnerMessage(task: Task) {
-  const owner = task.history.findLastIndex(event => event.actor === "user" && event.action === "chat" && Boolean(event.chat));
+export function draftDependencySubject(message: string | undefined) {
+  return /^(?:Обязательная зависимость|Required dependency): ([^\s«»"\r\n][^«»"\r\n]{0,199})$/u.exec(message ?? "")?.[1].trimEnd();
+}
+
+export function matchesDraftDependency(subject: string, task: Pick<Task, "id" | "title">) {
+  return taskIdPattern.test(subject) ? task.id === subject : task.title === subject;
+}
+
+export function draftDependencyDecision(task: Task, subject: string) {
   const transition = task.history.findLastIndex(event => event.to !== undefined);
-  return owner > transition ? owner + 1 : 0;
+  let previousChat: TaskEvent | undefined;
+  let sequence = 0;
+  let cancellation = 0;
+  for (let index = transition + 1; index < task.history.length; index++) {
+    const event = task.history[index];
+    if (!event.chat || event.action !== "chat") continue;
+    if (event.actor === "user") {
+      const latestText = event.text ?? "";
+      const answeredChoice = previousChat?.actor === "agent" &&
+        ((previousChat.text === `Вынести «${subject}» в отдельную обязательную зависимость? Ответьте «отдельной карточкой» или «в этой задаче».` &&
+          /^(?:отдельной карточкой|в этой задаче)$/iu.test(latestText)) ||
+         (previousChat.text === `Make "${subject}" a separate required dependency? Reply "separate card" or "in this task".` &&
+          /^(?:separate card|in this task)$/iu.test(latestText)));
+      if (answeredChoice || draftDependencySubject(latestText) === subject) {
+        if (/^(?:в этой задаче|in this task)$/iu.test(latestText)) {
+          cancellation = index + 1;
+        } else {
+          sequence = index + 1;
+        }
+      } else if (latestText === `Отменить обязательную зависимость: ${subject}` ||
+          latestText === `Cancel required dependency: ${subject}`) {
+        cancellation = index + 1;
+      }
+    }
+    previousChat = event;
+  }
+  return { sequence, cancellation };
 }
 
 export function taskMessages(task: Task, recipient: "manager" | "agent") {

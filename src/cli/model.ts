@@ -110,6 +110,7 @@ export interface TaskEvent {
   draftDependency?: {
     question: number;
     ownerMessage: number;
+    subject?: string;
     existingId?: string;
     draft?: Record<string, unknown>;
   };
