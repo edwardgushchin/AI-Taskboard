@@ -105,7 +105,7 @@ export function gitStatus(path: string, files: "unignored" | "tracked" | "all" =
     files === "tracked" ? "--untracked-files=no" : "--untracked-files=all",
     files === "tracked" ? "--ignore-submodules=untracked" : "--ignore-submodules=none",
     files === "all" ? "--ignored=traditional" : "--ignored=no",
-  ]);
+  ], { GIT_OPTIONAL_LOCKS: "0" });
 }
 
 export function collidingPaths(path: string, changed: string[], local: string[]): string[] {

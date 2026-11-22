@@ -4418,6 +4418,67 @@ test("ordinary acceptance reports local conflicts before changing the target", t
   assert.equal(cli(root, ["show", task.id]).status, "review");
 });
 
+test("reviewer acceptance waits without changing the target or invalidating approval", t => {
+  const root = fixture(t, true);
+  const { task } = submitFixture(root, path => writeFileSync(join(path, "source.txt"), "delivered\n"));
+  cli(root, ["settings"], { reviewMode: "reviewer", autoMode: true });
+  const originalHead = git(root, "rev-parse", "HEAD");
+  const accept = { actor: "manager", autoMode: true, revision: task.revision, targetHead: originalHead };
+  const approve = (targetHead: string) => cli(root, ["review-approve", task.id], {
+    revision: task.revision,
+    targetHead,
+    summary: "Reviewed the submission",
+    evidence: ["Read source.txt"],
+  });
+  approve(originalHead);
+  const source = join(root, "source.txt");
+  const index = join(root, ".git", "index");
+  // A text patch for this change is larger than the Git command's 64 MiB output buffer.
+  const line = "x".repeat(1023) + "\n";
+  writeFileSync(source, line.repeat(65 * 1024));
+  const indexBefore = readFileSync(index);
+  const fileBefore = git(root, "hash-object", "--no-filters", "--", source);
+  const waiting = cli(root, ["accept", task.id, "--compact"], accept);
+  assert.equal(waiting.status, "review");
+  assert.equal(waiting.revision, task.revision);
+  assert.equal(waiting.acceptanceWait.error.code, "LOCAL_CHANGES_CONFLICT");
+  assert.deepEqual(waiting.acceptanceWait.paths, ["source.txt"]);
+  assert.deepEqual(readFileSync(index), indexBefore);
+  assert.equal(git(root, "hash-object", "--no-filters", "--", source), fileBefore);
+  assert.equal(git(root, "rev-parse", "HEAD"), originalHead);
+  const card = () => cli(root, ["list", "--compact"]).tasks.find((entry: Task) => entry.id === task.id);
+  assert.equal(card().acceptanceWaitUnchanged, true);
+  assert.equal(card().reviewApproved, true);
+  const beforeRetry = cli(root, ["show", task.id]);
+  assert.deepEqual(cli(root, ["accept", task.id, "--compact"], accept).acceptanceWait, waiting.acceptanceWait);
+  assert.equal(cli(root, ["show", task.id]).history.length, beforeRetry.history.length);
+  assert.deepEqual(readFileSync(index), indexBefore);
+
+  writeFileSync(source, "new local content\n");
+  assert.equal(card().acceptanceWaitUnchanged, false);
+  const changed = cli(root, ["accept", task.id, "--compact"], accept);
+  assert.equal(changed.status, "review");
+  assert.notEqual(changed.acceptanceWait.fingerprint, waiting.acceptanceWait.fingerprint);
+  git(root, "stash", "push", "-m", "Keep local content");
+  git(root, "commit", "--allow-empty", "-m", "chore: advance target");
+  const newHead = git(root, "rev-parse", "HEAD");
+  assert.equal(card().acceptanceWaitUnchanged, false);
+  cli(root, ["accept", task.id], accept, "TARGET_CHANGED");
+  cli(root, ["accept", task.id], { ...accept, targetHead: newHead }, "REVIEW_REQUIRED");
+  approve(newHead);
+
+  cli(root, ["settings"], { autoMode: false });
+  cli(root, ["accept", task.id], { ...accept, targetHead: newHead }, "AUTO_MODE_DISABLED");
+  const manualQueueInput = { ...accept, autoMode: false, targetHead: newHead };
+  const done = cli(root, ["accept", task.id], manualQueueInput);
+  assert.equal(done.status, "done");
+  assert.equal(done.acceptanceWait, undefined);
+  assert.equal(readFileSync(source, "utf8"), "delivered\n");
+  assert.equal(git(root, "show", "stash:source.txt"), "new local content");
+  assert.equal(cli(root, ["accept", task.id], manualQueueInput).git.accepted, done.git.accepted);
+  assert.equal(git(root, "rev-list", "--count", newHead + "..HEAD"), "2");
+});
+
 test("squash accepts into a local branch that was not checked out", t => {
   const root = fixture(t, true);
   const initial = git(root, "rev-parse", "HEAD");

@@ -96,6 +96,7 @@ export function inspectLocalChanges(path: string, head: string, status = gitStat
   const paths: string[] = [];
   const untracked: string[] = [];
   const working: string[] = [];
+  const modifiedTracked: string[] = [];
   let indexDirty = false;
   let supported = true;
   for (const entry of status.split("\0").filter(Boolean)) {
@@ -104,13 +105,14 @@ export function inspectLocalChanges(path: string, head: string, status = gitStat
     if (name) paths.push(name);
     if (name && entry.startsWith("? ")) untracked.push(name);
     if (name && (!tracked || entry[3] !== ".")) working.push(name);
+    if (name && tracked && (entry[3] === "M" || entry[3] === "T")) modifiedTracked.push(name);
     if (tracked && entry[2] !== ".") indexDirty = true;
     if (!name || name.endsWith("/") || /^\.tasks(?:\/|$)/i.test(name) || (tracked && tracked[1] !== "N...")) {
       supported = false;
     }
   }
   const token = supported ? createHash("sha256").update(path + "\0" + head + "\0" + status).digest("hex") : undefined;
-  return { path, paths, untracked, working, indexDirty, token };
+  return { path, paths, untracked, working, modifiedTracked, indexDirty, token };
 }
 
 function onlyUntracked(status: string): boolean {
@@ -199,7 +201,7 @@ export function checkPreserveChanges(
     throw new TaskboardError("LOCAL_CHANGES_CONFLICT", "The task would overwrite local files.", { path, paths: collisions });
   }
   // Create a tracked snapshot for the check while leaving the real index and files in place.
-  const sha = git(path, ["stash", "create", "Taskboard local changes check"]).trim();
+  const sha = git(path, ["stash", "create", "Taskboard local changes check"], { GIT_OPTIONAL_LOCKS: "0" }).trim();
   if (!sha) throw new TaskboardError("LOCAL_CHANGES_CHANGED", "Local changes have changed. Review the task again.", { path });
   const checkHead = git(path, ["commit-tree", "--no-gpg-sign", tree, "-p", head, "-m", "Check local changes"]).trim();
   try {

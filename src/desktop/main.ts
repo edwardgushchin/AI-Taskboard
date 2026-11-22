@@ -82,7 +82,7 @@ interface Board {
   expertCatalogVersion?: string;
   settings: BoardSettings;
   tags: BoardTag[];
-  tasks: (Task & { activity?: ReturnType<typeof taskActivity>; historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; reviewSubmissionSequence?: number; reviewDecision?: number; mergeRepair?: true; unfinishedDependencies?: string[];
+  tasks: (Task & { activity?: ReturnType<typeof taskActivity>; historyLength?: number; reviewApproved?: boolean; reviewApprovalTargetHead?: string | null; acceptanceWaitUnchanged?: boolean; reviewNoted?: true; reviewHasCommit?: true; reviewPending?: true; reviewSubmissionSequence?: number; reviewDecision?: number; mergeRepair?: true; unfinishedDependencies?: string[];
     expertWorkPlanned?: boolean; expertReviewPlanned?: boolean })[];
   managerInbox?: ReturnType<typeof import("../cli/task-messages.ts").managerInbox>;
   archived: (ArchiveLink & { id: string })[];
@@ -1465,7 +1465,8 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
   const missingPlan = (task: Board["tasks"][number], settings: BoardSettings) => {
     const mode = taskReviewMode(task, settings);
     if (task.status === "review") return (settings.autoMode || usesIndependentReviewer(mode)) && mode !== "human" && !task.expertReviewPlanned &&
-      !task.reviewPending && !task.reviewApproved && (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings));
+      !task.reviewPending && !task.reviewApproved && !task.acceptanceWaitUnchanged &&
+      (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings));
     const controls = settings.autoMode ? settings.autoQueue : undefined;
     return task.status === "ready" && !controls?.paused && !controls?.held.includes(task.id) &&
       !task.unfinishedDependencies?.length && !planned(task, settings) &&
@@ -1507,7 +1508,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
         const integrationKey = (task: Board["tasks"][number]) =>
           JSON.stringify([task.id, task.revision, taskReviewModeVersion(task, board.settings), task.reviewApprovalTargetHead]);
         const task = board.tasks.find(task => task.status === "review" && taskReviewMode(task, board.settings) === "reviewer" &&
-          !task.acceptanceRepair && task.reviewApproved && !executorBusy(project, task.id) &&
+          !task.acceptanceRepair && !task.acceptanceWaitUnchanged && task.reviewApproved && !executorBusy(project, task.id) &&
           !watch.reviewerRuns.has(task.id) && !queue.integrations.has(integrationKey(task)));
         if (task) {
           const attempt = integrationKey(task);
@@ -1536,11 +1537,13 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
             }));
             continue;
           }
-          const accepted = await callCli(project, ["accept", task.id, "--compact"], {
+          const accepted = await callCli<Pick<Task, "status" | "acceptanceWait">>(project, ["accept", task.id, "--compact"], {
             autoMode: true, actor: "manager", reviewMode: "reviewer", reviewModeVersion: review.data.reviewModeVersion, revision: review.data.revision,
             targetHead: review.data.targetHead, ...(review.data.message ? { message: review.data.message } : {}),
           });
-          if (!accepted.ok) {
+          if (accepted.ok && accepted.data.status === "review" && accepted.data.acceptanceWait) {
+            queue.integrations.delete(attempt);
+          } else if (!accepted.ok) {
             if (accepted.error.code === "AUTO_MODE_DISABLED") {
               queue.integrations.delete(attempt);
               continue;
@@ -3975,6 +3978,7 @@ function readyReviews(watch: BoardWatch) {
     const attempt = retry ? !retry.exhausted && retry.notBefore <= Date.now() :
       watch.reviewAttempts.get(task.id) !== reviewAttempt(task, settings);
     return (settings.autoMode || independent) && mode !== "human" && (!task.reviewPending || pending) &&
+      !task.acceptanceWaitUnchanged &&
       (!task.acceptanceRepair || reviewsAcceptanceRepair(task, settings)) && !watch.reviewerRuns.has(task.id) &&
       task.expertReviewPlanned && (!independent || (!task.reviewApproved && !task.reviewNoted)) &&
       (pending

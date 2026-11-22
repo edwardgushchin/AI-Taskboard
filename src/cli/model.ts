@@ -218,6 +218,12 @@ export interface Task {
   expertStage?: { parentId: string; key: string; inputs: string[]; outputs: string[] };
   expertStages?: { key: string; taskId: string; expertId: string; title: string; inputs: string[]; outputs: string[]; dependsOn: string[] }[];
   acceptanceRepair?: { phase: "queued" | "running" | "checking" | "failed"; reviewModeVersion?: number; targetHead: string; attempts: number; message: string; reason?: string };
+  acceptanceWait?: {
+    fingerprint: string;
+    reviewModeVersion?: number;
+    error: { code: "LOCAL_CHANGES_CONFLICT"; message: string; details?: unknown };
+    paths: string[];
+  };
   tokenUsage?: import("./token-usage.ts").TaskTokenUsage;
   id: string;
   title: string;
@@ -431,6 +437,9 @@ export function record(
   next: TaskState = task.status,
   message?: string,
 ): Task {
+  if (task.acceptanceWait && (next !== "review" || action === "submit")) {
+    task = { ...task, acceptanceWait: undefined };
+  }
   if (task.acceptanceRepair) {
     if (action === "submit") task = { ...task, acceptanceRepair: { ...task.acceptanceRepair, phase: "checking" } };
     else if (["request-changes", "cancel", "accept"].includes(action)) task = { ...task, acceptanceRepair: undefined };

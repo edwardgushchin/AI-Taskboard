@@ -1,6 +1,8 @@
 import type { BrowserWindow } from "electron";
 import localization from "../desktop/localization.cjs";
 import { setTimeout as wait } from "node:timers/promises";
+import { createHash } from "node:crypto";
+import { closeSync, lstatSync, openSync, readlinkSync, readSync } from "node:fs";
 import { beginBoardOperation } from "../desktop/board-worklog.ts";
 import { dirname, join, relative } from "node:path";
 import { artifactFiles } from "./artifacts.ts";
@@ -56,6 +58,51 @@ function targetHead(repo: Repository, target: string): string {
 
 function reviewWorktreePath(item: Worktree | undefined): string | undefined {
   return item && !item.prunable && exists(item.path) ? usableWorktree(item) : undefined;
+}
+
+function workingFileFingerprint(path: string, buffer: Buffer): string | undefined {
+  const entry = lstatSync(path, { throwIfNoEntry: false });
+  if (entry?.isSymbolicLink()) {
+    return createHash("sha256").update(readlinkSync(path, { encoding: "buffer" })).digest("hex");
+  }
+  if (!entry?.isFile()) return undefined;
+  const file = openSync(path, "r");
+  try {
+    const hash = createHash("sha256");
+    for (let count = readSync(file, buffer); count > 0; count = readSync(file, buffer)) {
+      hash.update(buffer.subarray(0, count));
+    }
+    return hash.digest("hex");
+  } finally {
+    closeSync(file);
+  }
+}
+
+function localChangesFingerprint(path: string, head: string, status = gitStatus(path)): string {
+  // Porcelain includes staged object IDs and untracked names. Read unstaged
+  // tracked files in chunks to detect edits without generating a Git patch.
+  const hash = createHash("sha256").update(JSON.stringify([path, head, status]));
+  const local = inspectLocalChanges(path, head, status);
+  if (local?.modifiedTracked.length) {
+    const buffer = Buffer.allocUnsafe(256 * 1024);
+    for (const name of local.modifiedTracked) {
+      hash.update(JSON.stringify([name, workingFileFingerprint(join(path, name), buffer)]));
+    }
+  }
+  return hash.digest("hex");
+}
+
+export function acceptanceWaitUnchanged(repo: Repository | null, target: string, fingerprint: string): boolean {
+  try {
+    const repository = requireRepository(repo);
+    const head = targetHead(repository, target);
+    const path = reviewWorktreePath(findWorktree(repository, target));
+    return Boolean(path && localChangesFingerprint(path, head) === fingerprint);
+  } catch (error) {
+    // An unreadable checkout cannot establish that it is safe to retry.
+    if (error instanceof TaskboardError || (error as NodeJS.ErrnoException).syscall) return true;
+    throw error;
+  }
 }
 
 function submissionIsStale(item: Worktree | undefined, submitted: string): boolean {
@@ -685,6 +732,10 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
   const path = checkoutTarget(store, repo, task, target);
   requireNoGitOperation(path);
   const status = gitStatus(path);
+  const managerAcceptance = !intent && actor === "manager" && reviewMode === "reviewer" && input.commit === undefined;
+  const previousWait = managerAcceptance && task.acceptanceWait?.reviewModeVersion === taskReviewModeVersion(task, store.index.settings)
+    ? task.acceptanceWait : undefined;
+  if (previousWait && status && previousWait.fingerprint === localChangesFingerprint(path, head, status)) return task;
   const resumedSquash = Boolean(intent?.mode === "squash" && preparedSquash(path, head, intent.tree, status));
   const saveToken = input.saveLocalChanges;
   const local = resumedSquash ? undefined : inspectLocalChanges(path, head, status);
@@ -723,7 +774,20 @@ function integrateTask(store: BoardStore, task: Task, input: Record<string, unkn
     if (retry && !intent.restoreLocalChanges) {
       throw new TaskboardError("DIRTY_TARGET", "The target worktree changed during acceptance.", { path });
     }
-    checkPreserveChanges(store, path, head, intent.tree, changed, local);
+    const fingerprint = managerAcceptance ? localChangesFingerprint(path, head, status) : undefined;
+    try {
+      checkPreserveChanges(store, path, head, intent.tree, changed, local);
+    } catch (error) {
+      if (!fingerprint || !(error instanceof TaskboardError) || error.code !== "LOCAL_CHANGES_CONFLICT") throw error;
+      const details = error.details as { paths?: string[] } | undefined;
+      // This is a wait on the same approval and submission. Keep their revision.
+      return store.save({ ...task, acceptanceWait: {
+        fingerprint,
+        reviewModeVersion: taskReviewModeVersion(task, store.index.settings),
+        error: { code: "LOCAL_CHANGES_CONFLICT", message: error.message, details },
+        paths: details?.paths?.length ? details.paths : collidingPaths(path, changed, local.paths),
+      } });
+    }
     intent.restoreLocalChanges = true;
   }
   if (resolveCommit(path, "HEAD") !== head || git(path, ["symbolic-ref", "HEAD"]).trim() !== target) {

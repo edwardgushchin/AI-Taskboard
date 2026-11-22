@@ -339,7 +339,7 @@ function validReviewReport(value: unknown, criteriaCount: number): value is Revi
     report.evidence.length === criteriaCount && report.evidence.every(entry =>
       entry === null || (typeof entry === "string" && Boolean(entry.trim()))));
 }
-type TaskActionResult = TaskLink & Pick<Task, "git"> & {
+type TaskActionResult = TaskLink & Pick<Task, "git" | "acceptanceWait"> & {
   acceptedTreeMatchesSubmission?: boolean; localChangesWarning?: unknown;
 };
 type Inbox = ReturnType<typeof managerInbox>;
@@ -917,10 +917,13 @@ export function boardActions(project: string, attachments: { path: string; name:
     const { id: taskId, title, status, revision } = result.data;
     if (status !== "review" || reviewSnapshots.get(taskId)?.revision !== revision) reviewSnapshots.delete(taskId);
     const data = { id: taskId, title, status, revision };
-    changes.push({ ...data, action: action.slice("task_".length) });
+    if (action !== "task_accept" || status !== "review" || !result.data.acceptanceWait) {
+      changes.push({ ...data, action: action.slice("task_".length) });
+    }
     return { ok: true, data: action === "task_accept" ? {
       ...data, accepted: result.data.git?.accepted, acceptedTreeMatchesSubmission: result.data.acceptedTreeMatchesSubmission,
       localChangesWarning: result.data.localChangesWarning,
+      acceptanceWait: result.data.acceptanceWait ? { paths: result.data.acceptanceWait.paths } : undefined,
     } : data };
   };
   return run;
