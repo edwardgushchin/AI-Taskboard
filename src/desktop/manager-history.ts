@@ -446,6 +446,8 @@ export function goalActivityItems(items: BoardActivity[], fallbackAt?: string): 
 const goalCursorPrefix = "goal:";
 type GoalKey = [time: number, id: string, file: string, index: number];
 type GoalEvent = { key: GoalKey; file: string; turn: Turn; model?: string };
+type GoalPosition = { key: GoalKey; size: number };
+class GoalPageChanged extends Error {}
 
 function compareGoalKeys(left: GoalKey, right: GoalKey) {
   const [leftTime, leftId, leftFile, leftIndex] = left;
@@ -482,24 +484,6 @@ function parseGoalCursor(cursor: string | null): GoalKey | undefined {
   return [time, id, file, index];
 }
 
-function readGoalHistory(project: string, cursor: string | null) {
-  const before = parseGoalCursor(cursor);
-  const folder = join(project, ".tasks", "manager-chat");
-  if (!exists(folder)) {
-    return undefined;
-  }
-  directory(folder);
-  const events: GoalEvent[] = [];
-  for (const name of readdirSync(folder).filter(name => filePattern.test(name))) {
-    const run = readJson(join(folder, name)) as Run;
-    for (const event of goalEvents(name, run)) {
-      events.push(event);
-    }
-  }
-  events.sort((left, right) => compareGoalKeys(right.key, left.key));
-  return goalPage(events, before);
-}
-
 function goalEvents(name: string, run: Run): GoalEvent[] {
   if (!run.goalId) return [];
   const events: GoalEvent[] = [];
@@ -523,27 +507,35 @@ function goalEvents(name: string, run: Run): GoalEvent[] {
   return events;
 }
 
-function goalPage(events: GoalEvent[], before: GoalKey | undefined) {
+function goalPage(folder: string, positions: GoalPosition[], before: GoalKey | undefined) {
   let start = 0;
-  let end = events.length;
+  let end = positions.length;
   while (before && start < end) {
     const middle = Math.floor((start + end) / 2);
-    if (compareGoalKeys(events[middle]!.key, before) >= 0) start = middle + 1;
+    if (compareGoalKeys(positions[middle]!.key, before) >= 0) start = middle + 1;
     else end = middle;
   }
-  const selected: GoalEvent[] = [];
+  end = start;
   let remaining = 4 * 1024 * 1024;
-  for (let index = start; index < events.length && selected.length < 40; index++) {
-    const event = events[index]!;
-    const size = JSON.stringify(event.turn).length;
-    if (selected.length && size > remaining) {
-      break;
-    }
-    selected.push(event);
+  for (; end < positions.length && end - start < 40; end++) {
+    const { size } = positions[end]!;
+    if (end > start && size > remaining) break;
     remaining -= size;
   }
-  const nextCursor = start + selected.length < events.length
-    ? goalCursorPrefix + JSON.stringify(selected.at(-1)!.key) : null;
+  const nextCursor = end < positions.length ? goalCursorPrefix + JSON.stringify(positions[end - 1]!.key) : null;
+  const selected: GoalEvent[] = [];
+  const byFile = Map.groupBy(positions.slice(start, end).entries(), ([, position]) => position.key[2]);
+  for (const [file, page] of byFile) {
+    const events = goalEvents(file, readJson(join(folder, file)) as Run);
+    const first = events[0]?.key[3] ?? 0;
+    for (const [index, { key, size }] of page) {
+      const event = events[key[3] - first];
+      if (!event || compareGoalKeys(event.key, key) !== 0 || JSON.stringify(event.turn).length !== size) {
+        throw new GoalPageChanged("Goal history changed while reading a page.");
+      }
+      selected[index] = event;
+    }
+  }
   const turns: Turn[] = [];
   let previousFile: string | undefined;
   // Keep adjacent events from one run together so generated results retain
@@ -566,7 +558,7 @@ function goalPage(events: GoalEvent[], before: GoalKey | undefined) {
 export function readManagerHistory(project: string, cursor: string | null = null, view?: "chat" | "work") {
   if (view === "work") {
     directory(join(project, ".tasks"));
-    return readGoalHistory(project, cursor);
+    return new GoalHistoryIndex().readLocal(project, cursor, false).local;
   }
   const before = cursor === null ? undefined : cursor.slice(cursorPrefix.length);
   if (before !== undefined && (!isLocalManagerCursor(cursor) || !filePattern.test(before))) {
@@ -615,14 +607,14 @@ const providerCursorPrefix = "provider:";
 
 type GoalRun = {
   stamp: string;
-  events: GoalEvent[];
+  positions: GoalPosition[];
   available: boolean;
   coversProvider: boolean;
 };
-type GoalSnapshot = { runs: Map<string, GoalRun>; events: GoalEvent[]; available: boolean; cutoff: number };
+type GoalSnapshot = { runs: Map<string, GoalRun>; positions: GoalPosition[]; available: boolean; cutoff: number };
 
-// Confined to the history worker. Ordinary dialogue payloads are released after
-// classification. Metadata is checked on every request to notice external writes.
+// Cache event locations and page sizes. Read message and tool payloads only for
+// the requested page. File metadata is checked on every request for external writes.
 export class GoalHistoryIndex {
   private snapshots = new Map<string, GoalSnapshot>();
 
@@ -631,11 +623,25 @@ export class GoalHistoryIndex {
       // Provider pages need the cutoff before the remote read. Availability is
       // checked separately afterwards, as in the original history route.
       return {
+        local: undefined,
         providerCutoff: hasProvider ? managerProviderCutoff(project, "work") : undefined,
         goalLogAvailable: undefined,
       };
     }
+    return this.readLocal(project, cursor, hasProvider);
+  }
+
+  readLocal(project: string, cursor: string | null, hasProvider: boolean) {
     const before = parseGoalCursor(cursor);
+    try {
+      return this.readPage(project, before, hasProvider);
+    } catch (error) {
+      if (!(error instanceof GoalPageChanged) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return this.readPage(project, before, hasProvider);
+    }
+  }
+
+  private readPage(project: string, before: GoalKey | undefined, hasProvider: boolean) {
     const board = join(project, ".tasks");
     const folder = join(board, "manager-chat");
     directory(board);
@@ -654,7 +660,7 @@ export class GoalHistoryIndex {
         const run = readJson(path) as Run;
         entry = {
           stamp,
-          events: goalEvents(name, run),
+          positions: goalEvents(name, run).map(({ key, turn }) => ({ key, size: JSON.stringify(turn).length })),
           available: Boolean(run.goalId && (run.message || run.items.length)),
           coversProvider: run.lane !== "notice" && Boolean(run.message || run.items?.length),
         };
@@ -666,19 +672,19 @@ export class GoalHistoryIndex {
     let snapshot = previous;
     if (!snapshot || changed || runs.size !== snapshot.runs.size) {
       const entries = [...runs.values()];
-      const events = entries.flatMap(run => run.events);
-      events.sort((left, right) => compareGoalKeys(right.key, left.key));
+      const positions = entries.flatMap(run => run.positions);
+      positions.sort((left, right) => compareGoalKeys(right.key, left.key));
       let cutoff = Infinity;
       for (const [name, run] of runs) {
         if (run.coversProvider) cutoff = Math.min(cutoff, Number(name.slice(0, 13)));
       }
-      snapshot = { runs, events, available: entries.some(run => run.available), cutoff };
+      snapshot = { runs, positions, available: entries.some(run => run.available), cutoff };
     }
     this.snapshots.delete(project);
     this.snapshots.set(project, snapshot);
     if (this.snapshots.size > 4) this.snapshots.delete(this.snapshots.keys().next().value!);
 
-    const local = present ? goalPage(snapshot.events, before) : undefined;
+    const local = present ? goalPage(folder, snapshot.positions, before) : undefined;
     const goalLogAvailable = snapshot.available;
     if (local && (local.turns.length || local.nextCursor || !hasProvider)) {
       return {

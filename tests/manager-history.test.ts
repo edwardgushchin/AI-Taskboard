@@ -133,6 +133,34 @@ test("background goal pages preserve cursors and retry after an external replace
   assert.equal((await backgroundGoalHistory(project, null, false)).goalLogAvailable, false);
 });
 
+test("goal history releases page payloads while keeping two project indexes warm", t => {
+  const projects = [fixture(t), fixture(t)];
+  const at = Date.now();
+  const text = "Saved output".repeat(50_000);
+  for (const project of projects) {
+    saveManagerHistory(project, at, randomUUID(), { goalId: randomUUID(), items: [
+      { id: "output", type: "commandExecution", title: "Fixture command", text, status: "completed" },
+    ] });
+  }
+  const source = new URL("../src/desktop/manager-history.ts", import.meta.url).href;
+  execFileSync(process.execPath, ["--expose-gc", "--input-type=module", "--eval", `
+    import assert from "node:assert/strict";
+    import { setImmediate } from "node:timers/promises";
+    import { GoalHistoryIndex } from ${JSON.stringify(source)};
+
+    const projects = process.argv.slice(1);
+    const index = new GoalHistoryIndex();
+    const output = project => index.read(project, null, false).local.turns[0].items[0];
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const refs = projects.map(project => new WeakRef(output(project)));
+      await setImmediate();
+      global.gc();
+      assert.ok(refs.every(ref => ref.deref() === undefined), "the cached indexes still hold page payloads");
+      assert.ok(projects.every(project => output(project).text.length === ${text.length}));
+    }
+  `, ...projects], { windowsHide: true });
+});
+
 test("provider goal history keeps the legacy cutoff and crosses empty pages", async t => {
   const project = fixture(t);
   const at = Date.now();
