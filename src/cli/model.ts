@@ -107,6 +107,14 @@ export interface RunActivity {
 }
 
 export interface TaskEvent {
+  draftDependency?: {
+    question: number;
+    ownerMessage: number;
+    existingId?: string;
+    draft?: Record<string, unknown>;
+  };
+  draftDependencySource?: { id: string; question: number };
+  draftDependencyId?: string;
   expertMessage?: { from: string; to: string; replyTo?: number };
   expertSkill?: { expertId: string; skillId: string; name: string; source: "plan" | "tool" };
   expertSkillProof?: { phase: "work" | "review"; key?: string; targetHead?: string | null;

@@ -305,7 +305,7 @@ export function replyToTask(
         "On automatic review with awaitingAnswer true in the supplied task, reconcile the outstanding questions with the saved brief and prior answers. Keep waiting for any material gap that remains. If the last gap is resolved and the initial-review schema applies, return an empty questions string. In a dialogue reply, explicitly close the resolved question and set awaitingAnswer to false when no material question remains.",
       ] : []),
       ...(!manual ? [
-        "For a draft, use team_message with to manager and kind question for a material gap the manager can resolve from board context. Ask the owner directly in the draft dialogue when only the owner can decide or provide the information. Do not ask the owner to relay team mail.",
+        "For a draft, use team_message with to manager and kind question for a material gap the manager can resolve from board context. If the owner has chosen a specific separate prerequisite, ask the manager to find or create it and save the required dependency, citing the owner's decision. Wait for the saved dependency ID before confirming the draft. Ask the owner directly in the draft dialogue when only the owner can decide or provide the information. Do not ask the owner to relay team mail.",
         "If you send a manager question, briefly state the concrete gap you are waiting on. Include it in questions in the initial review, or set awaitingAnswer to true in a normal reply. Do not resend a question already waiting for the manager.",
       ] : []),
       "For a normal reply, return text and awaitingAnswer. Set awaitingAnswer to true when a concrete clarification from the owner or manager is still needed.",

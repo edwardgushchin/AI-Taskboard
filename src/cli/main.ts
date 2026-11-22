@@ -33,7 +33,7 @@ import { managerUsage } from "./manager-usage.ts";
 import { dependencyStatus, unfinishedDependencies, validateDependencies } from "./dependencies.ts";
 import { checkoutTaskWorktree, cleanTaskWorktree, finishTaskStart, hasPending, inspectCleanup, prepareTaskStart, taskWithCurrentWorktree } from "./worktree.ts";
 import { artifactFiles, openReviewArtifact, readReviewArtifact } from "./artifacts.ts";
-import { acknowledgeTaskMessages, currentReviewApproval, managerInbox, sendTaskMessage, taskMessages } from "./task-messages.ts";
+import { acknowledgeTaskMessages, currentReviewApproval, draftManagerQuestion, draftManagerReply, draftOwnerMessage, managerInbox, pendingDraftDependency, sendTaskMessage, taskMessages } from "./task-messages.ts";
 import { taskActivity } from "./task-activity.ts";
 import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
@@ -216,6 +216,89 @@ function snapshotBoard(store: BoardStore, compact = false, cache = new Map<strin
     tasks: board.tasks.map(task => task.dependencies?.length
       ? { ...task, unfinishedDependencies: unfinishedDependencies(task, id => statuses.get(id)) } : task),
   };
+}
+
+function draftDependency(store: BoardStore, id: string, input: Record<string, unknown>) {
+  let source = store.card(id);
+  const question = number(input.replyTo, "replyTo");
+  const request = draftManagerQuestion(source, question);
+  if (!request || request.from !== id) {
+    throw new TaskboardError("INVALID_INPUT", "Use a question sent by this draft to its manager.");
+  }
+  const answered = draftManagerReply(source, question, request.from);
+  if (answered) {
+    const dependencyId = source.history[answered - 1].draftDependencyId;
+    if (dependencyId) return { dependencyId, sequence: answered };
+    throw new TaskboardError("INVALID_INPUT", "This draft question already has a reply.");
+  }
+
+  const prepareDraft = (draft: Record<string, unknown>) => {
+    const description = text(draft.description, "description", true);
+    const criteria = strings(draft.criteria, "criteria");
+    const tags = strings(draft.tags, "tags");
+    if (!criteria.length || !tags.length) {
+      throw new TaskboardError("INVALID_INPUT", "Supply acceptance criteria and topic tags for the dependency draft.");
+    }
+    const task = createTask(store.allocateId(), { title: draft.title, description, criteria, tags, actor: "manager" });
+    task.draftDiscussion = { phase: "queued" };
+    planNewTask(store, task, draft.expertTeam);
+    task.history[0].draftDependencySource = { id, question };
+    return task;
+  };
+  const target = (targetId: string) => {
+    const card = readTask(store, targetId);
+    if (card.status === "cancelled") {
+      throw new TaskboardError("INVALID_INPUT", "Choose a dependency that has not been cancelled.");
+    }
+    validateDependencies(store, { ...source, dependencies: [...(source.dependencies ?? []), card.id] });
+    return card;
+  };
+
+  let saved = pendingDraftDependency(source, question);
+  if (!saved) {
+    const { ownerSequence, ownerText } = input;
+    const ownerMessage = draftOwnerMessage(source);
+    if (!ownerMessage || ownerSequence !== ownerMessage || ownerMessage >= question ||
+        typeof ownerText !== "string" || !ownerText.trim() || source.history[ownerMessage - 1].text !== ownerText) {
+      throw new TaskboardError("USER_DIRECTION_REQUIRED", "Cite the current saved owner decision that precedes this draft question.");
+    }
+    requireRevision(source, input.revision, true);
+    if (input.authorizeOnly === true) return { authorized: true };
+    const existingId = input.existingId === undefined ? undefined : text(input.existingId, "existingId", true);
+    const draft = input.draft === undefined ? undefined : object(input.draft);
+    if (Boolean(existingId) === Boolean(draft)) {
+      throw new TaskboardError("INVALID_INPUT", "Supply either an existing dependency ID or one new draft.");
+    }
+    if (existingId) target(existingId);
+    if (draft) prepareDraft(draft);
+    saved = { question, ownerMessage, existingId, draft };
+    source = record({ ...source, draftConfirmed: false }, "draft-dependency-request", "manager");
+    source.history.at(-1)!.draftDependency = saved;
+    store.save(source);
+  } else if (input.authorizeOnly === true) {
+    return { authorized: true };
+  }
+
+  // A crash after writing the new card can leave its index entry missing.
+  let dependency = saved.existingId ? target(saved.existingId) : store.storedCards().find(card =>
+    card.history[0]?.draftDependencySource?.id === id && card.history[0].draftDependencySource.question === question);
+  if (dependency && !store.index.tasks[dependency.id] && !store.index.archive[dependency.id]) {
+    dependency = store.create(dependency);
+  }
+  if (!dependency) {
+    dependency = createWithAttachments(store, assignTags(store, prepareDraft(saved.draft!)), undefined);
+  }
+  const dependencies = source.dependencies ?? [];
+  if (!dependencies.includes(dependency.id)) {
+    source = invalidateDraftDiscussion(changeTask(source, "update", {
+      revision: source.revision, actor: "manager", dependencies: [...dependencies, dependency.id],
+    }));
+    validateDependencies(store, source);
+  }
+  const reply = sendTeamMessage(store, id, "manager", {
+    to: request.from, replyTo: question, kind: "decision", text: `Required dependency saved: ${dependency.id} — ${dependency.title}.`,
+  }, { parent: source, id: dependency.id });
+  return { dependencyId: dependency.id, sequence: reply.sequence };
 }
 
 function assignTags(store: BoardStore, task: Task): Task {
@@ -501,6 +584,7 @@ function run(
     return createWithAttachments(store, task.tags.length ? assignTags(store, task) : task, input.attachmentSources);
   }
   if (command === "manager-inbox") return managerInbox(store.snapshot().tasks);
+  if (command === "draft-dependency") return draftDependency(store, text(id, "task ID", true), input);
   if (command === "tool-request" || command === "tool-grant" || command === "tool-revoke") {
     if (!id) throw new TaskboardError("INVALID_INPUT", "Supply a task ID.");
     const task = store.card(id);
@@ -859,7 +943,12 @@ function run(
     requireReleaseTurn(store, { ...task, mergeRepair: isMergeRepair(task) });
   }
   if (command === "progress" && task.schedule && task.status === "in_progress") requireExpertResults(task, "work");
-  if (command === "approve" && task.status === "draft") requireApprovalPlan(task, store.index.settings);
+  if (command === "approve" && task.status === "draft") {
+    if (taskMessages(task, "manager").some(message => message.draftDependencyPending)) {
+      throw new TaskboardError("PENDING_OPERATION", "Finish saving the draft dependency before approval.");
+    }
+    requireApprovalPlan(task, store.index.settings);
+  }
   let updated = changeTask(task, command, discussionReturn ? { ...input, actor: "agent" } : input);
   if (command === "approve" && !hasDraftConfirmation(task)) {
     throw new TaskboardError("DRAFT_DISCUSSION_REQUIRED", "The agent must confirm the current draft before approval.");

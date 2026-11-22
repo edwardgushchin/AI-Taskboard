@@ -55,6 +55,17 @@ export function draftManagerReply(task: Task, sequence: number, to: string) {
     event.expertMessage.to === to && event.expertMessage.replyTo === sequence && event.messageKind !== "question") + 1;
 }
 
+export function pendingDraftDependency(task: Task, question: number) {
+  const saved = task.history.findLast(event => event.draftDependency?.question === question);
+  return saved?.draftDependency?.ownerMessage === draftOwnerMessage(task) ? saved.draftDependency : undefined;
+}
+
+export function draftOwnerMessage(task: Task) {
+  const owner = task.history.findLastIndex(event => event.actor === "user" && event.action === "chat" && Boolean(event.chat));
+  const transition = task.history.findLastIndex(event => event.to !== undefined);
+  return owner > transition ? owner + 1 : 0;
+}
+
 export function taskMessages(task: Task, recipient: "manager" | "agent") {
   const lifecycle = task.history.findLastIndex(event => event.to !== undefined || executorOutcome(event));
   const approval = recipient === "manager" ? currentReviewApproval(task) : undefined;
@@ -74,7 +85,8 @@ export function taskMessages(task: Task, recipient: "manager" | "agent") {
     return [{
       id: task.id, title: task.title, sequence: index + 1, at: event.at, status: task.status,
       ...(event.expertMessage ? { expertMessage: event.expertMessage } : {}),
-      ...(question ? { draftQuestion: true as const } : {}),
+      ...(question ? { draftQuestion: true as const,
+        ...(pendingDraftDependency(task, index + 1) ? { draftDependencyPending: true as const } : {}) } : {}),
       kind: message ? event.messageKind ?? "update" : event.action, replyTo: event.replyToMessage,
       text: accepted ? task.result?.summary : event.text, ...(outcome && event.action === "submit" ? { result: task.result } : {}),
       ...(accepted ? { actor: "reviewer" as const, target: task.git?.target, commit: task.git?.accepted } : {}),
