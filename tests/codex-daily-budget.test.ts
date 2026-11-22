@@ -102,3 +102,50 @@ test("restart replays a budget report after a temporary storage failure", t => {
   restored.restore();
   assert.equal(codexDailyBudget(project, 200, now).spent, 100);
 });
+
+test("recovered turns retain the confirmed day and partial usage does not close today's budget", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-recovered-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const midnight = new Date(2026, 10, 24).getTime();
+  const ended = midnight - 1000;
+  const original = new CodexTokenUsage();
+  original.track("thread", "model", true);
+  original.begin("thread", "turn");
+  const counters = { totalTokens: 71 };
+  original.observe({
+    method: "thread/tokenUsage/updated",
+    params: { threadId: "thread", turnId: "turn", tokenUsage: { total: counters, last: counters } },
+  });
+  const disconnected = original.finish(true)!;
+  assert.equal(disconnected.records[0].totalTokens, 71);
+  assert.equal(disconnected.records[0].dailyTokens, undefined);
+  assert.equal(recordCodexDailyUsage(project, "executor", disconnected), false);
+
+  const recovered = new CodexTokenUsage();
+  recovered.track("thread", "model", true);
+  recovered.recover("thread", { id: "turn", status: "completed", completedAt: ended / 1000 });
+  const final = recovered.finish()!;
+  assert.equal(final.records[0].completedAt, ended);
+  assert.equal(final.records[0].dailyTokens, null);
+  assert.equal(recordCodexDailyUsage(project, "executor", final), true);
+  assert.equal(codexDailyBudget(project, 100, ended).reason, "unknown");
+  assert.equal(codexDailyBudget(project, 100, midnight).reason, undefined);
+  assert.equal(codexDailyBudget(project, 100, midnight).remaining, 100);
+});
+
+test("a recovered active turn remains unknown even if later notifications contain tokens", () => {
+  const collector = new CodexTokenUsage();
+  collector.track("thread", "model", true);
+  collector.recover("thread", { id: "turn", status: "inProgress" });
+  const counts = { totalTokens: 9 };
+  collector.observe({
+    method: "thread/tokenUsage/updated",
+    params: { threadId: "thread", turnId: "turn", tokenUsage: { total: counts, last: counts } },
+  });
+  const ended = Date.now();
+  const final = collector.completeTurn("thread", { id: "turn", status: "completed" }, ended)!;
+  assert.equal(final.records[0].completedAt, ended);
+  assert.equal(final.records[0].totalTokens, 9);
+  assert.equal(final.records[0].dailyTokens, null);
+});

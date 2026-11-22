@@ -1677,13 +1677,9 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const iterativeId = board.settings.autoMode && currentActiveGoal(project);
       const state = iterativeId ? readIterativeGoal(project, iterativeId) : undefined;
       const iterative = iterativeId && state && iterativeEnabled(board.settings, state);
-      const goalThread = iterativeId ? readBoardThread(boardThreadPath(project)) : undefined;
-      if (tab && !controls?.paused && !iterative && goalThread?.goal?.status === "active" && goalThread.budgetDeferred &&
-          !boardWorkRequests.has(key) && !boardGoalResumes.has(key) && !boardGoalClears.has(key)) {
-        void resumeBoardGoal(tab.window.webContents, board, goalThread.goal.objective).catch(error => failed(String(error)));
-      }
       const goalQuestions = new Set<string>();
       if (iterative) {
+        const goalThread = readBoardThread(boardThreadPath(project));
         const goalTasks = new Set(board.tasks.filter(task => task.managerGoalId
           ? task.managerGoalId === iterativeId
           : task.goalThreadId && task.goalThreadId === goalThread?.id).map(task => task.id));
@@ -2442,7 +2438,7 @@ function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
         }
       }
       writeJson(path, { ...thread, goal: snapshot, ownerObjective: source, ownerIteration: authority,
-        dialogueEditFingerprint: fingerprint });
+        dialogueEditFingerprint: fingerprint, budgetDeferred: snapshot?.status === "active" ? thread.budgetDeferred : undefined });
     }
   } catch (error) {
     if (required) throw error;
@@ -2621,7 +2617,7 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   finally { boardGoalClears.delete(key); }
 });
 
-async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objective: string) {
+async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objective: string, deferred = false) {
   const { project } = board;
   const key = projectIdentity(project);
   if (boardGoalResumes.has(key) || boardGoalClears.has(key) || boardWorkRequests.get(key)?.goalRunning) {
@@ -2630,6 +2626,9 @@ async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objec
   try {
     const binding = boardThreadPath(project);
     const saved = readBoardThread(binding);
+    if (deferred && (!saved?.budgetDeferred || saved.goal?.status !== "active")) {
+      return { ok: true, data: null } as const;
+    }
     const legacyGoal = saved?.goal === undefined && saved?.history !== "local";
     if (!saved || (!legacyGoal && (saved.goal?.objective !== objective || saved.goal.status === "complete"))) {
       return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
@@ -2676,6 +2675,20 @@ async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objec
   } catch (error) {
     return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
   }
+}
+
+function resumeDeferredBoardGoal(watch: BoardWatch) {
+  const { board } = watch;
+  const { project, settings } = board;
+  if (applicationUpdates.installing || quotaWait || closingProjects.has(project) || isManual(settings) ||
+      settings.autoMode && settings.autoQueue?.paused) return;
+  const key = projectIdentity(project);
+  if (boardWorkRequests.has(key) || boardGoalResumes.has(key) || boardGoalClears.has(key)) return;
+  const saved = readBoardThread(boardThreadPath(project));
+  if (!saved?.budgetDeferred || saved.goal?.status !== "active" || boardBudgetFailure(project, settings)) return;
+  if (settings.autoMode && iterativeEnabled(settings, readIterativeGoal(project, saved.goalId ?? saved.id))) return;
+  const tab = [...watch.tabs].find(tab => !tab.window.isDestroyed());
+  if (tab) void resumeBoardGoal(tab.window.webContents, board, saved.goal.objective, true);
 }
 
 async function changeBoardGoal(project: string, key: string, action: BoardGoalAction,
@@ -2924,6 +2937,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       const current = readBoardThread(binding);
       if (!resume || resume.cancelled || binding !== resume.binding || !current || current.id !== resume.saved.id ||
           current.goalId !== resume.saved.goalId || current.goal?.objective !== resume.saved.goal?.objective ||
+          resume.saved.budgetDeferred && !current.budgetDeferred ||
           current.goal?.status !== resume.saved.goal?.status) {
         writer();
         return cliFailure("INVALID_INPUT", t("ui.there_is_no_saved_goal_67c98597"));
@@ -3839,7 +3853,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         },
         onGoalControl: control => { if (goal) running.goal = control; },
         onTurnEnded: () => {
-          if (goal && !iteration) {
+          if (goal) {
             const saved = readBoardThread(binding);
             if (saved?.budgetDeferred) {
               delete saved.budgetDeferred;
@@ -5953,6 +5967,7 @@ else {
             watch.lastBudget = budget;
             for (const tab of watch.tabs) send(tab);
           }
+          resumeDeferredBoardGoal(watch);
           const next = watch.shared = {
             runtime: JSON.stringify(entries, (key, value) => key === "live" ? undefined : value),
             context: context?.id,

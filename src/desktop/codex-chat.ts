@@ -987,6 +987,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
             throw Object.assign(new Error("Codex has not confirmed the reviewer turn's completion."),
               { code: "CODEX_START_UNCONFIRMED" });
           }
+          tokens.save(tokens.recover(thread.id, saved), onTokenUsage);
           if (isRoutingTimeout(saved)) throw new CodexRoutingTimeout(saved.error!.message!);
           if (saved.status !== "completed") throw new Error(saved.error?.message ?? "Codex did not complete the review.");
           turn = saved;

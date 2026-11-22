@@ -12,6 +12,8 @@ type ThreadUsage = {
   totalUncertain?: boolean;
 };
 
+type TurnUsageStatus = { id: string; status?: string; completedAt?: number | null };
+
 function counts(value: unknown): TokenCounts {
   const data = value as Partial<TokenCounts> | undefined;
   const result = emptyTokenCounts();
@@ -103,6 +105,27 @@ export class CodexTokenUsage {
     return this.snapshot();
   }
 
+  recover(threadId: string, turn: TurnUsageStatus): TokenUsageReport | undefined {
+    this.begin(threadId, turn.id);
+    const thread = this.threads.get(threadId);
+    if (!thread || thread.turnId !== turn.id) return;
+    // History confirms completion, but does not reconstruct the usage stream.
+    thread.totalUncertain = true;
+    thread.incomplete = true;
+    return this.completeTurn(threadId, turn) ?? this.snapshot();
+  }
+
+  completeTurn(threadId: string, turn: TurnUsageStatus, observedAt?: number): TokenUsageReport | undefined {
+    const thread = this.threads.get(threadId);
+    if (!thread || thread.turnId !== turn.id || turn.status === "inProgress") return;
+    thread.finished = true;
+    const ended = turn.completedAt;
+    thread.completedAt ??= typeof ended === "number" && ended > 0 && ended < 8.64e12
+      ? Math.trunc(ended * 1000) : observedAt;
+    if (thread.completedAt !== undefined) this.completeRecords(threadId, thread, thread.completedAt);
+    return this.snapshot();
+  }
+
   private entry(threadId: string, thread: ThreadUsage): TokenUsageRecord {
     const value = { ...emptyTokenCounts(), threadId, turnId: thread.turnId!, model: thread.model, incomplete: true };
     const key = usageKey(value);
@@ -120,7 +143,7 @@ export class CodexTokenUsage {
 
   observe(message: { method?: string; params?: unknown }): TokenUsageReport | undefined {
     const data = message.params as {
-      threadId?: string; turnId?: string; turn?: { id?: string; status?: string; completedAt?: number }; toModel?: string;
+      threadId?: string; turnId?: string; turn?: TurnUsageStatus; toModel?: string;
       thread?: { id: string; parentThreadId?: string; model?: string };
       threadSettings?: { model?: string };
       item?: { type?: string; kind?: string; tool?: string; agentThreadId?: string; model?: string; receiverThreadIds?: string[] };
@@ -143,13 +166,6 @@ export class CodexTokenUsage {
     }
     if (discovered) return this.snapshot();
     if (message.method === "turn/started" && data.turn?.id) return this.begin(threadId, data.turn.id);
-    if (message.method === "turn/completed" && data.turn?.id && data.turn.id === thread.turnId) {
-      thread.finished = true;
-      const ended = data.turn.completedAt;
-      thread.completedAt ??= typeof ended === "number" && ended > 0 && ended < 8.64e12
-        ? Math.trunc(ended * 1000) : Date.now();
-      this.completeRecords(threadId, thread, thread.completedAt);
-    }
     if (message.method === "model/rerouted" && data.turnId && data.turnId !== thread.turnId) return;
     const model = message.method === "model/rerouted" ? data.toModel :
       message.method === "thread/settings/updated" ? data.threadSettings?.model : undefined;
@@ -163,12 +179,12 @@ export class CodexTokenUsage {
       return this.snapshot();
     }
     if ((message.method === "error" || message.method === "turn/completed" &&
-        ["failed", "interrupted"].includes(data.turn?.status ?? "")) && thread.turnId) {
+        data.turn?.id === thread.turnId && ["failed", "interrupted"].includes(data.turn?.status ?? "")) && thread.turnId) {
       thread.incomplete = true;
       this.entry(threadId, thread).incomplete = true;
-      return this.snapshot();
+      if (message.method === "error") return this.snapshot();
     }
-    if (message.method === "turn/completed" && thread.finished) return this.snapshot();
+    if (message.method === "turn/completed" && data.turn?.id) return this.completeTurn(threadId, data.turn, Date.now());
     if (message.method !== "thread/tokenUsage/updated" || !data.turnId) return;
     // Child turns can start before their discovery event reaches the parent.
     if (!thread.turnId && threadId !== this.root) this.begin(threadId, data.turnId);
@@ -198,15 +214,19 @@ export class CodexTokenUsage {
   }
 
   finish(incomplete = false): TokenUsageReport | undefined {
-    const rootTurn = this.root && this.threads.get(this.root)?.turnId;
-    if (!rootTurn) return;
+    const root = this.root ? this.threads.get(this.root) : undefined;
+    if (!root?.turnId) return;
     for (const [threadId, thread] of this.threads) {
       if (!thread.turnId) {
-        thread.turnId = "unreported:" + rootTurn;
+        thread.turnId = "unreported:" + root.turnId;
       }
       const entry = this.entry(threadId, thread);
       entry.incomplete ||= incomplete && !thread.finished;
-      this.completeRecords(threadId, thread, thread.completedAt ?? Date.now());
+      if (!thread.finished && threadId !== this.root && root.completedAt !== undefined) {
+        // A child with no terminal notification leaves the parent run's spend uncertain.
+        thread.totalUncertain = true;
+        this.completeRecords(threadId, thread, root.completedAt);
+      }
     }
     return this.snapshot();
   }
