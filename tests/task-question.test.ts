@@ -72,7 +72,7 @@ test("draft manager replies are linked, persisted once, and survive a concurrent
   assert.equal(ready.draftDiscussion, undefined);
 });
 
-function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false) {
+function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false, prompt = "{}") {
   let options: any;
   let tools: { name: string }[] = [];
   const replyToTask = runInNewContext(stripTypeScriptTypes(source.slice(start, end).replace("export ", "")) + "\nreplyToTask", {
@@ -95,10 +95,47 @@ function providerResult(result: object, mode?: "initial" | "handoff", onActivity
       return result;
     },
   });
-  const pending = replyToTask("profile", "project", {}, "{}", [], () => {}, () => {}, "scratch", 1024,
+  const pending = replyToTask("profile", "project", {}, prompt, [], () => {}, () => {}, "scratch", 1024,
     undefined, undefined, undefined, "T-0001", onActivity, mode, false, false, draft);
   return { pending, options: () => options, tools: () => tools.map(tool => tool.name).filter(Boolean) };
 }
+
+test("T-0140 question reconciliation uses the same rules in auto review and draft dialogue", async () => {
+  const connectedRule = "При отказе обновления подключённого устройства сохрани прежнюю раскладку.";
+  const deferredRule = "При отказе первого применения отложенной раскладки удали её из настроек.";
+  const question = "При отказе первого применения отложенной раскладки удалить её или повторить попытку?";
+  for (const mode of ["initial", undefined] as const) {
+    for (const answerSource of ["description", "criteria", "subtasks", "history", undefined] as const) {
+      const gap = answerSource === undefined;
+      const task = {
+        id: "T-0140",
+        status: "draft",
+        description: answerSource === "description" ? connectedRule + " " + deferredRule : connectedRule,
+        criteria: answerSource === "criteria" ? [deferredRule] : [],
+        subtasks: answerSource === "subtasks" ? [{ title: deferredRule, done: false }] : [],
+        awaitingAnswer: mode === undefined,
+      };
+      const history = [
+        ...(mode === undefined ? [{ actor: "agent", action: "chat", text: question }] : []),
+        ...(answerSource === "history" ? [{ actor: "user", action: "chat", text: deferredRule }] : []),
+      ];
+      const latestUserMessage = mode === undefined ? { text: "Это уже в задаче." } : undefined;
+      const prompt = JSON.stringify({ task, history, latestUserMessage });
+      const questionText = gap ? connectedRule + " " + question : "";
+      const output = mode === "initial"
+        ? { questions: questionText }
+        : { text: questionText || "Уточнение снято. Задача готова к утверждению.", awaitingAnswer: gap, confirmsDraft: !gap };
+      const fixture = providerResult({ text: JSON.stringify(output) }, mode, undefined, true, prompt);
+
+      const result = await fixture.pending;
+      assert.equal(result.awaitingAnswer, gap);
+      assert.equal(result.text.includes(question), gap);
+      assert.match(fixture.options().instructions, /current description, acceptance criteria, subtasks, and relevant answers/);
+      assert.match(fixture.options().instructions, /reread the current brief/);
+      assert.match(fixture.options().instructions, /only resolves another when the brief makes it applicable/);
+    }
+  }
+});
 
 test("both discussion modes return explicit question state without parsing punctuation", async () => {
   for (const questions of ["Which format and destination?", ""]) {
