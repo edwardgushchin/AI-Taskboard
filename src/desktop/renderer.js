@@ -804,6 +804,7 @@ function openSheet(kind, title) {
   byId("task-side").replaceChildren();
   if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
   else byId("sheet-title").textContent = title;
+  byId("task-retry-load")?.remove();
   body.replaceChildren();
   byId("sheet-notice").hidden = true;
   if (!sheet.open) {
@@ -4486,7 +4487,19 @@ async function showTask(id, dialogue = false) {
   if (!result.ok) {
     notice(boardError(result.error));
     if (loading) {
-      loading.replaceWith(button(() => t("ui.retry_loading_d44dbc69"), () => showTask(id)));
+      loading.replaceWith(button(() => t("ui.retry_loading_d44dbc69"), () => showTask(id, dialogue)));
+    } else if (!byId("task-retry-load")) {
+      const retry = button(() => t("ui.retry_loading_d44dbc69"), async () => {
+        if (retry.disabled) return;
+        retry.disabled = true;
+        try {
+          await showTask(id, dialogue);
+        } finally {
+          retry.disabled = false;
+        }
+      }, "quiet");
+      retry.id = "task-retry-load";
+      byId("close-sheet").before(retry);
     }
     return;
   }
@@ -6580,6 +6593,7 @@ sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
   byId("task-side").replaceChildren();
+  byId("task-retry-load")?.remove();
   taskSheetRequest++;
   sheetKind = "";
   taskInSheet = undefined;

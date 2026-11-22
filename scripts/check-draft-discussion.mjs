@@ -234,8 +234,12 @@ try {
         const result = await handler(event, command, id, input);
         const gate = historyGates.get(id);
         if (command === "show" && gate && result.ok && result.data.revision > gate.revision) {
+          if (gate.failure) {
+            gate.failures++;
+            return { ok: false, error: { code: "BOARD_BUSY", message: gate.failure } };
+          }
           gate.waiting = true;
-          await gate.release.promise;
+          await gate.release?.promise;
         }
         return result;
       });
@@ -418,6 +422,76 @@ try {
     assert.equal(await active(), "");
     assert.equal(await evaluate("document.querySelector('.task-chat')?.discussionHandoff"), undefined);
     check("Automatic draft error appears when the saved failed phase is delivered and releases the active turn");
+
+    if (!handoffBaseline) {
+      const retryButton = "#task-retry-load";
+      const failure = "Fixture history unavailable";
+      const notice = () => evaluate("document.querySelector('#sheet-notice:not([hidden])')?.textContent ?? ''");
+      const retryVisible = () => evaluate(`Boolean(document.querySelector('${retryButton}:enabled'))`);
+      const noRetry = () => evaluate(`!document.querySelector('${retryButton}')`);
+      const clickRetry = () => evaluate(`document.querySelector('${retryButton}').click()`);
+      const failHistory = async (text, onFailure) => {
+        await display(draft.id);
+        await send("Проверить чтение: " + text);
+        const turn = await waitTurn(draft.id);
+        await until(thinking, "thinking before the saved reply");
+        const gate = { revision: show(draft.id).revision, failure, failures: 0 };
+        historyGates.set(draft.id, gate);
+        try {
+          turn.finish.resolve({ text: JSON.stringify({ text, awaitingAnswer: true, confirmsDraft: false }) });
+          await released(draft.id);
+          assert.equal(messages(show(draft.id)).at(-1).text, text);
+          await until(() => gate.failures > 0, "saved history fails to load");
+          await until(retryVisible, "visible card retry after failing to load saved history");
+          assert.ok(await notice(), "load error notice");
+          assert.equal(await count(text), 0, "saved reply is still absent");
+          assert.equal(await thinking(), true, "thinking stays until the saved reply is visible");
+          await onFailure(gate);
+        } finally {
+          historyGates.delete(draft.id);
+        }
+      };
+      const recovered = "История восстановлена после повтора";
+      await failHistory(recovered, async gate => {
+        const failures = gate.failures;
+        await clickRetry();
+        await until(async () => gate.failures > failures && await retryVisible(), "retry available after another failed attempt");
+        gate.failure = undefined;
+        await clickRetry();
+        await until(async () => await count(recovered) === 1 && !(await active()) && await noRetry(),
+          "retry renders the saved reply and clears the active turn and retry button");
+        assert.equal(await notice(), "");
+        assert.equal(await evaluate("document.querySelector('.task-chat')?.discussionHandoff"), undefined);
+        await reopen(draft.id);
+        assert.equal(await count(recovered), 1);
+        assert.ok(await noRetry());
+      });
+      check("A saved reply survives a failed refresh and a failed retry. The next retry shows one reply and clears the error, the button and the active turn.");
+
+      const switched = "Сохранённый ответ после смены карточки";
+      await failHistory(switched, async () => {
+        await display(other.id);
+        assert.ok(await noRetry(), "retry must not carry over to another card");
+        assert.equal(await notice(), "");
+        assert.equal(await active(), "");
+      });
+      await display(draft.id);
+      assert.equal(await count(switched), 1);
+      assert.ok(await noRetry());
+      assert.equal(await active(), "");
+
+      const closed = "Сохранённый ответ после закрытия карточки";
+      await failHistory(closed, async () => {
+        await evaluate("document.querySelector('#close-sheet').click()");
+        await until(noRetry, "retry must not survive closing the affected card");
+      });
+      await display(draft.id);
+      assert.equal(await count(closed), 1);
+      assert.ok(await noRetry());
+      assert.equal(await active(), "");
+      check("Switching or closing a card drops the refresh retry. Reopening the affected card shows one saved reply.");
+    }
+
     const testedFiles = ["src/desktop/main.ts", "src/desktop/renderer.js", "src/desktop/chat.js",
       "src/desktop/codex-chat.ts", "docs/explanation/architecture.md", "scripts/check-draft-discussion.mjs"];
     const base = execFileSync("git", ["rev-parse", "HEAD"], {
