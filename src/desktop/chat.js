@@ -1435,8 +1435,12 @@ function taskChat(task, renderStageWork) {
 
   input.addEventListener("input", () => { draft.text = input.value; sync(); });
   input.addEventListener("keydown", event => {
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
+    if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey ||
+        event.altKey || event.isComposing || event.keyCode === 229) {
+      return;
+    }
+    event.preventDefault();
+    if (!event.repeat && hasDraft()) {
       composer.requestSubmit();
     }
   });
