@@ -2180,6 +2180,15 @@ test("the exact reset-list clarification updates the brief in draft, work and re
 
       const initial = show();
       const message = send(clarification);
+      const review = () => cli(root, ["review", id], { compact: true, includeReviewerSettings: true });
+      if (phase === "review") {
+        const { revision, reviewMode, reviewModeVersion } = review();
+        cli(root, ["review-approve", id], {
+          revision, targetHead: null, reviewMode, reviewModeVersion,
+          summary: "Счётчик показан.", evidence: [baseline],
+        });
+        assert.equal(review().awaitingHumanAcceptance, true);
+      }
       const apply = (card: Task, source: string, description = clarification, criteria = [baseline, clarification]) =>
         taskChatActions(root, card, source, () => {})("task_update", { authorization: source, description, criteria });
       assert.ok((await apply(message, clarification)).ok);
@@ -2187,6 +2196,13 @@ test("the exact reset-list clarification updates the brief in draft, work and re
       assert.equal(updated.status, phase);
       assert.equal(updated.description, clarification);
       assert.deepEqual(updated.criteria, [baseline, clarification]);
+      if (phase === "review") {
+        const current = review();
+        assert.equal(current.reviewerApproval, undefined);
+        assert.equal(current.awaitingHumanAcceptance, false);
+        assert.equal(current.reviewDecision, updated.history.length);
+        assert.equal(updated.history.find(event => event.action === "review-approve")?.reviewApproval?.revision, message.revision);
+      }
       assert.ok((await apply(updated, clarification)).ok);
       assert.deepEqual(show(), updated);
 
@@ -2207,7 +2223,6 @@ test("the exact reset-list clarification updates the brief in draft, work and re
       }
 
       if (phase === "review") {
-        const review = () => cli(root, ["review", id], { compact: true, includeReviewerSettings: true });
         const snapshot = initial.history.find(event => event.action === "submit");
         assert.deepEqual(snapshot?.submissionBrief, {
           title: initial.title, description: baseline, criteria: [baseline],
@@ -2217,7 +2232,7 @@ test("the exact reset-list clarification updates the brief in draft, work and re
         assert.deepEqual(review().criteria, updated.criteria);
         const { reviewMode, reviewModeVersion } = review();
         cli(root, ["review-approve", id], {
-          revision: initial.revision, targetHead: null, reviewMode, reviewModeVersion,
+          revision: message.revision, targetHead: null, reviewMode, reviewModeVersion,
           summary: "Счётчик показан.", evidence: [baseline],
         }, "REVISION_CONFLICT");
 

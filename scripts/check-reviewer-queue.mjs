@@ -39,8 +39,8 @@ const cli = (args, input) => {
   assert.equal(result.ok, true, JSON.stringify(result));
   return result.data;
 };
-async function waitFor(probe, label) {
-  const deadline = Date.now() + 30_000;
+async function waitFor(probe, label, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const value = await probe();
     if (value) return value;
@@ -235,13 +235,13 @@ globalThis.reviewPendingInWatch = (project, id) =>
   const calls = [];
   const ownerMessage = "Сбросы нужно писать под полосой лимитов и нужно перечислить их со сроком экспирации";
   const ownerCriterion = "Под полосой лимитов есть список сбросов со сроком каждого.";
-  const ownerReturn = "Покажите список сбросов со сроками под полосой лимитов.";
   const zeroDefect = "При нулевом остатке пропадает счётчик.";
   const listDefect = "В сдаче пропал обязательный список сбросов со сроками.";
   const ownerQuestion = "Список требуется постановкой, но занимает три строки. Владелец, хотите удалить его из требований?";
   const reviewInputs = [];
   const executorInputs = [];
-  const ownerReceipts = [];
+  const releaseClarifiedReview = Promise.withResolvers();
+  let clarificationReview;
   const activeCriteria = [initialCriterion, ownerCriterion];
   const assertBrief = ({ description, criteria }) => {
     assert.ok(description.includes(ownerMessage));
@@ -262,17 +262,13 @@ globalThis.reviewPendingInWatch = (project, id) =>
       const clarified = show();
       assertBrief(clarified);
       assert.deepEqual(clarified.history.find(event => event.action === "submit").submissionBrief.criteria, [initialCriterion]);
-      ownerReceipts.push("brief updated while submission remained in review");
-      const returned = await call("task_request_changes", { reason: ownerReturn });
-      assert.ok(returned.ok, JSON.stringify(returned));
-      ownerReceipts.push("owner's requested correction saved separately");
-      return { text: "Уточнение сохранено, сдача возвращена.", awaitingAnswer: false };
+      return { text: "Уточнение сохранено.", awaitingAnswer: false };
     };
     globalThis.ownerExecutorProvider = async (_client, board, cwd, input, _activity, _usage, _signal, beforeTurn) => {
       assert.equal(board, project);
       assertBrief(input);
       const index = executorInputs.length;
-      assert.equal(input.feedback, [ownerReturn, zeroDefect, listDefect][index]);
+      assert.equal(input.feedback, [listDefect, zeroDefect, listDefect][index]);
       executorInputs.push(input.feedback);
       const threadId = input.codexThreadId ?? "20000000-0000-0000-0000-000000000001";
       const queued = await beforeTurn(threadId, index === 0);
@@ -293,11 +289,25 @@ globalThis.reviewPendingInWatch = (project, id) =>
     if (ownerScenario) {
       const input = JSON.parse(context);
       if (!input.feedback) {
+        if (input.criteria.length === 1) {
+          assert.deepEqual(input.criteria, [initialCriterion]);
+          assert.match(git("show", input.submitted + ":result.txt"), /Доступно сбросов: 2/);
+          return {
+            summary: "Счётчик подтверждён.",
+            needsHuman: false,
+            findings: [],
+            evidence: ["Сдача показывает счётчик."],
+          };
+        }
+        assertBrief(input);
+        clarificationReview ??= input;
+        await releaseClarifiedReview.promise;
+        assert.doesNotMatch(git("show", input.submitted + ":result.txt"), /Срок:/);
         return {
-          summary: "Ожидается уточнение владельца.",
-          needsHuman: true,
-          findings: [],
-          evidence: input.criteria.map(() => null),
+          summary: "Проверена исходная сдача по уточнённой постановке.",
+          needsHuman: false,
+          findings: [listDefect],
+          evidence: ["Сдача показывает счётчик.", null],
         };
       }
       assertBrief(input);
@@ -342,22 +352,44 @@ globalThis.reviewPendingInWatch = (project, id) =>
       "window.taskboard?.bootstrap().then(frame => Boolean(frame.board) && !frame.loading)") && win;
   }, "the isolated board");
   if (ownerScenario) {
-    const initial = submit();
+    const inspect = () => cli(["review", task.id, "--compact"]);
     const send = text => window.webContents.executeJavaScript(
       `window.taskboard.chatSend(${JSON.stringify(task.id)}, ${JSON.stringify({ text, files: [], model: "fixture", effort: "low" })})`);
     const unclear = await send("Может, переделать список?");
     assert.ok(unclear.saved && unclear.result.ok, JSON.stringify(unclear));
     assert.ok(show().awaitingAnswer);
     assert.deepEqual(show().criteria, [initialCriterion]);
+    const initial = submit();
+    const approved = await waitFor(() => {
+      const review = inspect();
+      return review.awaitingHumanAcceptance && review;
+    }, "approval under the initial brief");
+    assert.equal(approved.submitted, initial.git.submission.sha);
     const correction = await send(ownerMessage);
     assert.ok(correction.saved && correction.result.ok, JSON.stringify(correction));
-    assert.equal(ownerReceipts.length, 2);
+    const updatedReview = inspect();
+    assert.equal(updatedReview.submitted, approved.submitted);
+    assert.ok(updatedReview.revision > approved.revision);
+    assert.equal(updatedReview.reviewerApproval, undefined);
+    assert.equal(updatedReview.awaitingHumanAcceptance, false);
+    assert.equal(show().history.filter(event => event.action === "request-changes").length, 0);
+    const prematureAcceptance = await window.webContents.executeJavaScript(
+      `window.taskboard.command("accept", ${JSON.stringify(task.id)}, ${JSON.stringify({
+        revision: updatedReview.revision, targetHead: updatedReview.targetHead, reviewModeVersion: updatedReview.reviewModeVersion,
+      })})`);
+    assert.equal(prematureAcceptance.error.code, "REVIEW_REQUIRED");
+    await waitFor(() => clarificationReview, "automatic re-review after clarification");
+    assert.ok(clarificationReview.revision > approved.revision);
+    // The review can start before the agent's acknowledgement is added to history.
+    assert.ok(clarificationReview.revision <= updatedReview.revision);
+    assert.equal(clarificationReview.submitted, approved.submitted);
+    assertBrief(clarificationReview);
+    releaseClarifiedReview.resolve();
     const waiting = await waitFor(() => {
-      const card = show();
-      if (card.status !== "review" || reviewInputs.length !== 3) return;
-      const review = cli(["review", task.id, "--compact"]);
+      if (reviewInputs.length !== 3) return;
+      const review = inspect();
       return review.awaitingHumanAcceptance && review;
-    }, "approval of the repaired submission").catch(error => {
+    }, "approval of the repaired submission", 60_000).catch(error => {
       const card = show();
       console.error(JSON.stringify({
         status: card.status, executorInputs, reviewInputs, autoErrors, blocked: card.blocked,
@@ -365,16 +397,18 @@ globalThis.reviewPendingInWatch = (project, id) =>
       }));
       throw error;
     });
-    assert.deepEqual(executorInputs, [ownerReturn, zeroDefect, listDefect]);
+    assert.deepEqual(executorInputs, [listDefect, zeroDefect, listDefect]);
     assert.deepEqual(reviewInputs, [
-      { feedback: ownerReturn, hasZero: false, hasList: true, findings: [zeroDefect] },
+      { feedback: listDefect, hasZero: false, hasList: true, findings: [zeroDefect] },
       { feedback: zeroDefect, hasZero: true, hasList: false, findings: [listDefect] },
       { feedback: listDefect, hasZero: true, hasList: true, findings: [] },
     ]);
     const reviewed = show();
     const submissions = reviewed.history.filter(event => event.action === "submit");
     assert.equal(submissions.length, 4);
-    assert.equal(reviewed.history.filter(event => event.action === "review-approve").length, 1);
+    const approvals = reviewed.history.filter(event => event.action === "review-approve");
+    assert.ok(approvals.some(event => event.reviewApproval.revision === approved.revision));
+    assert.equal(approvals.at(-1).reviewApproval.revision, waiting.revision);
     assert.deepEqual(submissions[0].submissionBrief.criteria, [initialCriterion]);
     assert.deepEqual(submissions.slice(1).map(event => event.submissionBrief.criteria), [activeCriteria, activeCriteria, activeCriteria]);
     assert.equal(git("show", initial.git.submission.sha + ":result.txt"), "Доступно сбросов: 2");
@@ -416,7 +450,8 @@ globalThis.reviewPendingInWatch = (project, id) =>
       "PASS T-0333. Изолированный Git-проект и Windows Electron с тестовыми провайдерами.",
       `ОС ${process.platform} ${release()} ${process.arch}; Electron ${process.versions.electron}, Node ${process.versions.node}.`,
       "Команда: node scripts/check-reviewer-queue.mjs --scenario=owner-requirements --artifacts .tasks/qa",
-      "Неоднозначное сообщение оставило критерии прежними и открыло вопрос. Точное уточнение T-0319 сохранено в описании и критериях на ревью до возврата.",
+      "Неоднозначная фраза открыла вопрос и сохранила критерии. Первая сдача получила одобрение. Точное уточнение T-0319 обновило описание и критерии, сняло одобрение и заблокировало ручную приёмку.",
+      "Диалог не вызывал возврат. Автоматическое ревью получило ту же сдачу и новые критерии и вернуло отсутствие списка как дефект.",
       "Три запуска исполнителя и три последующих ревью получили уточнение в постановке и отдельное замечание.",
       "Подтверждённый дефект нулевого счётчика вернул сдачу. Контрольная сдача с нулевым счётчиком без списка вернулась с дефектом списка.",
       "История всех четырёх сдач и снимок постановки первой сохранены. Восстановленная сдача одобрена при открытом вопросе владельцу.",
@@ -425,7 +460,7 @@ globalThis.reviewPendingInWatch = (project, id) =>
       "SHA-256 исходников, UTF-8 с переводами строк LF после нормализации CRLF:",
       ...paths.map(path => sourceHash(path) + "  " + path),
     ].join("\n") + "\n";
-    writeFileSync(join(artifacts, "owner-requirement-review-check.txt"), report);
+    writeFileSync(join(artifacts, "owner-requirement-approval-check.txt"), report);
     console.log(report);
     return;
   }
