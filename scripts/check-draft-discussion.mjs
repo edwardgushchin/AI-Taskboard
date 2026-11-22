@@ -617,7 +617,9 @@ try {
     assert.equal(failedWithNeutralReply.draftDiscussion?.phase, "failed");
     failProvider = false;
     const failedRevision = show(failure.id).revision;
-    await activate(localization.text("draft_discussion.retry", {}, "ru"), "mouse");
+    const retryLabel = localization.text("draft_discussion.retry", {}, "ru");
+    await until(() => evaluate(`Boolean(${button(retryLabel)})`), "review retry action after the neutral reply");
+    await activate(retryLabel, "mouse");
     await until(() => show(failure.id).revision > failedRevision, "draft retry reaches the board");
     await waitReady(failure.id, 3);
     await until(available, "approval enabled after retry");
