@@ -26,8 +26,8 @@ if ($Architecture -eq 'x64') {
 }
 $report = Join-Path (New-Item -ItemType Directory -Path $ReportDir -Force).FullName 'windows-installer-architecture-check.txt'
 $tempRoot = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
-$scratch = Join-Path $tempRoot "AI Taskboard installer $([Guid]::NewGuid())"
-$installDir = Join-Path $scratch 'installed application'
+$scratch = Join-Path $tempRoot "T0323-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+$installDir = Join-Path $scratch 'app'
 $app = Join-Path $installDir 'AI Taskboard.exe'
 $uninstaller = Join-Path $installDir 'Uninstall AI Taskboard.exe'
 $appArchive = Join-Path $installDir 'resources/app.asar'
