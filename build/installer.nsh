@@ -1,6 +1,26 @@
 !include "LogicLib.nsh"
 !include "StrFunc.nsh"
 !include "WinMessages.nsh"
+!include "x64.nsh"
+
+!macro preInit
+  !ifndef TASKBOARD_EARLY_PREINIT
+    !error "Run node scripts/prepare-nsis.mjs before building the Windows installer."
+  !endif
+  !ifndef BUILD_UNINSTALLER
+    !ifdef APP_ARM64
+      !ifndef APP_64
+        !ifndef APP_32
+          ${IfNot} ${IsNativeARM64}
+            MessageBox MB_OK|MB_ICONSTOP "This installer requires Windows ARM64. On Windows x64, download the Windows x64 installer (windows-x64.exe) from AI Taskboard Releases." /SD IDOK
+            SetErrorLevel 1
+            Quit
+          ${EndIf}
+        !endif
+      !endif
+    !endif
+  !endif
+!macroend
 
 !ifdef BUILD_UNINSTALLER
   ${UnStrRep}
