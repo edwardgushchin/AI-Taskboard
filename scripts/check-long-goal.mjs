@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -28,9 +28,10 @@ const original = "Проверь условия длинной цели.\n[Сп�
   "Проверочный абзац сохраняется целиком.\n".repeat(110) + "Последняя строка исходной цели.";
 const revised = original.replace("Проверь условия длинной цели.", "Правка после переоткрытия доски.") +
   "\nСохрани дополнительный результат.";
-const fromDialogue = revised + "\nВключи итеративный режим.";
+const fromDialogue = "    " + revised + "\nВключи итеративный режим.\n\n\t  ";
 const authorization = "Замени текст цели на: " + fromDialogue;
 const wire = join(project, "wire.jsonl");
+const denyBinding = join(scratch, "deny-binding-write");
 
 function fixtureProvider() {
   const fs = require("node:fs");
@@ -78,6 +79,11 @@ function fixtureProvider() {
         ...(params.objective !== undefined ? { objective: params.objective } : {}),
         ...(params.status !== undefined ? { status: params.status } : {}) };
       fs.writeFileSync(state, JSON.stringify(goals));
+      if (fs.existsSync("disconnect-after-goal-set")) {
+        fs.unlinkSync("disconnect-after-goal-set");
+        process.stdout.write(JSON.stringify({ id, result: { goal } }) + "\n", () => process.exit(0));
+        return;
+      }
       output(id, { goal });
     } else if (method === "turn/start") {
       const turn = { id: "fixture-turn", status: "inProgress" };
@@ -115,7 +121,7 @@ function fixtureProvider() {
   });
 }
 
-function instrument(file, substitutions) {
+function instrument(file, substitutions, extra = "") {
   const url = new URL("../src/desktop/" + file + ".ts", import.meta.url);
   let source = readFileSync(url, "utf8").replaceAll("import.meta.url", JSON.stringify(url.href));
   for (const [from, to] of substitutions) {
@@ -124,7 +130,7 @@ function instrument(file, substitutions) {
   }
   source = source.replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, url).href));
   const output = join(scratch, file + ".mjs");
-  writeFileSync(output, transformSync(source, { loader: "ts", format: "esm" }).code);
+  writeFileSync(output, transformSync(source + extra, { loader: "ts", format: "esm" }).code);
   return output;
 }
 
@@ -158,9 +164,18 @@ function setup() {
       'import { executorFullAccess, setTaskExecutorAccess } from "./codex.ts";\nconst configuredCodex = async () => (' + JSON.stringify(command) + ");"],
     ['import { openComputerUse } from "./computer-use.ts";', "const openComputerUse = async () => undefined;"],
   ]);
+  const failure = `
+function writeJson(path, data) {
+  if (path === ${JSON.stringify(binding)} && data?.goalChangeId && existsSync(${JSON.stringify(denyBinding)})) {
+    throw new Error("Fixture refused the goal binding write");
+  }
+  return originalWriteJson(path, data);
+}
+`;
   const main = instrument("main", [
     ['from "./codex-chat.ts";', "from " + JSON.stringify(pathToFileURL(chat).href) + ";"],
-  ]);
+    ["withProjectRulesLock, writeJson }", "withProjectRulesLock, writeJson as originalWriteJson }"],
+  ], failure);
   require(main);
 }
 
@@ -198,17 +213,20 @@ async function run() {
   await until(() => evaluate("!!document.querySelector('#board-draft textarea[name=request]')"), "board composer");
   await evaluate("document.querySelector('#board-draft textarea[name=request]').dispatchEvent(" +
     "new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))");
-  if (!restart) {
+  async function postGoal(text) {
     const goalMode = "document.querySelector('#board-draft .draft-menu-actions .draft-menu-item:nth-child(3)')";
     await evaluate("document.querySelector('#board-draft .draft-add').click(); " + goalMode + ".click()");
     await until(() => evaluate(goalMode + ".getAttribute('aria-pressed') === 'true'"), "goal composer mode");
     await evaluate(`{
       const form = document.querySelector('#board-draft');
       const input = form.querySelector('textarea[name=request]');
-      input.value = ${JSON.stringify(original)};
+      input.value = ${JSON.stringify(text)};
       input.dispatchEvent(new Event('input', { bubbles: true }));
       form.querySelector('.chat-send').click();
     }`);
+  }
+  if (!restart) {
+    await postGoal(original);
     try {
       await until(() => existsSync(binding) && saved().goal?.status === "paused", "goal submitted in the composer");
     } catch (error) {
@@ -234,9 +252,22 @@ async function run() {
   assert.equal(await evaluate(editor + ".value"), revised);
   assert.equal(saved().goal.objective, original);
   rmdirSync(deniedPath);
+  const previousWire = JSON.parse(readFileSync(wire, "utf8").trim()).objective;
+  const providerGoal = () => JSON.parse(readFileSync(join(project, ".tasks", "fixture-app-server.json"), "utf8"))[thread];
+  const previousFile = join(project, previousWire.split(String.fromCharCode(96))[1]);
+  writeFileSync(denyBinding, "");
+  await evaluate(save + ".click()");
+  await until(() => evaluate(panel + ".querySelector('.board-goal-error').textContent.includes('Fixture refused the goal binding write')"),
+    "visible binding write failure");
+  assert.equal(providerGoal().objective, previousWire);
+  assert.equal(saved().goal.objective, original);
+  assert.equal(readFileSync(previousFile, "utf8"), original);
+  assert.equal(await evaluate(editor + ".value"), revised);
+  unlinkSync(denyBinding);
   await evaluate(save + ".click()");
   await until(() => saved().goal.objective === revised, "edit saved");
   await show(revised, "long-goal-after-reopen.png");
+  assert.equal(existsSync(previousFile), false);
   const dialogue = await api("boardRequest", authorization, [], project, false);
   assert.equal(dialogue.ok, true, JSON.stringify(dialogue));
   const tools = JSON.parse(readFileSync(join(project, "fixture-tool-result.json"), "utf8"));
@@ -247,6 +278,24 @@ async function run() {
   assert.equal(saved().ownerObjective, fromDialogue);
   assert.equal(saved().ownerIteration.enabled, true);
   assert.equal(await evaluate(editor + ".value"), fromDialogue);
+  const literalFile = join(project, providerGoal().objective.split(String.fromCharCode(96))[1]);
+  assert.equal(readFileSync(literalFile, "utf8"), fromDialogue);
+
+  const previousGoal = providerGoal();
+  const retryText = revised + "\nПроверь повтор после обрыва.";
+  writeFileSync(join(project, "disconnect-after-goal-set"), "");
+  await postGoal(retryText);
+  const failed = "document.querySelector('.board-queued-failed')";
+  await until(() => evaluate("!!" + failed), "failed goal displayed in the queue");
+  const queue = await api("boardQueue", project, "list");
+  assert.equal(queue.ok, true, JSON.stringify(queue));
+  assert.equal(queue.data.find(job => job.goal)?.draft, retryText);
+  assert.deepEqual(providerGoal(), previousGoal);
+  assert.equal(saved().goal.objective, fromDialogue);
+  assert.equal(readFileSync(literalFile, "utf8"), fromDialogue);
+  await evaluate(failed + ".parentElement.querySelector('button').click()");
+  await until(() => saved().goal.objective === retryText && !existsSync(literalFile), "goal retry confirmed");
+  assert.equal(readFileSync(join(project, "fixture-read.md"), "utf8"), retryText);
   const paths = ["src/desktop/codex-chat.ts", "src/desktop/goal-objective.ts", "src/desktop/main.ts",
     "src/desktop/renderer.js", "src/desktop/preload.cjs", "scripts/check-long-goal.mjs",
     "scripts/electron-check.mjs", "tests/codex-chat-control.test.ts"];
@@ -257,8 +306,9 @@ async function run() {
     "PASS: setup and a separate app process at 1280×800, Chromium sandbox enabled.",
     "PASS: the provider reads the exact long Markdown; the panel shows the same full text.",
     "PASS: the reopened panel restores the objective, saves an edit and shows the edited text.",
-    "PASS: a Markdown write failure leaves the previous saved goal and the text in the editor intact. Retrying saves the revision.",
-    "PASS: goal_read supplies the full prior version; owner-authorized goal_edit saves the complete new text and preserves iteration authority.",
+    "PASS: Markdown and binding write failures keep the previous goal and the text in the editor. The provider rolls back the refused edit. Retrying saves the revision and removes the previous Markdown.",
+    "PASS: goal_read supplies the full prior version. The new binding, Markdown and renderer all match the literal goal_edit, including the first-line indent and trailing whitespace. Iteration authority remains available.",
+    "PASS: the App Server exits after acknowledging the new goal. After reconnecting both copies show the previous goal, the source draft stays in the queue, and the retry replaces the previous version.",
     "The provider is a deterministic process speaking App Server JSON-RPC. Linux and macOS GUI runs are outside this report.",
     "Tested worktree bytes (SHA-256):",
     ...paths.map(path => hash("sha256", readFileSync(join(root, path))) + "  " + path), "",

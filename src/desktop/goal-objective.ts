@@ -1,8 +1,60 @@
-import { hash } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { managerGoalBinding } from "../cli/manager-goal.ts";
 import { codexThreadPattern } from "../cli/model.ts";
-import { directory, readBinary, readJson, removeFile, writeAtomic } from "../cli/storage.ts";
+import { directory, readBinary, readJson, removeFile, writeAtomic, writeJson } from "../cli/storage.ts";
+import type { BoardGoal } from "./codex-chat.ts";
+
+type GoalChange = { id: string; previous: BoardGoal | null; next: string };
+
+function changePath(project: string, threadId: string) {
+  if (!codexThreadPattern.test(threadId)) throw new Error("Invalid Codex goal thread ID.");
+  return join(project, ".tasks", `manager-goal-change-${threadId}.json`);
+}
+
+export function readGoalChange(project: string, threadId: string): GoalChange | undefined {
+  if (!codexThreadPattern.test(threadId)) return;
+  try {
+    return readJson(changePath(project, threadId)) as GoalChange;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+export function stageGoalChange(project: string, threadId: string, objective: string, previous: BoardGoal | null) {
+  directory(join(project, ".tasks"));
+  const next = prepareGoalObjective(project, threadId, objective);
+  const change = { id: randomUUID(), previous, next };
+  try {
+    writeJson(changePath(project, threadId), change);
+  } catch (error) {
+    if (next !== previous?.objective) discardGoalObjective(project, threadId, next);
+    throw error;
+  }
+  return change;
+}
+
+export function goalChangeCommitted(project: string, threadId: string, change: GoalChange) {
+  try {
+    const saved = readJson(managerGoalBinding(project)) as { id?: string; goalChangeId?: string } | null;
+    return saved?.id === threadId && saved.goalChangeId === change.id;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return false;
+  }
+}
+
+export function finishGoalChange(project: string, threadId: string, change: GoalChange, committed: boolean) {
+  try {
+    if (change.previous?.objective !== change.next) {
+      discardGoalObjective(project, threadId, committed ? change.previous?.objective : change.next);
+    }
+    removeFile(changePath(project, threadId));
+  } catch (error) {
+    // A subsequent connection can finish cleanup using the saved confirmation ID.
+    console.warn("Could not remove the pending goal change.", (error as Error).message);
+  }
+}
 
 function reference(threadId: string, digest: string) {
   const file = `.tasks/manager-goal-${threadId}-${digest}.md`;
@@ -22,8 +74,8 @@ function referencedFile(threadId: string, objective: string) {
 }
 
 export function needsGoalFile(objective: string) {
-  // The provider counts Unicode scalar values.
-  return objective.length > 4000 && Array.from(objective).length > 4000;
+  // Codex trims whitespace at the edges and counts Unicode scalar values.
+  return objective !== objective.trim() || (objective.length > 4000 && Array.from(objective).length > 4000);
 }
 
 export function prepareGoalObjective(project: string, threadId: string, objective: string) {

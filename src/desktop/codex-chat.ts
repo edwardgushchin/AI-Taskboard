@@ -18,7 +18,8 @@ import type { BoardChange } from "./board-actions.ts";
 import { boardToolContent, withBoardMcp } from "./board-mcp.ts";
 import { openComputerUse } from "./computer-use.ts";
 import { goalTaskWaitSeconds } from "./board-actions.ts";
-import { discardGoalObjective, fullGoalObjective, needsGoalFile, prepareGoalObjective } from "./goal-objective.ts";
+import { discardGoalObjective, finishGoalChange, fullGoalObjective, goalChangeCommitted, needsGoalFile, readGoalChange,
+  stageGoalChange } from "./goal-objective.ts";
 import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { callCli, cliFailure } from "./cli.ts";
@@ -251,26 +252,40 @@ export async function reviewWithCodex(profile: string, project: string, settings
 type GoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
 export type BoardGoal = { objective: string; status: GoalStatus };
 export type BoardGoalAction = { kind: "pause" | "resume" | "clear" | "complete" } |
-  { kind: "edit"; objective: string; expectedObjective?: string };
+  { kind: "edit"; objective: string; expectedObjective?: string; commit?: GoalCommit };
+type GoalCommit = (goal: BoardGoal, changeId: string) => void;
 type Request = <R>(method: string, params: object, listener?: Notification) => Promise<R>;
 
 async function readGoal(request: Request, threadId: string, notify?: Notification) {
   return (await request<{ goal: BoardGoal | null }>("thread/goal/get", { threadId }, notify)).goal;
 }
 
-async function setGoal(request: Request, project: string, threadId: string, objective: string, status?: GoalStatus,
-  previous?: BoardGoal | null, notify?: Notification) {
-  const providerObjective = prepareGoalObjective(project, threadId, objective);
-  try {
-    return (await request<{ goal: BoardGoal }>("thread/goal/set", {
-      threadId, objective: providerObjective, ...(status ? { status } : {}), origin: "user",
-    }, notify)).goal;
-  } catch (error) {
-    if (error instanceof CodexRpcRejection && providerObjective !== objective && providerObjective !== previous?.objective) {
-      discardGoalObjective(project, threadId, providerObjective);
+async function setGoal(request: Request, threadId: string, objective: string, status?: GoalStatus, notify?: Notification) {
+  return (await request<{ goal: BoardGoal }>("thread/goal/set", {
+    threadId, objective, ...(status ? { status } : {}), origin: "user",
+  }, notify)).goal;
+}
+
+async function recoverGoalChange(request: Request, project: string, threadId: string, notify?: Notification,
+  rollback?: NonNullable<ReturnType<typeof readGoalChange>>) {
+  const change = rollback ?? readGoalChange(project, threadId);
+  if (!change) return;
+  const committed = !rollback && goalChangeCommitted(project, threadId, change);
+  if (!committed) {
+    const current = await readGoal(request, threadId, notify);
+    const previousObjective = change.previous?.objective;
+    const alreadyRestored = current?.objective === previousObjective &&
+      (change.next !== previousObjective || current?.status === change.previous?.status);
+    if (!alreadyRestored) {
+      if (current?.objective !== change.next) throw new Error("Codex changed the goal while a board goal change was pending.");
+      if (change.previous) {
+        await setGoal(request, threadId, change.previous.objective, change.previous.status, notify);
+      } else {
+        await request("thread/goal/clear", { threadId, origin: "user" }, notify);
+      }
     }
-    throw error;
   }
+  finishGoalChange(project, threadId, change, committed);
 }
 
 function displayGoal(project: string, threadId: string, goal: BoardGoal, restore = false): BoardGoal {
@@ -292,8 +307,16 @@ async function changeGoal(request: Request, project: string, threadId: string, a
     return null;
   }
   if (action.kind === "edit") {
-    const updated = await setGoal(request, project, threadId, action.objective, undefined, goal, notify);
-    if (updated.objective !== goal.objective) discardGoalObjective(project, threadId, goal.objective);
+    const change = stageGoalChange(project, threadId, action.objective, goal);
+    let updated: BoardGoal;
+    try {
+      updated = await setGoal(request, threadId, change.next, undefined, notify);
+      action.commit?.(displayGoal(project, threadId, updated), change.id);
+    } catch (error) {
+      await recoverGoalChange(request, project, threadId, notify, change).catch(() => {});
+      throw error;
+    }
+    finishGoalChange(project, threadId, change, true);
     return updated;
   }
   if (action.kind === "resume") displayGoal(project, threadId, goal, true);
@@ -571,6 +594,7 @@ interface BoardSession {
   separateTurn?: boolean;
   readOnly?: boolean;
   onGoalSet?: () => void;
+  onGoalCommit?: GoalCommit;
   messageId?: string;
   onMessage?: (id: string) => void;
   onGoal?: (goal: BoardGoal | null) => void;
@@ -591,13 +615,28 @@ export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; message
   providerTurnId?: string;
   userMessage?: ReturnType<typeof boardMessage> & { at?: string } };
 
+async function recoverAfterGoalFailure(profile: string, project: string, threadId: string, error: unknown): Promise<never> {
+  try {
+    if (readGoalChange(project, threadId)) {
+      await withServer(profile, project, async ({ request }) => {
+        await recoverGoalChange(request, project, threadId);
+      }, async () => undefined, AbortSignal.timeout(15_000));
+    }
+  } catch (recoveryError) {
+    throw new Error((error as Error).message + " The previous goal will be reconciled on the next connection. " +
+      (recoveryError as Error).message);
+  }
+  throw error;
+}
+
 export function updateBoardGoal(profile: string, project: string, threadId: string, action: BoardGoalAction) {
   return withServer(profile, project, async ({ request }) => {
+    await recoverGoalChange(request, project, threadId);
     const goal = await readGoal(request, threadId);
     if (action.kind === "clear" && goal === null) return null;
     const updated = await changeGoal(request, project, threadId, action, goal);
     return updated && displayGoal(project, threadId, updated);
-  }, async () => undefined);
+  }, async () => undefined).catch(error => recoverAfterGoalFailure(profile, project, threadId, error));
 }
 
 export function archiveCodexThread(profile: string, project: string, threadId: string) {
@@ -659,7 +698,9 @@ export function readBoardHistory(profile: string, project: string, threadId: str
   return withServer(profile, project, async ({ request }) => {
     const metadata = cursor === null ? await request<{ thread: { model?: string | null } }>(
       "thread/read", { threadId, includeTurns: false }) : undefined;
-    const saved = cursor === null ? await readGoal(request, threadId).catch(() => undefined) : undefined;
+    const remote = cursor === null ? await readGoal(request, threadId).catch(() => undefined) : undefined;
+    const pending = cursor === null ? readGoalChange(project, threadId) : undefined;
+    const saved = pending && !goalChangeCommitted(project, threadId, pending) ? pending.previous : remote;
     const goal = saved && displayGoal(project, threadId, saved);
     const page = await request<{ data: {
       turnId: string; item: Record<string, unknown>; startedAtMs?: number | null; completedAtMs?: number | null;
@@ -930,8 +971,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       });
     }
     let currentGoal: BoardGoal | null | undefined;
-    let previousGoal: BoardGoal | null = null;
-    let stagedGoal: BoardGoal | undefined;
+    let launchChange: ReturnType<typeof stageGoalChange> | undefined;
     const fileGoalLaunch = Boolean(session?.goal && (needsGoalFile(session.goal) ||
       (session.previousObjective && needsGoalFile(session.previousObjective))));
     let stagingGoal = fileGoalLaunch;
@@ -968,7 +1008,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
             clearTimeout(activityTimer);
             publish();
           }
-          session.onMessage?.(id);
+          if (!stagingGoal || id !== session.messageId) session.onMessage?.(id);
         }
       }
       if (message.method === "thread/goal/updated" && data.goal) updateGoal(data.goal);
@@ -1011,15 +1051,20 @@ function reply(profile: string, project: string, prompt: string, images: string[
     try {
       signal?.throwIfAborted();
       if (waiting) session?.onWaiting(false);
+      if (session?.goal || session?.resumeGoal || session?.iterativeGoal) {
+        await recoverGoalChange(request, project, thread.id);
+      }
       if (session?.resumeGoal) {
         const saved = await readGoal(request, thread.id, notify);
         const goal = await changeGoal(request, project, thread.id, { kind: "resume" }, saved, notify);
         if (goal) updateGoal(goal);
         session.onGoalSet?.();
       } else if (session?.goal) {
-        if (fileGoalLaunch && existing) previousGoal = await readGoal(request, thread.id, notify);
-        const goal = await setGoal(request, project, thread.id, session.goal, "active", previousGoal, notify);
-        if (fileGoalLaunch) stagedGoal = goal;
+        if (fileGoalLaunch) {
+          const previous = existing ? await readGoal(request, thread.id, notify) : null;
+          launchChange = stageGoalChange(project, thread.id, session.goal, previous);
+        }
+        const goal = await setGoal(request, thread.id, launchChange?.next ?? session.goal, "active", notify);
         updateGoal(goal);
         if (!fileGoalLaunch) session.onGoalSet?.();
       } else if (existing) {
@@ -1069,24 +1114,9 @@ function reply(profile: string, project: string, prompt: string, images: string[
               value: session.attachmentContext, kind: "untrusted", name: "ai_taskboard_attachments",
             } } : {}),
           } } : {}),
-          input: [{ type: "text", text: stagedGoal && stagedGoal.objective !== session?.goal ? stagedGoal.objective : prompt, text_elements: [] },
+          input: [{ type: "text", text: launchChange && launchChange.next !== session?.goal ? launchChange.next : prompt, text_elements: [] },
             ...images.map(image => session ? { type: "image", url: image } : { type: "localImage", path: image })],
-        }, notify).catch(async error => {
-          if (stagedGoal && error instanceof CodexRpcRejection) {
-            try {
-              if (previousGoal) {
-                await request("thread/goal/set", {
-                  threadId: thread.id, objective: previousGoal.objective, status: previousGoal.status, origin: "user",
-                }, notify);
-              } else {
-                await request("thread/goal/clear", { threadId: thread.id, origin: "user" }, notify);
-              }
-              if (previousGoal?.objective !== stagedGoal.objective) discardGoalObjective(project, thread.id, stagedGoal.objective);
-            } catch (restoreError) {
-              throw new Error("Codex rejected the goal launch and the previous goal could not be restored. " +
-                (error as Error).message + " " + (restoreError as Error).message);
-            }
-          }
+        }, notify).catch(error => {
           if (session?.onTurnRejected && error instanceof CodexRpcRejection) {
             session.onTurnRejected();
           }
@@ -1096,11 +1126,19 @@ function reply(profile: string, project: string, prompt: string, images: string[
           throw error;
         });
         turn = response.turn;
-        if (stagedGoal) {
+        if (launchChange) {
+          try {
+            if (!currentGoal) throw new Error("Codex cleared the goal before confirming its launch.");
+            session?.onGoalCommit?.(displayGoal(project, thread.id, currentGoal), launchChange.id);
+          } catch (error) {
+            if (turn.status === "inProgress") await turnControl(request, thread.id, turn.id).interrupt().catch(() => {});
+            throw error;
+          }
+          finishGoalChange(project, thread.id, launchChange, true);
+          launchChange = undefined;
           stagingGoal = false;
-          updateGoal(currentGoal ?? stagedGoal);
+          updateGoal(currentGoal);
           session?.onGoalSet?.();
-          if (previousGoal?.objective !== stagedGoal.objective) discardGoalObjective(project, thread.id, previousGoal?.objective);
         }
         if (reviewClientId) reviewThread?.saveTurn?.({ clientId: reviewClientId, turnId: turn.id });
         options.worklog?.start(thread.id, turn.id);
@@ -1113,7 +1151,22 @@ function reply(profile: string, project: string, prompt: string, images: string[
       };
       const applyGoal = async (action: BoardGoalAction) => {
         const wasActive = currentGoal?.status === "active";
-        const updated = await changeGoal(request, project, thread.id, action, currentGoal, notify);
+        const previous = currentGoal;
+        const pending = readGoalChange(project, thread.id);
+        stagingGoal = action.kind === "edit" || pending !== undefined;
+        let updated: BoardGoal | null;
+        try {
+          if (pending) {
+            await recoverGoalChange(request, project, thread.id, notify);
+            currentGoal = await readGoal(request, thread.id, notify);
+          }
+          updated = await changeGoal(request, project, thread.id, action, currentGoal, notify);
+        } catch (error) {
+          currentGoal = previous;
+          throw error;
+        } finally {
+          stagingGoal = false;
+        }
         updateGoal(updated);
         if (wasActive && (action.kind === "pause" || action.kind === "clear")) await interrupt();
         return updated && displayGoal(project, thread.id, updated);
@@ -1193,6 +1246,9 @@ function reply(profile: string, project: string, prompt: string, images: string[
       const run = onActivity ? runLog(new Map([...activity].filter(([, item]) => item.phase !== "final_answer")), 96_000) : [];
       return { text, usage, commentary, attachmentSources, model: started.model ?? thread.model, goalStatus,
         ...(run.length ? { run } : {}) } as const;
+    } catch (error) {
+      if (launchChange) await recoverGoalChange(request, project, thread.id, notify, launchChange).catch(() => {});
+      throw error;
     } finally {
       options.stageReporter?.close();
       clearTimeout(activityTimer);
@@ -1244,6 +1300,11 @@ function reply(profile: string, project: string, prompt: string, images: string[
       ...(content.pngBase64 ? [{ type: "inputImage", imageUrl: "data:image/png;base64," + content.pngBase64 }] : [])] };
   }, signal, {
     mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
+  }).catch(error => {
+    if (threadId && (session?.goal || session?.resumeGoal || session?.iterativeGoal)) {
+      return recoverAfterGoalFailure(profile, project, threadId, error);
+    }
+    throw error;
   }).finally(async () => {
     finishRun?.();
     try { options.worklog?.finish(); }

@@ -15,7 +15,8 @@ import { boardProjectRulesPrompt, readBoardProjectRules, writeBoardProjectRules 
 import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
-import { discardGoalObjective, fullGoalObjective, needsGoalFile, prepareGoalObjective } from "../src/desktop/goal-objective.ts";
+import { discardGoalObjective, finishGoalChange, fullGoalObjective, goalChangeCommitted, needsGoalFile, prepareGoalObjective,
+  readGoalChange, stageGoalChange } from "../src/desktop/goal-objective.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
 import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
@@ -194,7 +195,7 @@ test("board history recovers a steering message and its attachment in the middle
   const requests: string[] = [];
   const read = runInNewContext(stripTypeScriptTypes(source) + "\nwithServer = mockServer; readBoardHistory", {
     runActivity,
-    fullGoalObjective,
+    fullGoalObjective, goalChangeCommitted, readGoalChange,
     mockServer: async (_profile: string, _project: string, callback: Function) => callback({
       async request(method: string, params: Record<string, unknown>) {
         requests.push(method);
@@ -371,6 +372,14 @@ test("board chat keeps a goal streaming across turns and times out only after in
           return;
         }
         goal = { objective: params.objective ?? goal.objective, status: params.status ?? goal.status };
+        if (process.argv[2] === "disconnect-goal-launch") {
+          fs.writeFileSync("fixture-goal.json", JSON.stringify(goal));
+          if (!fs.existsSync("fixture-disconnected")) {
+            fs.writeFileSync("fixture-disconnected", "");
+            process.stdout.write(JSON.stringify({ id, result: { goal } }) + "\\n", () => process.exit(0));
+            return;
+          }
+        }
         send({ id, result: { goal } });
         send({ method: "thread/goal/updated", params: { threadId, goal } });
         if (process.argv[2] === "native-resume" && params.status === "active") {
@@ -489,8 +498,8 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     boardProjectRulesPrompt,
-    discardGoalObjective, fullGoalObjective, needsGoalFile, prepareGoalObjective,
-    spawn, stopCodexProcess, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
+    discardGoalObjective, finishGoalChange, fullGoalObjective, goalChangeCommitted, needsGoalFile, readGoalChange, stageGoalChange,
+    spawn, stopCodexProcess, turnControl, CodexTokenUsage, codexThreadPattern, AbortSignal, Error, process, withBoardMcp, goalTaskWaitSeconds,
     openComputerUse: async () => undefined,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
@@ -893,8 +902,46 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.equal(requestLog().filter(({ method }) => method === "thread/goal/set").at(-1)?.params.objective, remote);
   assert.equal(observed.length, 0);
   assert.equal(goalFiles().length, 1);
+  providerMode = "disconnect-goal-launch";
+  const acceptedBeforeDisconnect = accepted;
+  await assert.rejects(launch(edited, text), /Codex process closed|EPIPE/);
+  assert.equal(JSON.parse(readFileSync(providerState, "utf8")).objective, remote);
+  assert.equal(JSON.parse(readFileSync(binding, "utf8")).goal.objective, text);
+  assert.equal(readGoalChange(directory, threadId), undefined);
+  assert.equal(readFileSync(goalFile(text), "utf8"), text);
+  assert.equal(goalFiles().length, 1);
+  assert.equal(observed.length, 0);
+  assert.equal(accepted, acceptedBeforeDisconnect);
+  await launch(edited, text);
+  assert.equal(accepted, acceptedBeforeDisconnect + 1);
+  assert.equal(readFileSync(goalFile(edited), "utf8"), edited);
+  assert.equal(goalFiles().length, 1);
+  assert.equal(readGoalChange(directory, threadId), undefined);
+  discardGoalObjective(directory, threadId, JSON.parse(readFileSync(providerState, "utf8")).objective);
+  prepareGoalObjective(directory, threadId, text);
+  writeFileSync(providerState, JSON.stringify({ objective: remote, status: "active" }));
 
   providerMode = "";
+  const unfinished = stageGoalChange(directory, threadId, edited, { objective: remote, status: "active" });
+  writeFileSync(providerState, JSON.stringify({ objective: unfinished.next, status: "active" }));
+  const paused = await updateBoardGoal("profile", directory, threadId, { kind: "pause" });
+  assert.equal(paused?.objective, text);
+  assert.equal(paused?.status, "paused");
+  assert.equal(readGoalChange(directory, threadId), undefined);
+  assert.equal(goalFiles().length, 1);
+  writeFileSync(providerState, JSON.stringify({ objective: remote, status: "active" }));
+
+  const confirmed = stageGoalChange(directory, threadId, edited, { objective: remote, status: "active" });
+  writeFileSync(providerState, JSON.stringify({ objective: confirmed.next, status: "active" }));
+  writeFileSync(binding, JSON.stringify({ id: threadId, goalChangeId: confirmed.id, goal: { objective: edited, status: "active" } }));
+  assert.equal((await updateBoardGoal("profile", directory, threadId, { kind: "pause" }))?.objective, edited);
+  assert.equal(readGoalChange(directory, threadId), undefined);
+  assert.equal(goalFiles().length, 1);
+  discardGoalObjective(directory, threadId, confirmed.next);
+  prepareGoalObjective(directory, threadId, text);
+  writeFileSync(providerState, JSON.stringify({ objective: remote, status: "active" }));
+  writeFileSync(binding, JSON.stringify({ id: threadId, goal: { objective: text, status: "active" } }));
+
   mkdirSync(goalFile(edited));
   await assert.rejects(updateBoardGoal("profile", directory, threadId, edit), /Could not save the goal Markdown/);
   assert.equal(readFileSync(goalFile(text), "utf8"), text);
@@ -933,4 +980,8 @@ test("board chat keeps a goal streaming across turns and times out only after in
     objective: "Короткая цель", expectedObjective: edited }))?.objective, "Короткая цель");
   assert.deepEqual(goalFiles(), []);
   assert.equal(fullGoalObjective(other, threadId, editedRemote), edited);
+  const shortIndented = "    indented\n\t ";
+  const exact = prepareGoalObjective(other, threadId, shortIndented);
+  assert.notEqual(exact, shortIndented);
+  assert.equal(fullGoalObjective(other, threadId, exact), shortIndented);
 });

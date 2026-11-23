@@ -2203,8 +2203,9 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
   const literal = literalPrefix.exec(request);
   if (literal) {
     // The composer appends quoted references after the owner's message.
-    const replacement = request.slice(literal[0].length).split(/\r?\n\r?\nQuote 1:\r?\n(?=\x60{3,})/u, 1)[0].trim();
-    const firstLine = replacement.split(/\r?\n/, 1)[0];
+    const replacement = request.slice(literal[0].length)
+      .split(/\r?\n\r?\nQuote 1:\r?\n(?=\x60{3,})/u, 1)[0].replace(/^(?: |\r?\n)/, "");
+    const firstLine = replacement.trim().split(/\r?\n/, 1)[0];
     const wording = withoutCourtesy(firstLine.replace(/^[«“"']+|[»”"']+$/gu, ""));
     if (!/[\p{L}\p{N}]/u.test(firstLine) || /^[>~\x60]/u.test(firstLine) ||
         isVagueWording(wording)) {
@@ -2437,13 +2438,13 @@ function readBoardThread(path: string) {
   if (!existsSync(path)) return;
   const stored = readJson(path) as { provider?: unknown; id?: unknown; history?: "local";
     goal?: BoardGoal | null; goalId?: string; ownerObjective?: string; ownerIteration?: IterationDirective;
-    dialogueEditFingerprint?: string; budgetDeferred?: boolean } | null;
+    dialogueEditFingerprint?: string; goalChangeId?: string; budgetDeferred?: boolean } | null;
   if (stored?.provider !== "codex" || typeof stored.id !== "string" || !codexThreadPattern.test(stored.id)) {
     throw new Error(t("ui.invalid_saved_orchestrator_chat_ea530ebe"));
   }
   return { provider: stored.provider, id: stored.id, history: stored.history, goal: stored.goal, goalId: stored.goalId,
     ownerObjective: stored.ownerObjective, ownerIteration: stored.ownerIteration,
-    dialogueEditFingerprint: stored.dialogueEditFingerprint,
+    dialogueEditFingerprint: stored.dialogueEditFingerprint, goalChangeId: stored.goalChangeId,
     ...(stored.budgetDeferred === true ? { budgetDeferred: true } : {}) };
 }
 
@@ -2453,7 +2454,7 @@ function goalIterationAuthority(thread: NonNullable<ReturnType<typeof readBoardT
 }
 
 function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
-  edit?: { iteration?: IterationDirective; fingerprint?: string }) {
+  edit?: { iteration?: IterationDirective; fingerprint?: string; changeId?: string }) {
   try {
     const thread = readBoardThread(path);
     const snapshot = goal && { objective: goal.objective, status: goal.status };
@@ -2465,7 +2466,8 @@ function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
     const authority = goal ? (edit ? edit.iteration : thread.ownerIteration) : undefined;
     const fingerprint = goal ? (edit ? edit.fingerprint : thread.dialogueEditFingerprint) : undefined;
     if (JSON.stringify(thread.goal) !== JSON.stringify(snapshot) || thread.ownerObjective !== source ||
-        JSON.stringify(thread.ownerIteration) !== JSON.stringify(authority) || thread.dialogueEditFingerprint !== fingerprint) {
+        JSON.stringify(thread.ownerIteration) !== JSON.stringify(authority) || thread.dialogueEditFingerprint !== fingerprint ||
+        (edit?.changeId !== undefined && edit.changeId !== thread.goalChangeId)) {
       if (thread.goal?.status === "paused" && snapshot?.status === "active") {
         const project = dirname(dirname(path));
         const state = readIterativeGoal(project, thread.goalId ?? thread.id);
@@ -2478,7 +2480,8 @@ function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
         }
       }
       writeJson(path, { ...thread, goal: snapshot, ownerObjective: source, ownerIteration: authority,
-        dialogueEditFingerprint: fingerprint, budgetDeferred: snapshot?.status === "active" ? thread.budgetDeferred : undefined });
+        dialogueEditFingerprint: fingerprint, goalChangeId: edit?.changeId ?? thread.goalChangeId,
+        budgetDeferred: snapshot?.status === "active" ? thread.budgetDeferred : undefined });
     }
   } catch (error) {
     if (required) throw error;
@@ -2781,14 +2784,19 @@ async function changeBoardGoal(project: string, key: string, action: BoardGoalAc
     operation.changingGoal = true;
     if (!running) boardWorkRequests.set(key, operation);
     if (action.kind === "pause" || action.kind === "clear") running?.question?.settle(null);
+    if (action.kind === "edit") {
+      action = { ...action, commit: (goal, changeId) => {
+        const edit = dialogueEdit ? {
+          iteration: iterationDirectiveAfterEdit(goalIterationAuthority(current), dialogueEdit.request, goal.objective),
+          fingerprint: hash("sha256", JSON.stringify([dialogueEdit.request, goal.objective])),
+        } : undefined;
+        saveBoardGoal(binding, goal, true, { ...edit, changeId });
+      } };
+    }
     const goal = running?.goal ? await running.goal(action) :
       await writer!.run(() => updateBoardGoal(app.getPath("userData"), project, saved.id, action));
-    if (!running || action.kind === "edit") {
-      const edit = dialogueEdit && goal ? {
-        iteration: iterationDirectiveAfterEdit(goalIterationAuthority(current), dialogueEdit.request, goal.objective),
-        fingerprint: hash("sha256", JSON.stringify([dialogueEdit.request, goal.objective])),
-      } : undefined;
-      saveBoardGoal(binding, goal, action.kind === "clear" || action.kind === "edit", action.kind === "edit" ? edit ?? {} : undefined);
+    if (!running && action.kind !== "edit") {
+      saveBoardGoal(binding, goal, action.kind === "clear");
     }
     if (!running) {
       broadcastBoardChat(project, "orchestrator-goal", { goal, goalRunning: false });
@@ -2887,7 +2895,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       });
       if (!queuedPath || queued) {
         if (claimed) broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
-        await current.sendNow(queued ? queued.draft.trim() : request.trim(), queued ? queuedFiles(queued) : files,
+        await current.sendNow(queued ? queued.draft : request, queued ? queuedFiles(queued) : files,
           typeof messageId === "string" ? messageId : undefined);
       }
       return { ok: true as const, data: null };
@@ -3117,7 +3125,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   const changes: BoardChange[] = [];
   const draftText = queued?.draft ?? request;
-  let requestText = goal === true ? draftText : draftText.trim();
+  const ownerText = (text: string) => parseOwnerGoalEdit(text.trimStart())?.replacement !== undefined
+    ? text.trimStart() : text.trim();
+  let requestText = goal === true ? draftText : ownerText(draftText);
   if (draftNotice) requestText = "AI Taskboard queue: answer these draft questions through team_message. " + JSON.stringify(draftQuestions);
   let ownerReviewRequest = !background && !goal ? requestText : "";
   let previousReviewRequest: string | undefined;
@@ -3872,11 +3882,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         } : undefined,
         onTurnRejected: iteration ? () => { iterationDispatched = false; } : undefined,
         readOnly: Boolean(reviewIds || draftNotice),
+        onGoalCommit: (confirmed, changeId) => {
+          const saved = readBoardThread(binding);
+          if (!saved || saved.id !== threadId) throw new Error("The goal binding disappeared before saving.");
+          const snapshot = { objective: confirmed.objective, status: confirmed.status };
+          writeJson(binding, { ...saved, goal: snapshot, goalId, goalChangeId: changeId, ownerObjective: requestText,
+            ownerIteration: undefined, dialogueEditFingerprint: undefined, budgetDeferred: undefined });
+        },
         onGoalSet: () => {
           goalSet = true;
           if (goal === true) {
             const saved = readBoardThread(binding);
-            if (saved) writeJson(binding, { ...saved, goalId, ownerObjective: requestText, ownerIteration: undefined,
+            if (saved && saved.goalId !== goalId) writeJson(binding, { ...saved, goalId, ownerObjective: requestText, ownerIteration: undefined,
               dialogueEditFingerprint: undefined });
             acceptedMessage = true;
             historyAccepted = true;
@@ -4018,9 +4035,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             };
           }
           if (background) return;
-          running.sendNow = (text, files, messageId) => {
+          running.sendNow = (draft, files, messageId) => {
             if (sendingNow) throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
             sendingNow = (async () => {
+              const text = ownerText(draft);
               const prepared = await prepareBoardAttachments(files, scratch);
               signal.throwIfAborted();
               let imageIndex = 0;
@@ -4037,7 +4055,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               const previousOwnerRequest = ownerReviewRequest;
               const previousClarification = previousReviewRequest;
               const previousConfirmation = reviewConfirmation;
-              ownerReviewRequest = text.trim();
+              ownerReviewRequest = text;
               previousReviewRequest = undefined;
               reviewConfirmation = undefined;
               try {

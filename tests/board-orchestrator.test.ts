@@ -221,7 +221,9 @@ function fixture(t: TestContext) {
       if (clearGoalError) throw new Error(clearGoalError);
       if (action.kind === "edit") {
         const { goal } = readJson(binding) as { goal: BoardGoal };
-        return { ...goal, objective: action.objective };
+        const updated = { ...goal, objective: action.objective };
+        action.commit?.(updated, randomUUID());
+        return updated;
       }
       return null;
     },
@@ -311,7 +313,11 @@ function fixture(t: TestContext) {
       if (!session.id) session.save(newThread);
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
-          controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
+          controls: control => session.onGoalControl(async action => {
+            const updated = await control(action);
+            if (action.kind === "edit" && updated) action.commit?.(updated, randomUUID());
+            return updated;
+          }), update: session.onGoal, activity: session.onActivity,
           role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access,
           confirmApproval: session.confirmApproval, finishTurn: session.finishGoalTurn,
           enableNotifications: steer => session.onControl({
