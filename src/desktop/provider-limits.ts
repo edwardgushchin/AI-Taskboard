@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
-import { configuredCodex } from "./codex.ts";
-import { codexRpc } from "./codex-rpc.ts";
+import { createHash } from "node:crypto";
+import { configuredCodex, withAccountServer } from "./codex.ts";
+import { CodexRpcRejection } from "./codex-rpc.ts";
 
 export interface LimitWindow { name: string; remaining: number; durationMins?: number; resetsAt?: number }
 export interface ProviderLimits {
@@ -9,6 +9,7 @@ export interface ProviderLimits {
   windows: LimitWindow[];
   observedAt?: number;
   availableResetCount?: number;
+  resetAccount?: string;
   resetCreditExpirations?: (number | null)[];
   incomplete?: boolean;
   plan?: string;
@@ -88,36 +89,66 @@ export function codexLimitSnapshot(data: unknown, observedAt = Date.now()): Prov
   };
 }
 
+type LimitAccount = { type: string; email?: string; planType?: string; accountId?: string };
+const unsupportedResetClients = new Set<string>();
+
+function resetIdentity(account: LimitAccount, clientPath: string) {
+  if (account.type !== "chatgpt" || !account.email) return;
+  return createHash("sha256").update(JSON.stringify([account.email, account.accountId, clientPath])).digest("hex");
+}
+
 export async function readCodexLimits(profile: string): Promise<ProviderLimits | undefined> {
   const client = await configuredCodex(profile);
   if (!client) return undefined;
-  const child = spawn(client.path, [...client.args, "app-server"], {
-    env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
-  });
-  const rpc = codexRpc(child, () => {});
-  const timeout = setTimeout(() => rpc.fail(new Error("Rate limits request timed out")), 20_000);
   let plan: string | undefined;
   try {
-    await rpc.request("initialize", { clientInfo: { name: "ai_taskboard", version: "0.1.0" } });
-    rpc.send({ method: "initialized" });
-    const account: any = await rpc.request("account/read", {});
-    if (!account.account) return { provider: "Codex", state: "auth", windows: [] };
-    if (account.account.type !== "chatgpt") return { provider: "Codex", state: "unsupported", windows: [] };
-    const planType = account.account.planType;
-    if (typeof planType === "string" && planType.trim() && planType.trim().toLowerCase() !== "unknown") {
-      plan = planType.trim();
-    }
-    const data = await rpc.request("account/rateLimits/read", {});
-    return { ...codexLimitSnapshot(data), plan };
+    return await withAccountServer(client, async rpc => {
+      const { account } = await rpc.request<{ account: LimitAccount | null }>("account/read", {});
+      if (!account) return { provider: "Codex", state: "auth", windows: [] };
+      if (account.type !== "chatgpt") return { provider: "Codex", state: "unsupported", windows: [] };
+      const planType = account.planType?.trim();
+      if (planType && planType.toLowerCase() !== "unknown") plan = planType;
+      const snapshot = codexLimitSnapshot(await rpc.request("account/rateLimits/read", {}));
+      const resetAccount = snapshot.availableResetCount && !unsupportedResetClients.has(client.path)
+        ? resetIdentity(account, client.path) : undefined;
+      return { ...snapshot, plan, resetAccount };
+    });
   } catch (error) {
     const message = String(error);
     return { provider: "Codex", state: /auth|unauthorized|login|401/i.test(message) ? "auth" :
       /not supported|method not found/i.test(message) ? "unsupported" : "error", windows: [], plan };
-  } finally {
-    clearTimeout(timeout);
-    rpc.close();
-    child.stdin.end();
-    child.kill();
+  }
+}
+
+export async function consumeCodexReset(profile: string, expected: string, idempotencyKey: string) {
+  type Outcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
+  const client = await configuredCodex(profile);
+  if (!client || unsupportedResetClients.has(client.path)) return "unavailable";
+  let sent = false;
+  const consume = () => withAccountServer(client, async rpc => {
+    const { account } = await rpc.request<{ account: LimitAccount | null }>("account/read", {});
+    if (!account || resetIdentity(account, client.path) !== expected) return "accountChanged";
+    if (!sent) {
+      const { availableResetCount } = codexLimitSnapshot(await rpc.request("account/rateLimits/read", {}));
+      if (!availableResetCount) return "noCredit";
+      const current = await rpc.request<{ account: LimitAccount | null }>("account/read", {});
+      if (!current.account || resetIdentity(current.account, client.path) !== expected) return "accountChanged";
+    }
+    sent = true;
+    const { outcome } = await rpc.request<{ outcome: Outcome }>("account/rateLimitResetCredit/consume", { idempotencyKey });
+    return outcome;
+  });
+  try {
+    return await consume().catch(error => {
+      if (!sent || error instanceof CodexRpcRejection) throw error;
+      return consume();
+    });
+  } catch (error) {
+    if (/not supported|method not found/i.test(String(error))) {
+      unsupportedResetClients.add(client.path);
+      return "unavailable";
+    }
+    return "failed";
   }
 }
 

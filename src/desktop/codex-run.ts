@@ -30,7 +30,7 @@ import { windowsGuiEvidence } from "./windows-gui.ts";
 import type { CliReply } from "./cli.ts";
 import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl } from "./codex-rpc.ts";
-import { CodexTokenUsage } from "./codex-token-usage.ts";
+import { CodexTokenUsage, type UsageWriter } from "./codex-token-usage.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
 import type { Expert } from "../cli/experts.ts";
 import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions, watchTeamMail } from "./expert-tools.ts";
@@ -154,7 +154,7 @@ export type ExecutorTask = Pick<Task, "expertId" | "expertTeam" | "expertStage" 
 export { missingCodexThread } from "./codex-queued-turn.ts";
 
 export async function startCodexRun(client: Client, project: string, cwd: string, task: ExecutorTask,
-  onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: (report: TokenUsageReport) => Promise<void>, signal?: AbortSignal,
+  onActivity?: (item: RunActivity, currentTurn: boolean) => void, onTokenUsage?: UsageWriter, signal?: AbortSignal,
   beforeTurn?: (threadId: string, created: boolean) => Promise<void | QueuedTurn>, desktopProfile?: string,
   recoveringThreadId?: string, requireSavedThread = false, onUserMessage?: (clientId: string) => void,
   linkBeforeTools = false, recoverWriteProbeTurn = false): Promise<Run> {
@@ -304,7 +304,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   child.once("close", releaseProvider);
   const turns = new Map<string, Turn>();
   const activity = new Map<string, RunActivity>();
-  const tokens = new CodexTokenUsage();
+  const tokens = new CodexTokenUsage(onTokenUsage?.observe, onTokenUsage?.recover);
   let activeThreadId: string | undefined;
   let activeTurnId: string | undefined;
   let control: AgentControl | undefined;
@@ -415,6 +415,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       finishRun();
       try { worklog.finish(); }
       finally {
+        await rpc.drain();
         await close();
         await worklog.drain();
         await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);

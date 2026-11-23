@@ -695,6 +695,7 @@ function updateChat({ project, id, type, text, items, savedRevision, savedRun, r
     if (draft?.saving) {
       draft.text = "";
       draft.files = [];
+      delete draft.receipt;
       if (draft.quotes) draft.quotes.length = 0;
       draft.saving = undefined;
       draft.pending = "replying";
@@ -1115,6 +1116,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     const coordination = returned || ownerQuestion || (event.actor === "manager" && event.text);
     if (coordination) entry.classList.add("chat-coordination");
     entry.append(element("span", author, "chat-author"));
+    if (task.pendingLimitChat?.includes(index)) {
+      entry.append(element("span", () => t("task_chat.waiting_for_limit"), "chat-status"));
+    }
     if (attachments.length) {
       const images = attachments.filter(isImageAttachment);
       const tiles = element("div", undefined, "chat-attachments");
@@ -1388,7 +1392,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
     send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !hasDraft());
     quoteDraft.sync();
-    retryReply.hidden = lastMessage?.actor !== "user" || working() ||
+    retryReply.hidden = Boolean(task.pendingLimitChat?.length) || lastMessage?.actor !== "user" || working() ||
       Boolean(frame.board?.archived?.some(card => card.id === task.id));
     retryReply.disabled = retryReply.hidden || Boolean(draft.saving || draft.stopping);
     feedback.textContent = draft.error ?? "";
@@ -1474,17 +1478,24 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     draft.error = "";
     draft.scroll = undefined;
     const text = quoteMessage(draft.text, quotes);
+    if (!retrying && (draft.receipt?.text !== text ||
+        draft.receipt.files.length !== draft.files.length ||
+        draft.receipt.files.some((file, index) => file !== draft.files[index]))) {
+      draft.receipt = { id: crypto.randomUUID(), text, files: [...draft.files] };
+    }
     sync();
     try {
       const { model, effort } = retrying ? lastMessage.chat : await discussionSettings();
       const files = retrying ? [] : await Promise.all(draft.files.map(file => api.filePayload(file)));
       if (!area.isConnected || frame.project !== project) return;
       const { saved, result } = await api.chatSend(task.id, {
-        model, effort, text: retrying ? "" : text, files, ...(retrying ? { retryAt } : {}),
+        model, effort, text: retrying ? "" : text, files,
+        ...(retrying ? { retryAt } : { requestId: draft.receipt.id }),
       });
       if (saved && !retrying && draft.saving === submission) {
         draft.text = "";
         draft.files = [];
+        delete draft.receipt;
         quotes.length = 0;
         quoteDraft.render();
       }

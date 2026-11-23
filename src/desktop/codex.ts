@@ -277,7 +277,7 @@ export async function configuredCodex(dataDirectory: string) {
   return client && withAuthMode(client, dataDirectory, mode);
 }
 
-async function withAccountServer<T>(client: Client, action: (rpc: ReturnType<typeof codexRpc>) => Promise<T>): Promise<T> {
+export async function withAccountServer<T>(client: Client, action: (rpc: ReturnType<typeof codexRpc>) => Promise<T>): Promise<T> {
   const child = spawn(client.path, [...client.args, "app-server"], {
     env: client.env, windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
   });

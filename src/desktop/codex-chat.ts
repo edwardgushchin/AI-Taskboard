@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { findQueuedTurn } from "./codex-queued-turn.ts";
 import { CodexRoutingTimeout, isRoutingTimeout } from "./codex-routing-timeout.ts";
 import { setTimeout as delay } from "node:timers/promises";
-import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "./codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, dailyBudgetInterruption, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
 import type { ManagerAccess } from "./codex.ts";
@@ -28,7 +28,7 @@ import type { ChatImage } from "./chat-images.ts";
 import type { CliReply } from "./cli.ts";
 import type { ChatSettings, ChatUsage, ExpertPhase, Task } from "../cli/model.ts";
 import type { Expert } from "../cli/experts.ts";
-import { CodexTokenUsage } from "./codex-token-usage.ts";
+import { CodexTokenUsage, type UsageWriter } from "./codex-token-usage.ts";
 import { runActivity, runLog } from "./run-activity.ts";
 import type { RunActivity, TaskEvent } from "../cli/model.ts";
 import type { TokenUsageReport } from "../cli/token-usage.ts";
@@ -62,6 +62,7 @@ async function withServer<T>(
     request: <R>(method: string, params: object, notify?: Notification) => Promise<R>;
     receive: (notify?: Notification) => Promise<RpcMessage>;
     refreshTimeout: (ms?: number) => void;
+    setBudgetInterrupt: (interrupt: () => Promise<void>) => void;
   }) => Promise<T>, onRequest?: ServerRequest, signal?: AbortSignal,
   { mcp, research, fullAccess, webSearch = research, providerTools = true }: {
     mcp?: BoardMcpConnection; research?: boolean; fullAccess?: boolean; webSearch?: boolean; providerTools?: boolean;
@@ -94,9 +95,19 @@ async function withServer<T>(
   child.once("close", releaseProvider);
   let notify: Notification | undefined;
   const rpc = codexRpc(child, message => notify?.(message), onRequest);
-  const abort = () => {
+  let budgetInterrupt: (() => Promise<void>) | undefined;
+  let interruptTimeout: NodeJS.Timeout | undefined;
+  const forceAbort = () => {
     rpc.fail(signal?.reason instanceof Error ? signal.reason : new Error("The Codex session was interrupted."));
     void stop();
+  };
+  const abort = () => {
+    if (signal?.reason === dailyBudgetInterruption && budgetInterrupt) {
+      interruptTimeout = setTimeout(forceAbort, 5_000);
+      void budgetInterrupt().catch(forceAbort);
+    } else {
+      forceAbort();
+    }
   };
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
@@ -126,10 +137,15 @@ async function withServer<T>(
       ...(onRequest ? { capabilities: { experimentalApi: true, requestAttestation: false } } : {}),
     });
     send({ method: "initialized" });
-    return await releaseProvider.run(() => callback({ client, request, receive, refreshTimeout }));
+    return await releaseProvider.run(() => callback({
+      client, request, receive, refreshTimeout,
+      setBudgetInterrupt: interrupt => { budgetInterrupt = interrupt; },
+    }));
   } finally {
     clearTimeout(timeout);
+    clearTimeout(interruptTimeout);
     signal?.removeEventListener("abort", abort);
+    await rpc.drain();
     const force = rpc.failed;
     rpc.close();
     if (force) await stop();
@@ -169,7 +185,7 @@ type ReviewThread = {
 
 export async function reviewWithCodex(profile: string, project: string, settings: ChatSettings | null | undefined,
   context: string, tools: object[], runAction: RunAction, signal: AbortSignal,
-  onTokenUsage: (report: TokenUsageReport) => Promise<void>, taskId?: string,
+  onTokenUsage: UsageWriter, taskId?: string,
   onActivity?: (items: RunActivity[]) => void, plan?: ExpertPhase, targetHead?: string | null, submissionSequence = 0,
   reviewThread?: ReviewThread) {
   let usage: TokenUsageReport | undefined;
@@ -186,7 +202,10 @@ export async function reviewWithCodex(profile: string, project: string, settings
     specialistDelegation: Boolean(plan?.stages.length),
     onControl: taskId ? (control: AgentControl) => { stopMail = watchTeamMail(project, taskId, control, "reviewer", submissionSequence); } : undefined,
     observeProvider: stages?.observe, onProviderReady: stages?.bind, stageReporter: stages, reviewThread,
-    onTokenUsage: async (report: TokenUsageReport) => { usage = report; }, finalAnswerSchema: {
+    onTokenUsage: Object.assign(async (report: TokenUsageReport) => { usage = report; }, {
+      observe: onTokenUsage.observe,
+      recover: onTokenUsage.recover,
+    }), finalAnswerSchema: {
       type: "object", additionalProperties: false, required: ["summary", "findings", "evidence", "needsHuman", "verifyRisk", "ownerQuestion"],
       properties: {
         summary: { type: "string" },
@@ -289,7 +308,7 @@ export function replyToTask(
   onCommentary: (text: string) => void,
   runAction: RunAction,
   imageDirectory: string, imageLimit: number,
-  onTokenUsage?: (report: TokenUsageReport) => Promise<void>,
+  onTokenUsage?: UsageWriter,
   onControl?: (control: AgentControl) => void,
   signal?: AbortSignal,
   taskId?: string,
@@ -548,7 +567,7 @@ interface BoardSession {
   onTurnStarting?: () => void;
   onTurnRejected?: () => void;
   onTurnEnded?: () => void;
-  onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
+  onTokenUsage?: UsageWriter;
   mcpTools: BoardMcpTool[];
 }
 
@@ -769,7 +788,7 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
 function reply(profile: string, project: string, prompt: string, images: string[], runAction: RunAction, options: {
   role?: "manager" | "executor" | "reviewer";
   settings?: ChatSettings | null; tools: object[]; instructions: string;
-  onCommentary?: (text: string) => void; onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
+  onCommentary?: (text: string) => void; onTokenUsage?: UsageWriter;
   onActivity?: (items: RunActivity[]) => void;
   onControl?: (control: AgentControl) => void; signal?: AbortSignal; imageDirectory?: string; imageLimit?: number;
   session?: BoardSession;
@@ -795,10 +814,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
   const activity = new Map<string, BoardActivity>();
   let approvalQueue = Promise.resolve();
   const calls = new Map<string, Promise<CliReply>>();
-  const tokens = new CodexTokenUsage();
+  const tokens = new CodexTokenUsage(onTokenUsage?.observe, onTokenUsage?.recover);
   let completed = false;
   let finishRun: (() => void) | undefined;
-  return withServer(profile, project, async ({ client, request, receive, refreshTimeout }) => {
+  return withServer(profile, project, async ({ client, request, receive, refreshTimeout, setBudgetInterrupt }) => {
     const [models, defaults] = await Promise.all([
       settings !== undefined ? listModels(request) : [],
       settings === null ? request<{ config: { model?: string | null; model_reasoning_effort?: string | null } }>(
@@ -1051,6 +1070,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
       const interrupt = async () => {
         if (turn?.status === "inProgress") await turnControl(request, thread.id, turn.id).interrupt();
       };
+      setBudgetInterrupt(async () => {
+        stopping = true;
+        await interrupt();
+      });
       const applyGoal = async (action: BoardGoalAction) => {
         const wasActive = currentGoal?.status === "active";
         const updated = await changeGoal(request, thread.id, action, currentGoal, notify);

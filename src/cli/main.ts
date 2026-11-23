@@ -120,6 +120,7 @@ function compactTask(task: Task) {
     awaitingAnswer: task.awaitingAnswer, draftConfirmed: task.draftConfirmed, reviewReturn: task.reviewReturn,
     questionAudience: taskQuestionAudience(task),
     draftDiscussion: status === "draft" ? task.draftDiscussion : undefined, historyLength: task.history.length,
+    pendingLimitChat: task.pendingLimitChat,
     activity: taskActivity(task),
     expertWorkPlanned: Boolean(task.expertTeam?.work?.lead || task.expertStage),
     expertReviewPlanned: Boolean(task.expertTeam?.review?.lead),

@@ -4,10 +4,11 @@ import { russianWriting } from "./russian-writing.ts";
 import { showAbout } from "./about.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
-import { CodexRpcRejection, watchCodexQuotaExceeded } from "./codex-rpc.ts";
+import { CodexRpcRejection, dailyBudgetInterruption, watchCodexQuotaExceeded } from "./codex-rpc.ts";
 import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
-import { confirmedQuota, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
-import { codexDailyBudget, type CodexBudgetRole } from "./codex-daily-budget.ts";
+import { confirmedQuota, consumeCodexReset, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
+import { BoardCodexUsage, type CodexBudgetRole } from "./codex-daily-budget.ts";
+import type { ConfirmedTurnUsage, UsageWriter } from "./codex-token-usage.ts";
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
@@ -375,8 +376,13 @@ function send(state: ProjectTab): void {
     state = owner.active;
     if (!contents.isLoadingMainFrame()) {
       const next = frame(state);
-      // Keep a value snapshot: some run objects are updated in place.
-      const serialized = serialize(next);
+      // Usage-only changes have their own IPC. Keep admission and rollover
+      // in the full frame so controls still change when those states change.
+      const budget = next.dailyBudget;
+      const serialized = serialize({
+        ...next,
+        dailyBudget: budget && { limit: budget.limit, resetsAt: budget.resetsAt, reason: budget.reason },
+      });
       if (!owner.lastFrame?.equals(serialized)) {
         contents.send("board:changed", next);
         owner.lastFrame = serialized;
@@ -418,6 +424,7 @@ function releaseWatch(project: string, watch: BoardWatch): void {
   if (!watch.tabs.size && !watch.listeners.size) {
     watch.stop();
     subscriptions.delete(project);
+    releaseBoardUsage(project);
     for (const { active } of windowStates.values()) send(active);
   }
 }
@@ -669,6 +676,7 @@ function saveSession(): boolean {
 interface ProjectOperation {
   label?: string;
   agent?: boolean;
+  budgeted?: boolean;
   controller: AbortController;
   done: Promise<void>;
   finish: () => void;
@@ -734,13 +742,16 @@ const applicationUpdates = new ApplicationUpdates({
   },
 });
 
-function beginOperation(project: string, label?: string, agent = false) {
+function beginOperation(project: string, label?: string, agent = false, budgeted = agent) {
   if (closingProjects.has(project)) throw new Error(t("ui.the_project_is_closing_beb637fb"));
   const controller = new AbortController();
   const completion = Promise.withResolvers<void>();
-  const operation: ProjectOperation = { label, agent, controller, done: completion.promise, finish: () => {
+  const operation: ProjectOperation = { label, agent, budgeted, controller, done: completion.promise, finish: () => {
     projectOperations.get(project)?.delete(operation);
-    if (!projectOperations.get(project)?.size) projectOperations.delete(project);
+    if (!projectOperations.get(project)?.size) {
+      projectOperations.delete(project);
+      if (!subscriptions.has(project)) releaseBoardUsage(project);
+    }
     completion.resolve();
   } };
   const operations = projectOperations.get(project) ?? new Set();
@@ -1073,43 +1084,118 @@ interface ChatRequest {
   text: string;
   files: PastedFile[];
   retryAt?: number;
+  requestId?: string;
 }
 
 type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
 
 let tokenUsage: TokenUsageQueue | undefined;
-const tokenUsageQueue = () => tokenUsage ??= new TokenUsageQueue(app.getPath("userData"), undefined, project => {
+const boardUsage = new Map<string, BoardCodexUsage>();
+const budgetPublications = new Map<string, NodeJS.Timeout>();
+
+function releaseBoardUsage(project: string) {
+  if (projectOperations.has(project)) return;
+  clearTimeout(budgetPublications.get(project));
+  budgetPublications.delete(project);
+  if (boardUsage.get(project)?.flush()) boardUsage.delete(project);
+}
+
+function usageForBoard(project: string) {
+  let usage = boardUsage.get(project);
+  if (!usage) {
+    usage = new BoardCodexUsage(project);
+    boardUsage.set(project, usage);
+  }
+  return usage;
+}
+
+function publishBudget(project: string) {
   const watch = subscriptions.get(project);
-  if (watch) for (const tab of watch.tabs) send(tab);
+  if (!watch) return;
+  const budget = boardCodexBudget(project, watch.board.settings);
+  watch.lastBudget = JSON.stringify(budget);
+  for (const tab of watch.tabs) {
+    if (!tab.window.isDestroyed() && windowStates.get(tab.window.webContents.id)?.active === tab) {
+      tab.window.webContents.send("providers:budgetChanged", budget);
+    }
+  }
+}
+
+function budgetUpdated(project: string) {
+  const budget = boardCodexBudget(project, subscriptions.get(project)?.board.settings);
+  let interrupted = false;
+  if (budget?.reason === "exhausted") {
+    for (const operation of projectOperations.get(project) ?? []) {
+      if (operation.budgeted && !operation.controller.signal.aborted) {
+        operation.controller.abort(dailyBudgetInterruption);
+        interrupted = true;
+      }
+    }
+  }
+  if (interrupted) {
+    for (const tab of subscriptions.get(project)?.tabs ?? []) send(tab);
+  }
+  if (!budgetPublications.has(project)) {
+    budgetPublications.set(project, setTimeout(() => {
+      budgetPublications.delete(project);
+      publishBudget(project);
+    }, 250));
+  }
+}
+
+function usageWriter(project: string, write: UsageWriter): UsageWriter {
+  return Object.assign(write, {
+    recover: (threadId: string, turnId: string) => {
+      try {
+        return usageForBoard(project).recover(threadId, turnId);
+      } catch (error) {
+        console.warn("Could not recover a Codex usage baseline.", error);
+      }
+    },
+    observe: (usage: ConfirmedTurnUsage) => {
+      try {
+        if (usageForBoard(project).observe(usage)) budgetUpdated(project);
+      } catch (error) {
+        console.warn("Could not account for a Codex usage snapshot.", error);
+      }
+    },
+  });
+}
+
+const tokenUsageQueue = () => tokenUsage ??= new TokenUsageQueue(app.getPath("userData"), undefined, project => {
+  boardUsage.get(project)?.invalidateLegacy();
+  budgetUpdated(project);
   scheduleAgentWork();
 });
 
-function boardCodexBudget(project: string, settings = readBoardSettings(runtimeLocation(project))) {
-  const limit = settings.codexDailyTokens;
-  if (limit === undefined) return;
+function boardCodexBudget(project: string, settings?: BoardSettings) {
   try {
-    const now = Date.now();
-    const budget = codexDailyBudget(project, limit, now);
-    const midnight = new Date(now).setHours(0, 0, 0, 0);
-    if (!budget.reason && tokenUsage?.hasPendingBudget(project, midnight, now)) {
-      return { ...budget, reason: "unknown" as const };
-    }
-    return budget;
+    const limit = (settings ?? subscriptions.get(project)?.board.settings ??
+      readBoardSettings(runtimeLocation(project))).codexDailyTokens;
+    if (limit === undefined) return;
+    return usageForBoard(project).get(limit);
   } catch (error) {
     console.warn("Could not read the board Codex budget.", error);
-    const reset = new Date();
-    reset.setHours(24, 0, 0, 0);
-    return { limit, spent: 0, remaining: limit, resetsAt: reset.getTime(), reason: "unknown" as const };
   }
 }
 
 function boardBudgetFailure(project: string, settings?: BoardSettings) {
   const budget = boardCodexBudget(project, settings);
-  if (budget?.reason) return cliFailure("BOARD_CODEX_BUDGET", t("limits.board." + budget.reason));
+  if (budget?.reason === "exhausted") return cliFailure("BOARD_CODEX_BUDGET", t("limits.board.exhausted"));
 }
 
 function saveDailyUsage(project: string, role: CodexBudgetRole, report: TokenUsageReport, task?: string) {
-  tokenUsageQueue().enqueueBudget(project, role, report, task);
+  const previous = boardCodexBudget(project);
+  const reconciled = usageForBoard(project).reconcile(report);
+  const current = boardCodexBudget(project);
+  if (current?.spent !== previous?.spent) {
+    budgetUpdated(project);
+    if (previous?.reason && !current?.reason) {
+      for (const tab of subscriptions.get(project)?.tabs ?? []) send(tab);
+      scheduleAgentWork();
+    }
+  }
+  tokenUsageQueue().enqueueBudget(project, role, reconciled, task);
 }
 
 async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport,
@@ -1129,12 +1215,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   }
   const key = project + "\0" + id;
   const active = activeAgents.get(key);
-  if (quotaWait) return { saved: false, result: quotaFailure() };
-  if (!active || automatic) {
-    const blocked = boardBudgetFailure(project);
-    if (blocked) return { saved: false, result: blocked };
-  }
-  if (returningDrafts.has(key) || (!active && (chatRuns.has(key) || launchingTasks.has(key))) ||
+  const limited = quotaWait ? quotaFailure() : boardBudgetFailure(project);
+  const persistOnly = Boolean(limited && !automatic && request.retryAt === undefined);
+  if (limited && !persistOnly) return { saved: false, result: limited };
+  if (returningDrafts.has(key) || (!persistOnly && !active && (chatRuns.has(key) || launchingTasks.has(key))) ||
       (active && (automatic || active.draftDiscussion || request.retryAt !== undefined ||
         active.chatWindow !== undefined && active.chatWindow !== chatWindow))) {
     return { saved: false, result: cliFailure("CHAT_BUSY", t("ui.the_agent_is_already_replying_to_this_task_234378d8")) };
@@ -1142,15 +1226,16 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
     t("ui.the_project_is_closing_beb637fb")) };
   // A steering request can outlive the provider turn whose files it is preparing.
-  const writer = active ? registerRuntime(project, { kind: "task", task: id }) : agentSlots.claim(project, id);
-  if (!writer) return { saved: false, result: cliFailure("CHAT_BUSY", t("task_chat.writer_busy")) };
-  const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id, true);
+  const writer = persistOnly ? undefined : active
+    ? registerRuntime(project, { kind: "task", task: id }) : agentSlots.claim(project, id);
+  if (!writer && !persistOnly) return { saved: false, result: cliFailure("CHAT_BUSY", t("task_chat.writer_busy")) };
+  const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id, !persistOnly);
   const signal = operation.controller.signal;
   const steering = active ? steeringOperations.get(key) ?? new Set<ProjectOperation>() : undefined;
-  if (steering) {
+  if (!persistOnly && steering) {
     steering.add(operation);
     steeringOperations.set(key, steering);
-  } else {
+  } else if (!persistOnly) {
     chatRuns.add(key);
     taskOperations.set(key, operation);
   }
@@ -1213,9 +1298,17 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
       }
       signal.throwIfAborted();
-      reply = await callCli<Task>(project, ["chat", id], { text, model, effort, attachmentSources: sources });
+      const waitForLimit = persistOnly || Boolean(quotaWait || boardBudgetFailure(project));
+      reply = await callCli<Task>(project, ["chat", id], {
+        text, model, effort, attachmentSources: sources, waitForLimit, requestId: request.requestId,
+      });
       saved = reply.ok;
       if (saved) notify({ type: "saved" });
+      if (waitForLimit || (reply.ok && reply.data.pendingLimitChat?.length)) return { saved, result: reply };
+      if (reply.ok && request.requestId &&
+          reply.data.history.findLast(event => event.chat)?.chat?.requestId !== request.requestId) {
+        return { saved, result: reply };
+      }
     } else {
       reply = await callCli<Task>(project, ["chat", id], { retryAt });
     }
@@ -1230,11 +1323,15 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       const linked = linkedDraftManagerReply(task, event);
       return linked ? [{ sequence, ...linked }] : [];
     });
-    const last = task.history.findLastIndex(entry => entry.chat);
+    const latest = task.history.findLastIndex(entry => entry.chat);
+    const last = retryAt ?? latest;
     const message = task.history[last];
-    if (!automatic && (message?.actor !== "user" || retryAt !== undefined && last !== retryAt)) {
+    const pending = task.pendingLimitChat;
+    if (!automatic && (message?.actor !== "user" ||
+        (pending?.length ? last !== pending[0] : last !== latest))) {
       return { saved, result: cliFailure("CHAT_CHANGED", t("ui.this_message_is_no_longer_awaiting_a_reply_6ec519ec")) };
     }
+    if (retryAt !== undefined && message?.chat) ({ model, effort } = message.chat);
     if (!active && !automatic) {
       replyingTasks.add(key);
       publishDiscussionActivity(project, id, []);
@@ -1294,7 +1391,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         actor: event.actor, action: event.action, text: event.text, from: event.from, to: event.to, files: event.chat?.files,
         ...(event.expertMessage ? { sequence: index + 1, expertMessage: event.expertMessage, kind: event.messageKind } : {}),
       })),
-      subsequentEvents: automatic ? undefined : task.history.slice(last + 1),
+      subsequentEvents: automatic ? undefined : task.history.slice(last + 1)
+        .filter((_event, index) => !pending?.includes(last + index + 1)),
       attachments,
       latestUserMessage: automatic ? undefined : { text: message.text ?? "", files: message.chat?.files ?? [] },
     });
@@ -1366,11 +1464,11 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         steering.resolve();
       };
     } });
-    const answer = await writer.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
+    const answer = await writer!.run(() => replyToTask(app.getPath("userData"), project, { model, effort }, prompt, images,
       text => notify({ type: "commentary", text }),
       (name, args) => runAction(name, args),
       scratch!, maxAttachmentBytes - task.attachments.reduce((sum, file) => sum + (file.link ? 0 : file.bytes), 0),
-      report => saveTaskTokenUsage(project, id, "discussion", report, automatic ? "draft" : "discussion"),
+      usageWriter(project, report => saveTaskTokenUsage(project, id, "discussion", report, automatic ? "draft" : "discussion")),
       control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
       automatic === undefined ? undefined : managerReply === undefined ? "initial" : "handoff",
       task.status === "review", Boolean(task.closedAt), inspectDraft)).finally(() => ready.reject(new Error("The agent session ended.")));
@@ -1393,12 +1491,12 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     return { saved, result };
   } catch (error) {
-    if (signal.reason === quotaInterruption) return { saved, result: quotaFailure() };
+    if (interruptedForLimit(signal)) return { saved, result: quotaFailure() };
     const message = error instanceof Error ? error.message : String(error);
     discussionFailure = message;
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
   } finally {
-    if (discussionStarted && signal.reason !== quotaInterruption) {
+    if (discussionStarted && !interruptedForLimit(signal)) {
       try {
         const current = await callCli<Task>(project, ["show", id, "--compact"]);
         if (current.ok && current.data.status === "draft" && current.data.draftDiscussion?.phase === "running") {
@@ -1412,21 +1510,24 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         }
       } catch (error) { console.warn("Could not save the draft discussion failure.", error); }
     }
-    if (!active) {
+    if (persistOnly) {
+      if (scratch) await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+      if (saved) scheduleAgentWork();
+    } else if (!active) {
       activeAgents.delete(key);
       const wasReplying = replyingTasks.delete(key);
       if (wasReplying) publishDiscussionActivity(project, id, undefined, savedDiscussionRevision);
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       chatRuns.delete(key);
       taskOperations.delete(key);
-      writer();
+      writer?.();
       if (!automatic) scheduleAgentWork();
       if (wasReplying) notifyRunChange(project);
     } else {
       if (scratch && directories.has(scratch)) {
         await rm(scratch, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       }
-      writer();
+      writer?.();
       steering?.delete(operation);
       if (!steering?.size) steeringOperations.delete(key);
     }
@@ -1440,6 +1541,8 @@ ipcMain.handle("chat:send", async (event, id: unknown, request: unknown) => {
   if (!project || typeof id !== "string" || !/^T-\d{4,}$/.test(id) || !input ||
       typeof input.model !== "string" || !input.model.trim() || typeof input.effort !== "string" || !input.effort.trim() ||
       typeof input.text !== "string" || !Array.isArray(input.files) || !input.files.every(isPastedFile) ||
+      (input.requestId !== undefined && (typeof input.requestId !== "string" ||
+        !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/.test(input.requestId))) ||
       (input.retryAt !== undefined && (!Number.isSafeInteger(input.retryAt) || input.retryAt < 0)) ||
       (input.retryAt === undefined && !input.text.trim() && !input.files.length)) {
     return { saved: false, result: cliFailure("INVALID_INPUT", t("ui.choose_a_task_a_model_and_a_message_847c6007")) };
@@ -1932,6 +2035,7 @@ function scheduleAgentWork() {
     if (quotaWait) return;
     try {
       for (const watch of subscriptions.values()) {
+        scheduleLimitChat(watch);
         scheduleAutoReview(watch);
         scheduleAutoBoard(watch);
       }
@@ -1941,6 +2045,31 @@ function scheduleAgentWork() {
 }
 
 const maxRestoredDraftDiscussions = 2;
+const limitChatRetries = new Map<string, number>();
+let restoredLimitChats = 0;
+
+function scheduleLimitChat({ board }: BoardWatch) {
+  const { project, settings } = board;
+  if (restoredLimitChats >= maxRestoredDraftDiscussions || closingProjects.has(project) ||
+      boardBudgetFailure(project, settings)) return;
+  const now = Date.now();
+  for (const [key, time] of limitChatRetries) {
+    if (time <= now) limitChatRetries.delete(key);
+  }
+  for (const task of board.tasks) {
+    const retryAt = task.pendingLimitChat?.[0];
+    if (retryAt === undefined) continue;
+    const key = project + "\0" + task.id;
+    if (limitChatRetries.has(key) || activeAgents.has(key) || chatRuns.has(key) || launchingTasks.has(key)) continue;
+    limitChatRetries.set(key, now + 5_000);
+    restoredLimitChats++;
+    void sendChat(project, task.id, { model: "", effort: "", text: "", files: [], retryAt }, () => {})
+      .catch(error => console.warn("Could not resume a saved chat message.", error))
+      .finally(() => { restoredLimitChats--; });
+    return;
+  }
+}
+
 let restoredDraftDiscussions = 0;
 let lastDraftDiscussionProject: string | undefined;
 
@@ -1961,7 +2090,8 @@ function scheduleDraftDiscussions() {
         const index = ((watch.draftDiscussionCursor ?? 0) + offset) % tasks.length;
         const task = tasks[index];
         const phase = task.draftDiscussion?.phase;
-        if (task.status !== "draft" || (phase !== "queued" && phase !== "running") || writers.has(task.id)) continue;
+        if (task.status !== "draft" || task.pendingLimitChat?.length ||
+            (phase !== "queued" && phase !== "running") || writers.has(task.id)) continue;
         watch.draftDiscussionCursor = index + 1;
         lastDraftDiscussionProject = project;
         restoredDraftDiscussions++;
@@ -2852,7 +2982,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const broadcastMaintenanceSafe: typeof broadcastBoardChat = (...args) => { if (!cleanupJob) broadcastBoardChat(...args); };
   const projectKey = projectIdentity(board.project);
   const background = Boolean(reviewIds || autoNotice || draftNotice || repairTask || cleanupJob || approvalNotices);
-  if (background || iteration || goal === "resume") {
+  if (background || goal) {
     const blocked = boardBudgetFailure(board.project);
     if (blocked) return blocked;
   }
@@ -3043,7 +3173,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     : undefined;
   const operation = beginOperation(project, cleanupJob
     ? [t("ui.checking_worktree_cleanup_1f82f9a8"), cleanupJob.task].filter(Boolean).join(" · ")
-    : [t("ui.project_manager_48697fa0"), repairTask?.id ?? reviewIds?.join(", ")].filter(Boolean).join(" · "), true);
+    : [t("ui.project_manager_48697fa0"), repairTask?.id ?? reviewIds?.join(", ")].filter(Boolean).join(" · "), true, Boolean(background || goal));
   const signal = operation.controller.signal;
   if (managerReviewKey) managerReviewOperations.set(managerReviewKey, operation);
   const startedAt = Date.now();
@@ -3932,14 +4062,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           endReview();
           saveHistory();
         },
-        onTokenUsage: async report => {
+        onTokenUsage: usageWriter(project, async report => {
           if (cleanupJob?.task) return saveTaskTokenUsage(project, cleanupJob.task, "reviewer", report, "background");
           if (repairTask) return saveTaskTokenUsage(project, repairTask.id, "reviewer", report);
           saveDailyUsage(project, reviewIds ? "reviewer" : background || iteration ? "background" : "manager", report);
           if (cleanupJob) return;
           const saved = await callCli(project, ["manager-usage"], report);
           if (!saved.ok) console.warn("Could not save manager token usage (%s).", saved.error.code);
-        },
+        }),
         title: t("ui.project_manager_for_3f3547d6") + (basename(board.project) || board.project),
         save: id => {
           if (!background) writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
@@ -4067,7 +4197,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }));
     await pendingAction;
     signal.throwIfAborted();
-    if (signal.reason === quotaInterruption) return quotaFailure();
+    if (interruptedForLimit(signal)) return quotaFailure();
     if ("interrupted" in response) return { ok: true as const, data: {
       answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: t("ui.reply_stopped_c7fee9e0"), id: threadId,
       keepQueued: Boolean(queuedPath && !acceptedMessage),
@@ -4107,7 +4237,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   } catch (error) {
     await pendingAction;
     if (signal.reason === switchMode) return { ok: true as const, data: { answer: "", changes } };
-    if (operation.controller.signal.reason === quotaInterruption) return quotaFailure();
+    if (goal && !iteration && signal.reason === dailyBudgetInterruption) {
+      const binding = boardThreadPath(project);
+      const saved = readBoardThread(binding);
+      if (saved?.goal?.status === "active") writeJson(binding, { ...saved, budgetDeferred: true });
+    }
+    if (interruptedForLimit(operation.controller.signal)) return quotaFailure();
     if (cancelledWhileWaiting) return cliFailure("BOARD_WAIT_CANCELLED", "");
     const message = t("ui.could_not_complete_the_board_request_91ea559c") + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500);
     if (goalSet || changes.length || acceptedMessage) {
@@ -4123,7 +4258,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       try { await callCli(project, ["maintenance"], { action: "release", id: cleanupJob.id, owner: process.pid }); }
       catch (error) { console.warn("Private maintenance release deferred", error); }
     }
-    if (reviewThreadPath && signal.reason !== quotaInterruption) {
+    if (reviewThreadPath && !interruptedForLimit(signal)) {
       try { rmSync(reviewThreadPath, { force: true }); }
       catch (error) { console.warn("Could not remove the completed review thread binding.", error); }
     }
@@ -4137,7 +4272,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     for (const receipt of steering.values()) receipt.resolve(false);
     await sendingNow?.catch(() => {});
     for (const directory of scratch) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
-    if (queuedPath && !acceptedMessage && signal.reason !== quotaInterruption) {
+    if (queuedPath && !acceptedMessage && !interruptedForLimit(signal)) {
       try {
         runtimeTransaction(project, () => {
           const pending = readQueuedMessage(queuedPath);
@@ -4362,7 +4497,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       const started = performance.now();
       return withReviewerChat(project, id, () => broadcastBoardChat(project, "reviewer-chat", { id }), async onActivity => {
         const records: TokenUsageReport["records"] = [];
-        const trackUsage = async (report: TokenUsageReport) => {
+        const trackUsage = usageWriter(project, async report => {
           saveDailyUsage(project, "reviewer", report, id);
           const snapshot = new Map(records.map(record => [usageKey(record), record]));
           for (const record of report.records) snapshot.set(usageKey(record), record);
@@ -4373,7 +4508,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
               reviewTiming: { submissionSequence, startedAtMs, durationMs: Math.round(performance.now() - started) },
             } : {}),
           };
-        };
+        });
         reviewSignal.throwIfAborted();
         // A manual retry starts fresh even if shutdown left the exhausted turn's checkpoint behind.
         const path = join(runtimeLocation(project).directory, "reviewer-quota-" + id + ".json");
@@ -4431,12 +4566,12 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
           return await reviewPass(reviewVerifier, JSON.stringify({ ...evidence, candidateReview: candidate }),
             items => onActivity([...previous, ...items]));
         } finally {
-          if (!retry && signal.reason !== quotaInterruption) {
+          if (!retry && !interruptedForLimit(signal)) {
             try { rmSync(path, { force: true }); }
             catch (error) { console.warn("Could not remove the completed reviewer checkpoint.", error); }
           }
         }
-      }, () => signal.reason === quotaInterruption);
+      }, () => interruptedForLimit(signal));
     }, reports);
   const notify = (error: string) => {
     if (!signal.aborted && !quotaWait) broadcastBoardChat(project, "orchestrator-review-error", { id, error: id + " · " + error });
@@ -4601,7 +4736,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
     try {
       if (usage) await saveTaskTokenUsage(project, id, "reviewer", usage);
     } finally {
-      if (signal.reason === quotaInterruption) {
+      if (interruptedForLimit(signal)) {
         watch.reviewAttempts.delete(id);
         broadcastBoardChat(project, "orchestrator-review-error", { id });
       }
@@ -5285,7 +5420,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       const task = current.data;
       queuedRevision = task.reviewReturn;
       queued = true;
-      if (waitingForQuota || signal.reason === quotaInterruption) {
+      if (waitingForQuota || interruptedForLimit(signal)) {
         // The CLI saved the return before this operation could reserve a slot.
         runtimeTransaction(project, entries => {
           const pending = entries.find(entry => entry.reviewReturn && matchesQueuedExecutor(entry, task));
@@ -5428,7 +5563,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (newThread) {
         queuedRevision = revision;
         agentSlots.defer(project, id, {
-          revision, newThread, quotaPaused: signal.reason === quotaInterruption || undefined,
+          revision, newThread, quotaPaused: interruptedForLimit(signal) || undefined,
         });
         queued = true;
       }
@@ -5490,7 +5625,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       }
       activity.set(item.id, item);
       updateTimer ??= setTimeout(publish, 80);
-    }, report => saveTaskTokenUsage(project, id, role, report), signal, async (codexThreadId, created) => {
+    }, usageWriter(project, report => saveTaskTokenUsage(project, id, role, report)), signal, async (codexThreadId, created) => {
       runThreadId = codexThreadId;
       if (!queued && linked.codexThreadId === codexThreadId) {
         rememberExecutor(project, linked, cwd, continuation);
@@ -5586,7 +5721,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         }
       }
       if (discussionActivityByTask.has(key)) publishDiscussionActivity(project, id, undefined, savedRevision);
-      if (signal.reason === quotaInterruption && !stopRequested) {
+      if (interruptedForLimit(signal) && !stopRequested) {
         await saveActivity();
         return;
       }
@@ -5708,7 +5843,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       for (const directory of directories) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
       runningTasks.delete(key);
       launchingTasks.delete(key);
-      releaseSlot(signal.reason === quotaInterruption && !stopRequested ? "quota" : requeueRecoveredTurn || (signal.aborted && closingProjects.has(project)));
+      releaseSlot(interruptedForLimit(signal) && !stopRequested ? "quota" : requeueRecoveredTurn || (signal.aborted && closingProjects.has(project)));
       try {
         if (retry && !signal.aborted && !stopRequested && !closingProjects.has(project)) {
           const resumed = await launchTask(project, id, undefined, false, retry.revision, retry.continuation);
@@ -5732,7 +5867,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         operation.finish();
       }
     });
-    if (queued && routingRetryAt === undefined && signal.reason !== quotaInterruption) {
+    if (queued && routingRetryAt === undefined && !interruptedForLimit(signal)) {
       try {
         const pending = agentSlots.entries(project).find(entry => matchesQueuedExecutor(entry, linked));
         if (pending?.revision !== undefined) agentSlots.defer(project, id, undefined, pending.revision);
@@ -5743,13 +5878,13 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
     return { ok: true, data: linked };
   } catch (error) {
     const code = (error as { code?: string }).code;
-    if (rejectedWriteProbeTurn && (!signal.aborted || signal.reason === quotaInterruption)) {
+    if (rejectedWriteProbeTurn && (!signal.aborted || interruptedForLimit(signal))) {
       await saveActivity();
       return await callCli<LaunchState>(project, ["block", id, "--compact"], {
         ...rejectedWriteProbeTurn, retryExecutor: true, condition: t("ui.write_probe_retry_condition"),
       });
     }
-    if (signal.reason === quotaInterruption) {
+    if (interruptedForLimit(signal)) {
       await saveActivity();
       return quotaFailure();
     }
@@ -5819,7 +5954,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
   } finally {
     if (!monitoring) {
       launchingTasks.delete(key);
-      release?.(signal.reason === quotaInterruption ? "quota" : signal.aborted && closingProjects.has(project));
+      release?.(interruptedForLimit(signal) ? "quota" : signal.aborted && closingProjects.has(project));
       notifyRunChange(project);
       operation.finish();
     }
@@ -5868,6 +6003,10 @@ ipcMain.handle("board:launchTask", async (event, id: unknown, options: unknown =
 const readProviderLimits = providerLimitSource(() => readCodexLimits(app.getPath("userData")));
 const quotaFile = () => join(app.getPath("userData"), "codex-quota-wait.json");
 const quotaInterruption = new Error("Codex quota exhausted");
+
+function interruptedForLimit(signal: AbortSignal) {
+  return signal.reason === quotaInterruption || signal.reason === dailyBudgetInterruption;
+}
 let quotaWait: QuotaWait | undefined;
 let quotaRefresh: ReturnType<typeof readProviderLimits> | undefined;
 
@@ -5925,6 +6064,42 @@ function resetProviderLimits() {
   publishProviderLimits();
 }
 ipcMain.handle("providers:limits", event => { stateOf(event); return refreshQuota(); });
+let confirmingCodexReset = false;
+ipcMain.handle("providers:resetCodex", async (event, expected: unknown) => {
+  const tab = stateOf(event);
+  if (typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected) || confirmingCodexReset) return "cancelled";
+  confirmingCodexReset = true;
+  try {
+    const limits = (await refreshQuota()).find(item => item.resetAccount === expected);
+    if (!limits?.availableResetCount) return "unavailable";
+    const answer = await dialog.showMessageBox(tab.window, {
+      type: "question",
+      message: t("limits.reset_codex"),
+      detail: t("limits.reset_confirmation"),
+      buttons: [t("ui.cancel_4c6dcc32"), t("limits.reset_confirm")],
+      cancelId: 0,
+      defaultId: 0,
+      noLink: true,
+    });
+    if (answer.response !== 1) return "cancelled";
+    if (changingCodexAuth) return "accountChanged";
+    const outcome = await consumeCodexReset(app.getPath("userData"), expected, randomUUID());
+    resetProviderLimits();
+    await refreshQuota();
+    return outcome;
+  } finally {
+    confirmingCodexReset = false;
+  }
+});
+ipcMain.handle("providers:resetBoardBudget", (event, project: unknown) => {
+  const active = stateOf(event);
+  if (!active.board || active.project !== project) return false;
+  usageForBoard(active.board.project).reset();
+  publishBudget(active.board.project);
+  for (const tab of subscriptions.get(active.board.project)?.tabs ?? []) send(tab);
+  scheduleAgentWork();
+  return true;
+});
 ipcMain.handle("codex:status", event => {
   stateOf(event);
   return codexStatus(app.getPath("userData"));
@@ -6044,8 +6219,10 @@ else {
           const previous = watch.shared;
           const budget = JSON.stringify(boardCodexBudget(project, watch.board.settings));
           if (budget !== watch.lastBudget) {
-            watch.lastBudget = budget;
-            for (const tab of watch.tabs) send(tab);
+            const exhausted = (value?: string) => value?.includes('"exhausted"') ?? false;
+            const changedAdmission = exhausted(budget) !== exhausted(watch.lastBudget);
+            publishBudget(project);
+            if (changedAdmission) for (const tab of watch.tabs) send(tab);
           }
           resumeDeferredBoardGoal(watch);
           const next = watch.shared = {
@@ -6173,6 +6350,7 @@ else {
           return;
         }
       }
+      for (const usage of boardUsage.values()) usage.flush();
       quitting = true;
       app.quit();
     })().finally(() => { quitPending = false; });

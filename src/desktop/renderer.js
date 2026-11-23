@@ -6463,7 +6463,7 @@ function update(next) {
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
   frame = next;
-  window.renderProviderLimits?.(frame.dailyBudget);
+  window.renderProviderLimits?.(frame.dailyBudget, frame.project);
   const languageSelect = byId("language-select");
   if (languageSelect) languageSelect.value = next.localization?.preference ?? "system";
   if (languageChanged) {

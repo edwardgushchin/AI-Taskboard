@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { emptyTokenCounts } from "../src/cli/token-usage.ts";
-import { codexDailyBudget, recordCodexDailyUsage } from "../src/desktop/codex-daily-budget.ts";
+import { BoardCodexUsage, codexDailyBudget, recordCodexDailyUsage } from "../src/desktop/codex-daily-budget.ts";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { codexLimitSnapshot, confirmedQuota } from "../src/desktop/provider-limits.ts";
 import { TokenUsageQueue } from "../src/desktop/token-usage-queue.ts";
@@ -35,7 +35,7 @@ test("board budgets count each completed turn once and ignore account quota chan
   assert.equal(recordCodexDailyUsage(alpha, "executor", executor, "T-0001"), false);
   assert.equal(recordCodexDailyUsage(alpha, "executor", { ...executor, id: "replay" }, "T-0001"), false);
   recordCodexDailyUsage(alpha, "draft", report("draft", today, null), "T-0002");
-  assert.equal(codexDailyBudget(alpha, 100, today).reason, "unknown");
+  assert.equal(codexDailyBudget(alpha, 100, today).reason, undefined);
   recordCodexDailyUsage(alpha, "draft", report("draft", today, 10, 2), "T-0002");
   assert.equal(recordCodexDailyUsage(alpha, "draft", report("draft", today, null), "T-0002"), false);
   assert.equal(codexDailyBudget(alpha, 100, today).reason, undefined);
@@ -112,7 +112,7 @@ test("budget waits for a missing cache count and retains the gross statistics", 
     observe(null, cached === 700 ? cached : null);
     const pending = stream.completeTurn("thread", { id: turnId, completedAt: ended / 1000 })!;
     assert.equal(recordCodexDailyUsage(project, "manager", pending), true);
-    assert.equal(codexDailyBudget(project, 1701, ended).reason, "unknown");
+    assert.equal(codexDailyBudget(project, 1701, ended).reason, undefined);
     const completed = observe(cached)!;
     for (const [key, value] of Object.entries(last)) {
       assert.equal(completed.records[0][key as keyof typeof last], value);
@@ -148,7 +148,7 @@ test("a later cumulative snapshot reconciles cache gaps within the same model", 
   const pending = collector.completeTurn("thread", { id: "turn", completedAt: completedAt / 1000 })!;
   assert.equal(pending.records[0].dailyTokens, null);
   assert.equal(recordCodexDailyUsage(project, "executor", pending), true);
-  assert.equal(codexDailyBudget(project, 300, completedAt).reason, "unknown");
+  assert.equal(codexDailyBudget(project, 300, completedAt).reason, undefined);
   const stillPending = observe(350, null)!;
   assert.equal(stillPending.records[0].dailyTokens, null);
   assert.equal(recordCodexDailyUsage(project, "executor", stillPending), true);
@@ -256,7 +256,7 @@ test("recovered turns retain the confirmed day and partial usage does not close 
   assert.equal(final.records[0].completedAt, ended);
   assert.equal(final.records[0].dailyTokens, null);
   assert.equal(recordCodexDailyUsage(project, "executor", final), true);
-  assert.equal(codexDailyBudget(project, 100, ended).reason, "unknown");
+  assert.equal(codexDailyBudget(project, 100, ended).reason, undefined);
   assert.equal(codexDailyBudget(project, 100, midnight).reason, undefined);
   assert.equal(codexDailyBudget(project, 100, midnight).remaining, 100);
 });
@@ -275,4 +275,95 @@ test("a recovered active turn remains unknown even if later notifications contai
   assert.equal(final.records[0].completedAt, ended);
   assert.equal(final.records[0].totalTokens, 9);
   assert.equal(final.records[0].dailyTokens, null);
+});
+
+test("live accounting survives midnight, a reset, and replay of a terminal report", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-live-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const midnight = new Date(2026, 10, 24).getTime();
+  const before = midnight - 1000;
+  const after = midnight + 1000;
+  const ledger = new BoardCodexUsage(project);
+  const sample = (turnId: string, tokens: number, observedAt: number) => ({
+    threadId: "thread", turnId, tokens, observedAt,
+  });
+  ledger.observe(sample("executor", 80, before));
+  ledger.observe(sample("review", 20, before));
+  assert.equal(ledger.get(100, before).reason, "exhausted");
+  assert.equal(ledger.get(100, after).spent, 0);
+  ledger.observe(sample("executor", 95, after));
+  assert.equal(ledger.get(100, after).spent, 15);
+  ledger.reset(after + 1);
+  assert.equal(ledger.get(100, after + 1).spent, 0);
+  assert.equal(ledger.observe(sample("executor", 95, after + 2)), false);
+  assert.equal(ledger.observe(sample("executor", 110, after + 2)), true);
+  ledger.flush();
+  const restored = new BoardCodexUsage(project);
+  assert.equal(restored.reconcile(report("executor", after + 3, 110)).records.length, 0);
+  assert.equal(restored.get(100, after + 3).spent, 15);
+  assert.equal(restored.get(100, midnight + 86_400_000).spent, 0);
+});
+
+test("a confirmed completion before a boundary moves a delayed increment once", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-late-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const midnight = new Date(2026, 10, 24).getTime();
+  const first = midnight - 5000;
+  const finished = first + 1000;
+  const delivered = midnight + 1000;
+  const ledger = new BoardCodexUsage(project);
+  ledger.observe({ threadId: "thread", turnId: "midnight", tokens: 10, observedAt: first });
+  ledger.observe({ threadId: "thread", turnId: "midnight", tokens: 30, observedAt: delivered });
+  assert.equal(ledger.get(100, delivered).spent, 20);
+  const final = report("midnight", finished, 30);
+  assert.equal(ledger.reconcile(final).records.length, 0);
+  assert.equal(ledger.reconcile(final).records.length, 0);
+  assert.equal(ledger.get(100, delivered).spent, 0);
+  assert.equal(ledger.get(100, finished).spent, 30);
+
+  ledger.observe({ threadId: "thread", turnId: "manual", tokens: 5, observedAt: delivered });
+  ledger.reset(delivered + 1000);
+  ledger.observe({ threadId: "thread", turnId: "manual", tokens: 20, observedAt: delivered + 3000 });
+  assert.equal(ledger.get(100, delivered + 3000).spent, 15);
+  ledger.reconcile(report("manual", delivered + 500, 25));
+  assert.equal(ledger.get(100, delivered + 3000).spent, 0);
+  assert.equal(ledger.get(100, delivered + 500).spent, 25);
+});
+
+test("a missing final event preserves the observed 110355 tokens and a recovered baseline", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-observed-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const ledger = new BoardCodexUsage(project);
+  const observer = new CodexTokenUsage(sample => { ledger.observe(sample); });
+  const threadId = "thread";
+  const turnId = "turn";
+  observer.track(threadId, "model", true);
+  observer.begin(threadId, turnId);
+  function sample(collector: CodexTokenUsage, totalTokens: number, cachedInputTokens: number | null) {
+    const totals = { totalTokens, cachedInputTokens };
+    return collector.observe({
+      method: "thread/tokenUsage/updated",
+      params: { threadId, turnId, tokenUsage: { total: totals, last: totals } },
+    });
+  }
+  sample(observer, 100, 90);
+  sample(observer, 500, null);
+  assert.equal(ledger.get(200_000).spent, 10);
+  sample(observer, 1_051_795, 941_440);
+  assert.equal(ledger.get(200_000).spent, 110_355);
+  assert.equal(ledger.reconcile(observer.finish(true)!).records.length, 0);
+
+  const restored = new BoardCodexUsage(project);
+  const recovered = new CodexTokenUsage(value => { restored.observe(value); },
+    (thread, turn) => restored.recover(thread, turn));
+  recovered.track(threadId, "model", true);
+  recovered.recover(threadId, { id: turnId, status: "inProgress" });
+  sample(recovered, 1_051_795, 941_440);
+  assert.equal(restored.get(200_000).spent, 110_355);
+  sample(recovered, 1_052_795, 942_000);
+  assert.equal(restored.get(200_000).spent, 110_795);
+  restored.flush();
 });

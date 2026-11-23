@@ -12,9 +12,24 @@ type ThreadUsage = {
   totalUncertain?: boolean;
   cacheUncertain?: boolean;
   cacheGap?: { entry: TokenUsageRecord; before: number | null | undefined };
+  confirmed?: { baseline: number; tokens: number; total: number; cached: number };
+  recovered?: boolean;
 };
 
 type TurnUsageStatus = { id: string; status?: string; completedAt?: number | null };
+
+export type ConfirmedTurnUsage = {
+  threadId: string;
+  turnId: string;
+  tokens: number;
+  observedAt: number;
+  counters?: TokenCounts;
+};
+
+export type UsageWriter = ((report: TokenUsageReport) => Promise<void>) & {
+  observe?: (usage: ConfirmedTurnUsage) => void;
+  recover?: (threadId: string, turnId: string) => { tokens: number; counters: TokenCounts } | undefined;
+};
 
 export function uncachedTokens({ totalTokens, cachedInputTokens }: TokenCounts): number | null {
   if (totalTokens === null || cachedInputTokens === null || cachedInputTokens > totalTokens) return null;
@@ -50,6 +65,13 @@ export class CodexTokenUsage {
   private pending?: TokenUsageReport;
   private saving?: Promise<void>;
   private checkpoint?: NodeJS.Timeout;
+  private readonly observeConfirmed?: UsageWriter["observe"];
+  private readonly recoverConfirmed?: UsageWriter["recover"];
+
+  constructor(observeConfirmed?: UsageWriter["observe"], recoverConfirmed?: UsageWriter["recover"]) {
+    this.observeConfirmed = observeConfirmed;
+    this.recoverConfirmed = recoverConfirmed;
+  }
 
   queue(report: TokenUsageReport | undefined, write?: (report: TokenUsageReport) => Promise<void>): void {
     if (!report || !write) return;
@@ -116,17 +138,29 @@ export class CodexTokenUsage {
     thread.totalUncertain = false;
     thread.cacheUncertain = false;
     thread.cacheGap = undefined;
+    const recovered = this.recoverConfirmed?.(threadId, turnId);
+    const previous = recovered?.counters ?? thread.previous;
+    const raw = previous && uncachedTokens(previous);
+    thread.confirmed = raw != null ? {
+      baseline: raw - (recovered?.tokens ?? 0), tokens: recovered?.tokens ?? 0,
+      total: previous!.totalTokens!, cached: previous!.cachedInputTokens!,
+    } : undefined;
+    thread.recovered = Boolean(recovered);
+    if (recovered) thread.previous = recovered.counters;
     this.entry(threadId, thread);
     return this.snapshot();
   }
 
   recover(threadId: string, turn: TurnUsageStatus): TokenUsageReport | undefined {
-    this.begin(threadId, turn.id);
+    const alreadyTracked = this.threads.get(threadId)?.turnId === turn.id;
+    if (!alreadyTracked) this.begin(threadId, turn.id);
     const thread = this.threads.get(threadId);
     if (!thread || thread.turnId !== turn.id) return;
     // History confirms completion, but does not reconstruct the usage stream.
-    thread.totalUncertain = true;
-    thread.incomplete = true;
+    if (!alreadyTracked && !thread.recovered) {
+      thread.totalUncertain = true;
+      thread.incomplete = true;
+    }
     return this.completeTurn(threadId, turn) ?? this.snapshot();
   }
 
@@ -156,6 +190,29 @@ export class CodexTokenUsage {
         ? null : uncachedTokens(entry);
       entry.dailyTokensExcludeCache = true;
     }
+  }
+
+  private publishConfirmed(threadId: string, thread: ThreadUsage, total: TokenCounts,
+    previous: TokenCounts | undefined, last: TokenCounts, repair: boolean) {
+    if (!this.observeConfirmed) return;
+    const { totalTokens, cachedInputTokens } = total;
+    if (totalTokens === null || cachedInputTokens === null || cachedInputTokens > totalTokens) return;
+    const raw = totalTokens - cachedInputTokens;
+    if (!thread.confirmed) {
+      // The first complete sample can establish the beginning only when Codex
+      // also reports the matching increment, or when it repairs that sample.
+      if (thread.totalUncertain || thread.cacheUncertain || thread.cacheGap ||
+          previous && !repair || thread.recovered) return;
+      const increment = uncachedTokens(repair ? this.entry(threadId, thread) : last);
+      if (increment === null || increment > raw || previous === undefined &&
+          (last.totalTokens! > total.totalTokens! || last.cachedInputTokens! > total.cachedInputTokens!)) return;
+      thread.confirmed = { baseline: raw - increment, tokens: 0, total: totalTokens, cached: cachedInputTokens };
+    }
+    if (totalTokens < thread.confirmed.total || cachedInputTokens < thread.confirmed.cached) return;
+    const tokens = raw - thread.confirmed.baseline;
+    if (!Number.isSafeInteger(tokens) || tokens <= thread.confirmed.tokens) return;
+    Object.assign(thread.confirmed, { tokens, total: totalTokens, cached: cachedInputTokens });
+    this.observeConfirmed({ threadId, turnId: thread.turnId!, tokens, observedAt: Date.now(), counters: total });
   }
 
   observe(message: { method?: string; params?: unknown }): TokenUsageReport | undefined {
@@ -239,6 +296,7 @@ export class CodexTokenUsage {
       this.completeRecords(threadId, thread, thread.completedAt);
     }
     entry.incomplete = thread.incomplete || thread.model === null || tokenFields.some(key => entry[key] === null);
+    this.publishConfirmed(threadId, thread, total, previous, last, Boolean(repairsCache && sameSample));
     return this.snapshot();
   }
 

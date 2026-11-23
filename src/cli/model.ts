@@ -143,7 +143,7 @@ export interface TaskEvent {
   attachment?: string;
   from?: TaskState;
   to?: TaskState;
-  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
+  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[]; requestId?: string };
   previousCodexThreadId?: string;
   runThreadId?: string;
   run?: RunActivity[];
@@ -226,6 +226,7 @@ export interface Task {
   draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
+  pendingLimitChat?: number[];
   draftManagerReplyThrough?: number;
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };

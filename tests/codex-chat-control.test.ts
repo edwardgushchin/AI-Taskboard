@@ -15,7 +15,7 @@ import { withBoardMcp } from "../src/desktop/board-mcp.ts";
 import { executorExpertTools, expertCommands } from "../src/desktop/expert-tools.ts";
 import { goalTaskWaitSeconds } from "../src/desktop/board-actions.ts";
 import { responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "../src/desktop/board-agent-hooks.ts";
-import { CodexRpcRejection, codexRpc, stopCodexProcess, turnControl } from "../src/desktop/codex-rpc.ts";
+import { CodexRpcRejection, codexRpc, dailyBudgetInterruption, stopCodexProcess, turnControl } from "../src/desktop/codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "../src/desktop/codex-rpc.ts";
 import type { BoardGoal, BoardGoalAction } from "../src/desktop/codex-chat.ts";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
@@ -475,7 +475,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   let providerMode = "";
   const { replyToBoard: runtime, updateBoardGoal } = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToBoard, updateBoardGoal })", {
     boardProjectRulesPrompt,
-    spawn, stopCodexProcess, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
+    spawn, dailyBudgetInterruption, stopCodexProcess, turnControl, CodexTokenUsage, codexThreadPattern, Error, process, withBoardMcp, goalTaskWaitSeconds,
     openComputerUse: async () => undefined,
     managerCliContext, probeManagerCli: async () => providerMode === "cli-ready"
       ? { gitOptions: ["--no-optional-locks", "-c", "core.fsmonitor=false"] } : {},
@@ -625,6 +625,21 @@ test("board chat keeps a goal streaming across turns and times out only after in
     { method: "turn/interrupt", params: { threadId, turnId: "continuation" } },
     { method: "thread/unsubscribe", params: { threadId } },
   ]);
+
+  const budgetStop = new AbortController();
+  const budgetResult = await runtime("profile", directory, "Stop", [], () => ({ ok: true }), [], "", budgetStop.signal, {
+    ...session,
+    onActivity: (items: { text?: string }[]) => {
+      if (items.some(item => item.text === "Stop here")) budgetStop.abort(dailyBudgetInterruption);
+    },
+  });
+  assert.equal(budgetResult.interrupted, true);
+  const budgetRequests = JSON.parse(readFileSync(captured, "utf8")) as typeof stopRequests;
+  assert.deepEqual(budgetRequests.filter(({ method }: { method: string }) => method === "turn/interrupt"), [
+    { method: "turn/interrupt", params: { threadId, turnId: "continuation" } },
+  ]);
+  assert.ok(!budgetRequests.some(({ method, params }: { method: string; params: { status?: string } }) =>
+    method === "thread/goal/set" && params.status === "paused"));
 
   const resumed = await runtime("profile", directory, "Continue", [], () => ({ ok: true }), [], "", controller.signal, {
     ...session, goal: undefined, settings: null,
