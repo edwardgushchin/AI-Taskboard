@@ -1024,10 +1024,21 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
   const workViewport = chatViewport(work);
-  area.disposeWork = workViewport.dispose;
+  const savedPosition = draft.workPosition;
+  let pendingViewport = previousWork?.viewport;
+  if (!pendingViewport && savedPosition && savedPosition.threadId === task.codexThreadId) {
+    pendingViewport = { position: savedPosition.position };
+  }
+  area.disposeWork = () => {
+    draft.workPosition = {
+      threadId: task.codexThreadId,
+      position: pendingViewport?.position ?? workViewport.snapshotPosition(),
+    };
+    workViewport.dispose();
+  };
   const restoredRuns = previousWork?.restoredRuns ?? new Map();
   area.snapshotWork = () => ({
-    viewport: previousWork?.viewport ?? workViewport.snapshot(),
+    viewport: pendingViewport ?? workViewport.snapshot(),
     restoredRuns,
     focusedFold: work.contains(document.activeElement) && document.activeElement.matches("summary")
       ? document.activeElement.parentElement.dataset.item
@@ -1337,13 +1348,16 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
       renderLiveWork();
       requestAnimationFrame(() => {
         if (work.hidden || !work.isConnected) return;
-        if (previousWork) {
-          workViewport.restoreSnapshot(previousWork.viewport);
+        if (pendingViewport) {
+          workViewport.restoreSnapshot(pendingViewport);
+          pendingViewport = undefined;
+        } else workViewport.restore();
+        if (previousWork?.focusedFold) {
           const focused = [...work.querySelectorAll("details[data-item]")].find(
             fold => fold.dataset.item === previousWork.focusedFold);
           focused?.querySelector("summary")?.focus({ preventScroll: true });
-          previousWork = undefined;
-        } else workViewport.restore();
+        }
+        previousWork = undefined;
       });
     } else requestAnimationFrame(() => {
       if (!list.hidden) list.scrollTop = draft.scroll ?? list.scrollHeight;

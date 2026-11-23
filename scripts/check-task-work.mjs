@@ -152,7 +152,7 @@ app.whenReady().then(async () => {
         disconnect() {
           super.disconnect();
           if (this.workList) {
-            workDisconnects.set(this.workList, true);
+            workDisconnects.set(this.workList, this.workList.isConnected ? "connected" : "detached");
             this.workList = undefined;
           }
         }
@@ -348,21 +348,57 @@ app.whenReady().then(async () => {
       assert.equal(await foldOpen(), true);
       assert.equal(await evaluate("workLog().clientHeight"), height);
       assert.ok(Math.abs(await evaluate("anchorOffset()") - offset) <= 1);
-      await evaluate("showTask(card.id)");
-      await settle();
-      assert.deepEqual(await providerItems(), fullOrder);
-      assert.ok(Math.abs(await evaluate("anchorOffset()") - offset) <= 1);
-      record("Подгрузка раннего запуска раскрывает его, сохраняет хронологию, якорь и высоту панели, убирает дубль инструмента. Обновление карточки оставляет подгруженный запуск и положение якоря.");
+      record("Подгрузка раннего запуска раскрывает его, сохраняет хронологию, якорь и высоту панели, убирает дубль инструмента.");
+      const assertReplacedWorkList = async () => {
+        assert.equal(await evaluate("previousWorkList.isConnected"), false);
+        assert.equal(await evaluate("workDisconnects.get(previousWorkList)"), "connected");
+        assert.equal(await evaluate("workLog().isConnected && workDisconnects.get(workLog()) === false"), true);
+        await evaluate("delete window.previousWorkList; void 0");
+      };
       for (let cycle = 0; cycle < 2; cycle++) {
+        await evaluate("window.previousWorkList = workLog(); showTask(card.id)");
+        await settle();
+        await assertReplacedWorkList();
+        assert.deepEqual(await providerItems(), fullOrder);
+        assert.ok(Math.abs(await evaluate("anchorOffset()") - offset) <= 1);
+      }
+      record("Два обновления открытой карточки отсоединяют наблюдатель до удаления журнала, сохраняют подгруженный запуск и якорь чтения.");
+      await evaluate(`
+        var savedReadingRow = () => workLog().querySelector("[data-item='item:later-command-3'] > summary");
+        var savedReadingOffset = () => savedReadingRow().getBoundingClientRect().top - workLog().getBoundingClientRect().top;
+        var savedFold = () => workLog().querySelector("[data-item='item:later-command-0']").closest(".chat-work");
+        var collapseSavedFold = () => savedFold().querySelector("summary").click();
+        var distanceFromEnd = () => workLog().scrollHeight - workLog().clientHeight - workLog().scrollTop;
+        collapseSavedFold();
+        workLog().scrollTop += savedReadingOffset() - 25;
+      `);
+      await settle();
+      const savedOffset = await evaluate("savedReadingOffset()");
+      assert.ok(savedOffset >= 0 && savedOffset < height / 2, savedOffset);
+      assert.equal(await evaluate("savedFold().open"), false);
+      assert.ok(await evaluate("distanceFromEnd()") > 1);
+      for (const atEnd of [false, true]) {
+        if (atEnd) {
+          await evaluate("collapseSavedFold(); workLog().scrollTop = workLog().scrollHeight; void 0");
+          await settle();
+          assert.ok(await evaluate("distanceFromEnd()") <= 1);
+          assert.equal(await evaluate("savedFold().open"), false);
+        }
         await evaluate("window.previousWorkList = workLog(); sheet.close(); void 0");
         await settle();
-        assert.equal(await evaluate("!previousWorkList.isConnected && workDisconnects.get(previousWorkList)"), true);
-        await evaluate("delete window.previousWorkList; showTask(card.id)");
+        await evaluate("showTask(card.id)");
         await settle();
-        assert.equal(await evaluate("workLog().isConnected && workDisconnects.get(workLog()) === false"), true);
-        assert.equal(await foldOpen(), true);
+        await assertReplacedWorkList();
+        assert.equal(await evaluate("savedFold().open"), true);
+        if (atEnd) {
+          assert.ok(await evaluate("distanceFromEnd()") <= 1, "reopening at the bottom follows the end");
+        } else {
+          const reopenedOffset = await evaluate("savedReadingOffset()");
+          assert.ok(Math.abs(reopenedOffset - savedOffset) <= 1,
+            `reopening restores the saved row at ${savedOffset}px, got ${reopenedOffset}px`);
+        }
       }
-      record("Два цикла закрытия и повторного открытия карточки отсоединяют наблюдатель старого журнала и создают новый.");
+      record("При повторном открытии свёрнутый вручную запуск снова раскрыт. Журнал сохраняет якорь ранней записи или конец, если пользователь читал внизу. Закрытие отсоединяет наблюдатель до удаления журнала.");
       const gitBase = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true });
       assert.equal(gitBase.status, 0, gitBase.stderr);
       const sha256 = data => createHash("sha256").update(data).digest("hex");

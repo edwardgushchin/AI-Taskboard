@@ -796,14 +796,19 @@ async function command(action, id, input) {
   return result.data;
 }
 
+function replaceTaskSide(...children) {
+  const side = byId("task-side");
+  side.firstElementChild?.disposeWork?.();
+  side.replaceChildren(...children);
+}
+
 function openSheet(kind, title) {
   if (kind !== "task") taskSheetRequest++;
   chatPreviews.disconnect();
   sheetKind = kind;
   sheet.classList.toggle("task-sheet", kind === "task");
+  replaceTaskSide();
   byId("task-side").hidden = true;
-  byId("task-side").firstElementChild?.disposeWork?.();
-  byId("task-side").replaceChildren();
   if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
   else byId("sheet-title").textContent = title;
   byId("task-retry-load")?.remove();
@@ -2133,6 +2138,10 @@ function chatViewport(list) {
       if (states.has(id)) fold.open = states.get(id);
     }
   }
+  function snapshotPosition() {
+    remember();
+    return { ...position, anchors: position.anchors.map(({ key, offset }) => ({ key, offset })) };
+  }
   list.addEventListener("scroll", () => {
     if (list.scrollTop !== restoredTop) remember();
   });
@@ -2140,16 +2149,13 @@ function chatViewport(list) {
     atEnd,
     restore,
     remember,
+    snapshotPosition,
     snapshot() {
-      remember();
-      return {
-        position: { ...position, anchors: position.anchors.map(({ key, offset }) => ({ key, offset })) },
-        folds: captureFolds(),
-      };
+      return { position: snapshotPosition(), folds: captureFolds() };
     },
     restoreSnapshot(snapshot) {
       position = snapshot.position;
-      applyFolds(snapshot.folds);
+      if (snapshot.folds) applyFolds(snapshot.folds);
       restore();
     },
     suspend(change) {
@@ -4730,7 +4736,7 @@ async function showTask(id, dialogue = false) {
   if (codexAction) actions.append(codexAction);
   body.append(actions);
   const side = byId("task-side");
-  side.replaceChildren(taskChat(task, renderStageWork, discussionHandoff, previousWork));
+  replaceTaskSide(taskChat(task, renderStageWork, discussionHandoff, previousWork));
   side.hidden = false;
   if (dialogue) {
     side.firstChild.openDialogue();
@@ -6742,8 +6748,7 @@ document.addEventListener("keydown", event => {
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
-  byId("task-side").firstElementChild?.disposeWork?.();
-  byId("task-side").replaceChildren();
+  replaceTaskSide();
   byId("task-retry-load")?.remove();
   taskSheetRequest++;
   sheetKind = "";
