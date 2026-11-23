@@ -1455,5 +1455,6 @@
   "work.review-approve": "Ревью одобрено",
   "work.review-note": "Заметка ревьюера",
   "work.request-changes": "Возврат на доработку",
-  "work.load_older_reviews": "Загрузить предыдущие попытки ревью"
+  "work.load_older_reviews": "Загрузить предыдущие попытки ревью",
+  "work.owner": "Владелец"
 }

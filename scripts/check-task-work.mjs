@@ -249,7 +249,7 @@ app.whenReady().then(async () => {
     const report = index => ({
       summary: "Итог ревью " + index,
       findings: index === 10 ? ["Исправьте вывод команды."] : [],
-      evidence: ["Команды и сообщения сверены."],
+      evidence: [null, "Команды и сообщения сверены.", null, "Итог сверен с журналом."],
       needsHuman: false,
     });
     const recordReview = (submissionSequence, run) => withReviewerChat(project, taskId, () => {}, run,
@@ -261,6 +261,33 @@ app.whenReady().then(async () => {
         assert.ok(index > previous, label + " must follow " + rows[previous]);
         previous = index;
       }
+    }
+    const verifyReturns = async () => {
+      const returns = await evaluate(`[...document.querySelectorAll("#task-chat-work > [data-chat-anchor^=review-decision]")]
+        .map(row => ({ actor: row.dataset.actor, text: row.innerText }))`);
+      for (const [actor, role, reason] of [
+        ["user", "Владелец", "Уточните итог для владельца."],
+        ["manager", "Менеджер проекта", "Приложите вывод для менеджера."],
+      ]) {
+        const row = returns.find(entry => entry.actor === actor && entry.text.includes(reason));
+        assert.ok(row?.text.includes(role), JSON.stringify(returns));
+      }
+    };
+    function verifyReviewOrder(rows) {
+      assertOrder(rows, [
+        "Итог ревью 10", "Замечания при возврате", "Повторная проверка",
+        "Доработка завершена", "Сообщение ревью 11", "Сверка между действиями", "git diff --check review-11",
+      ]);
+      const finish = rows.findIndex(row => row.includes("Итог ревью 10"));
+      assert.match(rows[finish], /Ревью завершилось с замечаниями/);
+      assert.match(rows[finish + 1], /Замечания при возврате/);
+      assert.equal(rows.filter(row => row.includes("Сверка между действиями")).length, 1);
+      assert.equal(rows.filter(row => row.includes("Повторная проверка")).length, 1);
+    }
+    function verifyEvidence(text) {
+      assert.match(text, /2\. Команды и сообщения сверены\./);
+      assert.match(text, /4\. Итог сверен с журналом\./);
+      assert.doesNotMatch(text, /1\. Команды и сообщения сверены\.|2\. Итог сверен с журналом\./);
     }
     if (!restart) {
       await press("dialogue", "Enter");
@@ -329,14 +356,23 @@ app.whenReady().then(async () => {
       reviewCard.history.push({
         at: new Date(legacyReview - 1000).toISOString(), actor: "agent", action: "submit",
       });
+      reviewCard.history.push({
+        at: new Date(legacyReview + 600).toISOString(),
+        actor: "user", action: "request-changes", text: "Уточните итог для владельца.",
+      }, {
+        at: new Date(legacyReview + 700).toISOString(),
+        actor: "manager", action: "request-changes", text: "Приложите вывод для менеджера.",
+      });
       reviewCard.tokenUsage = { reports: [{ reviewTiming: {
-        submissionSequence: reviewCard.history.length, startedAtMs: legacyReview, durationMs: 500,
+        submissionSequence: reviewCard.history.length - 2, startedAtMs: legacyReview, durationMs: 500,
       } }] };
       await syncReviewPages();
       await openReviewCard(reviewCard);
       assert.equal(await evaluate('Boolean(document.getElementById("task-review-history"))'), false);
       assertOrder(await reviewRows(), ["Ревью началось", "Ревью завершилось"]);
       assert.ok(!(await reviewRows()).some(row => row.includes("Сообщение ревью")));
+      await verifyReturns();
+      record("В карточке с неполным журналом видны возвраты владельца и менеджера с их сохранёнными замечаниями.");
       record("Карточка с утраченным журналом показывает сохранившееся начало и завершение ревью.");
       reviewCard.history.push({
         at: new Date().toISOString(), actor: "agent", action: "submit",
@@ -350,14 +386,19 @@ app.whenReady().then(async () => {
       }
       const review10 = readReviewerChatPage(project, taskId).attempts.at(-1);
       reviewCard.history.push({
-        at: new Date(Date.parse(review10.finishedAt) + 1).toISOString(),
+        at: review10.finishedAt,
         actor: "reviewer", action: "request-changes", text: "Замечания при возврате: исправьте вывод команды.",
       });
       const reworkAt = new Date(Date.parse(review10.finishedAt) + 2).toISOString();
       reviewCard.history.push({
         at: reworkAt, actor: "agent", action: "expert-stage",
-        expertStageRun: { phase: "work", key: "verify", state: "running" },
+        expertStageRun: { phase: "work", key: "verify", state: "running", agentId: "fixture-qa",
+          sessionId: "fixture-rework", threadId: oldThread },
         expertStageStart: { expertName: "QA инженер desktop приложений", stageTitle: "Повторная проверка" },
+      }, {
+        at: reworkAt, actor: "agent", action: "expert-stage",
+        expertStageRun: { phase: "work", key: "verify", state: "running", agentId: "fixture-qa",
+          sessionId: "fixture-rework", threadId: thread },
       }, {
         at: new Date(Date.parse(reworkAt) + 1).toISOString(), actor: "agent", action: "run-log",
         runThreadId: thread, durationMs: 4,
@@ -369,15 +410,25 @@ app.whenReady().then(async () => {
       await openReviewCard(reviewCard);
       await recordReview(reviewCard.history.length, async publish => {
         const active = readReviewerChatPage(project, taskId).attempts.at(-1);
+        const atOffset = offset => new Date(Date.parse(active.at) + offset).toISOString();
         const entries = reviewItems(11, active.at);
+        entries[1].at = atOffset(2);
         publish(entries);
+        // The expert begins while the review is active, between its message and command.
+        reviewCard.history.push({
+          at: atOffset(1), actor: "reviewer", action: "expert-stage",
+          expertStageRun: { phase: "review", key: "verify", state: "running", sessionId: "fixture-review" },
+          expertStageStart: { expertName: "QA инженер desktop приложений", stageTitle: "Сверка между действиями" },
+        });
+        await delay(5);
         await updateReviews();
-        assertOrder(await reviewRows(), [
-          "Итог ревью 10", "Замечания при возврате", "Повторная проверка", "Доработка завершена", "Сообщение ревью 11",
-        ]);
+        await openReviewCard(reviewCard);
+        verifyReviewOrder(await reviewRows());
         publish([...entries, {
-          ...entries[0], id: "late", text: "Позднее событие ревью",
-          at: new Date(Date.parse(entries[0].at) - 1).toISOString(),
+          ...entries[0], id: "late", text: "Позднее событие ревью", at: atOffset(-1),
+        }, {
+          ...entries[0], id: "structured-report", phase: "final_answer", at: atOffset(3),
+          text: JSON.stringify(report(11)),
         }]);
         await updateReviews();
         const rows = await reviewRows();
@@ -387,13 +438,17 @@ app.whenReady().then(async () => {
         const row = rows.find(row => row.includes("Сообщение ревью 11"));
         assert.ok(row.includes("Позднее событие ревью"));
         assert.ok(row.indexOf("Позднее событие ревью") < row.indexOf("Сообщение ревью 11"));
-        assert.ok(row.indexOf("Сообщение ревью 11") < row.indexOf("git diff --check review-11"));
+        verifyReviewOrder(rows);
+        verifyEvidence(await evaluate('document.querySelector("#task-chat-work").innerText'));
         return report(11);
       });
       await updateReviews();
       const rows = await reviewRows();
       assert.equal(rows.filter(row => row.includes("Сообщение ревью 11")).length, 1);
       assert.equal(rows.filter(row => row.includes("Итог ревью 11")).length, 1);
+      verifyReviewOrder(rows);
+      verifyEvidence(await evaluate('document.querySelector("#task-chat-work").innerText'));
+      record("В живом и сохранённом ревью отметка эксперта разделяет сообщение и команду. Перепривязка threadId в том же сеансе не добавляет отметку. Завершение с тем же временем предшествует возврату, а пропуски в evidence сохраняют номера 2 и 4.");
       assertOrder(rows, ["Итог ревью 10", "Замечания при возврате", "Доработка завершена", "Сообщение ревью 11", "Итог ревью 11"]);
       record("Возврат, повторная работа эксперта и ревью следуют по времени. Позднее событие заняло своё место, одинаковое время сохранило исходный порядок. После сохранения попытка видна один раз.");
       writeFileSync(reviewCardPath, JSON.stringify(reviewCard));
@@ -569,6 +624,10 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate("olderReview().checkVisibility()"), false);
       assert.equal((await reviewRows()).filter(row => row.match(/Сообщение ревью \d+/)).length, 11);
       assertOrder(await reviewRows(), ["Сообщение ревью 1", "Итог ревью 1", "Сообщение ревью 2", "Итог ревью 11"]);
+      verifyReviewOrder(await reviewRows());
+      await verifyReturns();
+      verifyEvidence(await evaluate('document.querySelector("#task-chat-work").innerText'));
+      record("После перезапуска проверены возвраты всех ролей, места экспертных отметок и номера подтверждений с пропусками.");
 
       await evaluate('window.reviewDetail = title => [...document.querySelectorAll("#task-chat-work .chat-run-item")]' +
         '.find(detail => detail.querySelector(".chat-run-preview")?.textContent.trim() === title); void 0');
@@ -594,7 +653,6 @@ app.whenReady().then(async () => {
       };
       window.setContentSize(1440, 900);
       await settle();
-      await openCommand("git diff --check review-11");
       await scrollToRow("Замечания при возврате");
       const wide = await capture("unified-review-wide.png", 1440, 900);
       window.setContentSize(900, 800);
@@ -625,7 +683,7 @@ app.whenReady().then(async () => {
       ];
       writeFileSync(join(artifacts, "unified-review-check.txt"), [
         "T-0339. Пройдена проверка Windows Electron и CLI",
-        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0339",
+        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0339-return",
         `Среда: ${process.platform} ${process.arch}; Node ${process.versions.node}; Electron ${process.versions.electron}; Chromium ${process.versions.chrome}.`,
         "Linux и macOS не запускались. Упаковка вне изменений.",
         "Два процесса Electron, штатный рендерер, синтетические уведомления провайдера, реальная CLI и файловое хранилище ревью на временной доске.",

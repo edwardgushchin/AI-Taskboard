@@ -2182,9 +2182,11 @@ function chatViewport(list) {
       position.end = true;
       restore();
     },
-    update(change) {
+    update(change, preserveFolds = false) {
       remember();
+      const previousFolds = preserveFolds && captureFolds();
       change();
+      if (previousFolds) applyFolds(previousFolds);
       if (!suspended) observeRows();
       restore();
     },

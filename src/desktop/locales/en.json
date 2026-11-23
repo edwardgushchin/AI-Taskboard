@@ -1439,5 +1439,6 @@
   "work.review-approve": "Review approved",
   "work.review-note": "Review note",
   "work.request-changes": "Changes requested",
-  "work.load_older_reviews": "Load older reviews"
+  "work.load_older_reviews": "Load older reviews",
+  "work.owner": "Owner"
 }
