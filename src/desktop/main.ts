@@ -1125,6 +1125,7 @@ function publishBudget(project: string) {
 }
 
 function budgetUpdated(project: string) {
+  if (!subscriptions.has(project) && !projectOperations.has(project)) return;
   const budget = boardCodexBudget(project, subscriptions.get(project)?.board.settings);
   let interrupted = false;
   if (budget?.reason === "exhausted") {
@@ -1175,7 +1176,10 @@ function boardCodexBudget(project: string, settings?: BoardSettings) {
   try {
     const effective = settings ?? subscriptions.get(project)?.board.settings ?? readBoardSettings(runtimeLocation(project));
     if (effective.codexDailyTokens === undefined) return;
-    return usageForBoard(project).get(effective.codexDailyTokens, Date.now(), effective.codexDailyResetTime);
+    const usage = subscriptions.has(project) || projectOperations.has(project)
+      ? usageForBoard(project)
+      : boardUsage.get(project) ?? new BoardCodexUsage(project);
+    return usage.get(effective.codexDailyTokens, Date.now(), effective.codexDailyResetTime);
   } catch (error) {
     console.warn("Could not read the board Codex budget.", error);
   }
@@ -1209,6 +1213,7 @@ function recoverBoardUsage(watch: BoardWatch) {
   recovery.nextAt = now + 60_000;
   recovery.running = true;
   void Promise.resolve().then(async () => {
+    if (subscriptions.get(project) !== watch || closingProjects.has(project)) return;
     const unresolved = usageForBoard(project).unresolved(now);
     if (!unresolved.length) return;
     const charge = unresolved[recovery.cursor++ % unresolved.length];
