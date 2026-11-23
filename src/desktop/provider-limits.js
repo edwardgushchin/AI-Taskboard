@@ -121,6 +121,18 @@ if (typeof document !== "undefined") {
       resets.className = "limits-reset-count";
       resets.textContent = t("limits.available_resets", { count: new Intl.NumberFormat(localization.locale).format(count) });
       group.append(resets);
+      const expirations = count > 0 ? snapshot.resetCreditExpirations?.filter(time => time === null || time > now) : undefined;
+      if (expirations?.length) {
+        const list = document.createElement("ul");
+        list.className = "limits-reset-credits";
+        for (const time of expirations) {
+          const item = document.createElement("li");
+          item.textContent = time === null ? t("limits.reset_expiry_unknown") :
+            t("limits.reset_expires", { time: new Date(time).toLocaleString(localization.locale) });
+          list.append(item);
+        }
+        group.append(list);
+      }
     }
     panel.replaceChildren(content);
   }

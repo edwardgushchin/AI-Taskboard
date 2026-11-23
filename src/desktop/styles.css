@@ -1528,6 +1528,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 #provider-limits .limits-overview { margin-bottom: 12px; color: var(--muted); }
 #provider-limits .limits-window + .limits-window { margin-top: 12px; }
 #provider-limits .limits-window + .limits-reset-count { margin-top: 12px; }
+#provider-limits .limits-reset-credits { margin: 4px 0 0; padding-inline-start: 20px; color: var(--muted); font-size: 12px; }
 #provider-limits .limits-row { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
 #provider-limits .limits-row > :last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
 #provider-limits .limits-reset { margin-top: 4px; color: var(--muted); font-size: 12px; }
