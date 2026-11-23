@@ -4237,7 +4237,7 @@ function draftComposer() {
     });
     const row = element("div", undefined, "board-queued-row");
     row.setAttribute("role", "listitem");
-    const handle = goal ? undefined : element("button", undefined, "button quiet board-queue-handle");
+    const handle = goal ? undefined : reorderHandle();
     row.append(handle ?? icon("target"));
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
@@ -4259,26 +4259,18 @@ function draftComposer() {
     const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight };
     queued.push(job);
     if (handle) {
-      handle.type = "button";
-      handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
-      handle.append(icon("gripper"));
       handle.addEventListener("dragstart", event => {
         if (!canMove(job) || movingQueue) { event.preventDefault(); return; }
         draggedJob = job;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", job.id);
-        event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+        startReorderDrag(event, row, job.id);
       });
       handle.addEventListener("dragend", () => {
         draggedJob = undefined;
         clearQueueDrop();
       });
-      handle.addEventListener("keydown", event => {
-        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-        event.preventDefault();
+      bindReorderKeys(handle, after => {
         const pending = queued.filter(canMove);
         const index = pending.indexOf(job);
-        const after = event.key === "ArrowDown";
         const target = pending[index + (after ? 1 : -1)];
         if (index >= 0 && target) void moveQueueJob(job, target, after);
       });
@@ -5641,15 +5633,35 @@ function settings() {
   if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
 
+function reorderHandle() {
+  const handle = element("button", undefined, "button quiet board-queue-handle");
+  handle.type = "button";
+  handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+  handle.append(icon("gripper"));
+  return handle;
+}
+
+function startReorderDrag(event, row, id) {
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", id);
+  event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+}
+
+function bindReorderKeys(handle, move) {
+  handle.addEventListener("keydown", event => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    move(event.key === "ArrowDown");
+  });
+}
+
 function appendProjectRules(project, before) {
   const form = element("form", undefined, "form");
-  const label = element("label", () => t("projectRules.label"));
-  const input = element("textarea");
-  input.name = "projectRules";
-  input.rows = 5;
-  label.append(input);
+  const label = element("legend", () => t("projectRules.label"));
+  const fields = element("fieldset", undefined, "form");
+  const list = element("div", undefined, "form");
+  list.setAttribute("role", "list");
   const help = element("small", () => t("projectRules.help"), "muted");
-  help.id = "board-project-rules-help";
   const status = element("p", "", "muted");
   status.setAttribute("role", "status");
   const savedLabel = element("label", () => t("projectRules.current"));
@@ -5659,12 +5671,98 @@ function appendProjectRules(project, before) {
   savedLabel.append(saved);
   savedLabel.hidden = true;
   const save = element("button", () => t("projectRules.save"), "button primary");
-  input.setAttribute("aria-describedby", help.id);
-  input.disabled = save.disabled = true;
-  form.append(label, help, savedLabel, status, save);
+  const add = button(() => t("projectRules.add"), () => {
+    const row = appendRule({ text: "", enabled: true });
+    row.querySelector("textarea").focus();
+  });
+  fields.disabled = save.disabled = true;
+  fields.append(label, help, list, add);
+  form.append(fields, savedLabel, status, save);
   if (before) before.before(form);
   else body.append(form);
 
+  const rows = new Map();
+  let dragged;
+  let dropRow;
+  const clearDrop = () => {
+    if (dropRow) delete dropRow.dataset.queueDrop;
+    dropRow = undefined;
+  };
+  const move = (row, target, after) => {
+    if (!target || row === target || fields.disabled) return;
+    if (after) target.after(row);
+    else target.before(row);
+    row.querySelector(".board-queue-handle").focus();
+  };
+  const dropTarget = event => {
+    const row = event.target.closest(".board-queued-row");
+    if (!dragged || !rows.has(row) || row === dragged || fields.disabled) return;
+    const bounds = row.getBoundingClientRect();
+    return { row, after: event.clientY >= bounds.top + bounds.height / 2 };
+  };
+  list.addEventListener("dragover", event => {
+    clearDrop();
+    const target = dropTarget(event);
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropRow = target.row;
+    dropRow.dataset.queueDrop = target.after ? "after" : "before";
+  });
+  list.addEventListener("dragleave", event => {
+    if (!list.contains(event.relatedTarget)) clearDrop();
+  });
+  list.addEventListener("drop", event => {
+    const target = dropTarget(event);
+    clearDrop();
+    if (!target) return;
+    event.preventDefault();
+    move(dragged, target.row, target.after);
+  });
+
+  function appendRule(rule) {
+    const row = element("div", undefined, "board-queued-row project-rule-row");
+    row.setAttribute("role", "listitem");
+    const handle = reorderHandle();
+    handle.draggable = true;
+    controlLabelForIcon(handle, () => t("projectRules.reorder"));
+    handle.addEventListener("dragstart", event => {
+      dragged = row;
+      startReorderDrag(event, row, "project-rule");
+    });
+    handle.addEventListener("dragend", () => {
+      dragged = undefined;
+      clearDrop();
+    });
+    bindReorderKeys(handle, after => move(row, after ? row.nextElementSibling : row.previousElementSibling, after));
+    const input = element("textarea");
+    input.rows = 3;
+    input.required = true;
+    input.value = rule.text;
+    bindLocalized(input, "ariaLabel", () => t("projectRules.markdown"));
+    const controls = element("div", undefined, "project-rule-controls");
+    const enableLabel = element("label", () => t("projectRules.enabled"), "form-checkbox");
+    const enabled = element("input");
+    enabled.type = "checkbox";
+    enabled.checked = rule.enabled;
+    enableLabel.prepend(enabled);
+    const remove = button(() => t("projectRules.remove"), () => {
+      const next = row.nextElementSibling ?? row.previousElementSibling;
+      rows.delete(row);
+      row.remove();
+      (next?.querySelector(".board-queue-handle") ?? add).focus();
+    }, "quiet");
+    controls.append(enableLabel, remove);
+    row.append(handle, input, controls);
+    list.append(row);
+    rows.set(row, { input, enabled, separator: rule.separator });
+    return row;
+  }
+
+  const draftRules = () => Array.from(list.children, row => {
+    const { input, enabled, separator } = rows.get(row);
+    return { text: input.value, enabled: enabled.checked, separator };
+  });
   let revision;
   const request = async draft => {
     try {
@@ -5672,13 +5770,18 @@ function appendProjectRules(project, before) {
       if (!form.isConnected) return;
       if (result.ok) {
         revision = result.data.revision;
-        if (!draft || input.value === draft.text) input.value = result.data.text;
+        if (!draft) {
+          list.replaceChildren();
+          rows.clear();
+          for (const rule of result.data.rules) appendRule(rule);
+        }
         savedLabel.hidden = true;
         bindLocalized(status, "textContent", () => draft ? t("projectRules.saved") : "");
-        input.disabled = false;
+        fields.disabled = false;
       } else if (result.error.code === "PROJECT_RULES_CONFLICT") {
         revision = result.error.details.revision;
-        saved.value = result.error.details.text;
+        saved.value = result.error.details.rules.map(rule =>
+          (rule.enabled ? "[✓] " : "[ ] ") + rule.text).join("\n\n");
         savedLabel.hidden = false;
         bindLocalized(status, "textContent", () => t("projectRules.conflict"));
       } else {
@@ -5687,6 +5790,7 @@ function appendProjectRules(project, before) {
     } catch (error) {
       bindLocalized(status, "textContent", () => error.message);
     } finally {
+      fields.disabled = revision === undefined;
       save.disabled = false;
       bindLocalized(save, "textContent", () => t(revision === undefined ? "projectRules.load" : "projectRules.save"));
     }
@@ -5695,7 +5799,9 @@ function appendProjectRules(project, before) {
     event.preventDefault();
     if (save.disabled) return;
     save.disabled = true;
-    void request(revision === undefined ? undefined : { text: input.value, revision });
+    const draft = revision === undefined ? undefined : { rules: draftRules(), revision };
+    fields.disabled = true;
+    void request(draft);
   });
   void request();
   return form;
