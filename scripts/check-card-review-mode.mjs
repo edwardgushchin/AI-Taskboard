@@ -1,7 +1,7 @@
 import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -9,7 +9,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
-import { registerRuntime } from "../src/desktop/board-runtime.ts";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "card-review-mode", 240_000,
   [["auto-on"], ["auto-off"], ["restart"]]);
@@ -18,7 +17,7 @@ const autoMode = phase === "auto-on";
 const project = join(scratch, phase === "restart" ? "auto-off" : phase);
 const reportFile = join(artifacts, "card-review-mode-check.txt");
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { transformSync } = require("esbuild");
 const cliEntry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 
@@ -69,10 +68,13 @@ async function run() {
     const paths = [
       "scripts/check-card-review-mode.mjs",
       "src/desktop/chat-actions.ts",
+      "src/desktop/chat.js",
       "src/desktop/codex-chat.ts",
       "src/desktop/locales/en.json",
       "src/desktop/locales/ru.json",
       "src/desktop/main.ts",
+      "src/desktop/preload.cjs",
+      "src/desktop/renderer.js",
     ];
     const hashes = paths.map(path => {
       const source = readFileSync(new URL("../" + path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
@@ -128,6 +130,29 @@ async function run() {
   const observed = [];
   const receipts = [];
   const replies = new Map();
+  const changeReviewMode = (call, input) => waitFor(async () => {
+    const result = await call(action, input);
+    return (result.ok || result.error.code !== "BOARD_BUSY") && result;
+  }, "the review mode tool result");
+  const queueAdds = [];
+  let attachmentGate;
+  ipcMain.handle("fixture:prepare-attachment", async (_event, name) => {
+    if (name !== "delayed.txt" || !attachmentGate) return;
+    const gate = attachmentGate;
+    attachmentGate = undefined;
+    gate.started.resolve();
+    await gate.release.promise;
+  });
+  const handle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, listener) => {
+    if (channel !== "board:queue") return handle(channel, listener);
+    return handle(channel, async (event, ...args) => {
+      const [, action, , draft, , , questionId] = args;
+      const result = await listener(event, ...args);
+      if (action === "add" && result.ok) queueAdds.push({ id: result.data, draft, questionId });
+      return result;
+    });
+  };
   globalThis.fixtureCli = async (call, board, args, input) => {
     if (autoMode && !held && args[0] === "accept" && args[1] === hybrid && input?.autoMode) {
       held = input;
@@ -170,7 +195,7 @@ async function run() {
       if (typeof input === "string") {
         text = input;
       } else {
-        const receipt = await call(action, input);
+        const receipt = await changeReviewMode(call, input);
         receipts.push(receipt);
         text = receipt.ok ? "Provider draft without the saved mode." : JSON.stringify(receipt);
       }
@@ -180,7 +205,7 @@ async function run() {
   globalThis.fixtureDiscussion = async (_profile, _project, _settings, prompt, _images, _update, call) => {
     const authorization = JSON.parse(prompt).latestUserMessage.text;
     const before = show(hybrid).revision;
-    const receipt = await call(action, { ...replies.get(authorization), authorization });
+    const receipt = await changeReviewMode(call, { ...replies.get(authorization), authorization });
     if (!receipt.ok) assert.equal(show(hybrid).revision, before);
     receipts.push(receipt);
     return { text: receipt.ok ? "Provider draft without the saved mode." : JSON.stringify(receipt) };
@@ -195,9 +220,14 @@ async function run() {
   app.requestSingleInstanceLock = () => true;
   process.argv.push("--project", project);
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
+  const preload = join(scratch, "preload-under-test-" + phase + ".cjs");
+  writeFileSync(preload, readFileSync(new URL("./preload.cjs", sourceUrl), "utf8")
+    .replace("filePayload: async file => {",
+      'filePayload: async file => { await ipcRenderer.invoke("fixture:prepare-attachment", file.name);'));
   const source = readFileSync(sourceUrl, "utf8")
     .replace("replyToBoard, replyToTask, reviewWithCodex,", "")
     .replace("import { callCli,", "import { callCli as realCallCli,")
+    .replace('fileURLToPath(new URL("./preload.cjs", import.meta.url))', JSON.stringify(preload))
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, "main-under-test-" + phase + ".mjs");
@@ -225,11 +255,6 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
 
   const evaluate = (win, method, args) => win.webContents.executeJavaScript(
     `window.taskboard[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
-  const saveToQueue = async prompt => {
-    const queued = await evaluate(window, "boardQueue", [project, "add", randomUUID(), prompt, false, []]);
-    assert.ok(queued.ok, JSON.stringify(queued));
-    return queued.data;
-  };
   const managerRequest = async prompt => {
     const result = await evaluate(window, "boardRequest", [prompt, [], project, false, false]);
     assert.ok(result.ok && !result.data.error, JSON.stringify(result));
@@ -288,59 +313,112 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
   assert.ok(questionFromCard.saved && questionFromCard.result.ok, JSON.stringify(questionFromCard));
   assert.equal(show(hybrid).history.filter(event => event.chat).at(-1).text, modeQuestion.answer);
   assert.equal(receipts.length, beforeQuestion);
+  const visibleQuestion = () => window.webContents.executeJavaScript(`
+    Array.from(document.querySelectorAll(".board-chat-log:not(.board-work) .chat-run-final"))
+      .filter(node => node.checkVisibility({ visibilityProperty: true }) && node.firstElementChild.textContent.trim() === "Какой карточке?")
+      .at(-1)?.dataset.messageId
+  `);
   const askForCard = async () => {
+    const previous = await visibleQuestion();
     const result = await managerRequest(scoped);
     assert.equal(result.answer, "Какой карточке?");
     assert.equal(result.items.filter(item => item.type === "agentMessage").length, 1);
+    await window.webContents.executeJavaScript("document.querySelector('#board-draft').invalidateHistory()");
+    return waitFor(async () => {
+      const current = await visibleQuestion();
+      return current && current !== previous && current;
+    }, "the card question rendered in the manager chat").catch(async error => {
+      const state = await window.webContents.executeJavaScript(`
+        ({
+          open: document.querySelector("#board-draft").hasAttribute("data-open"),
+          lastReplies: Array.from(document.querySelectorAll(".board-chat-log:not(.board-work) .chat-run-final"))
+            .slice(-4).map(node => ({ text: node.firstElementChild.textContent, visible: node.checkVisibility() })),
+        })
+      `);
+      throw new Error(error.message + ": " + JSON.stringify(state));
+    });
   };
   assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
   await waitFor(() => window.webContents.executeJavaScript("Boolean(document.querySelector('#board-draft textarea'))"), "manager composer");
-  const refreshQueue = () => window.webContents.executeJavaScript("document.querySelector('#board-draft').refreshQueue()");
+  await window.webContents.executeJavaScript(`
+    document.querySelector("#board-draft:not([data-pinned]) .board-chat-pin")?.click()
+  `);
+  await waitFor(() => window.webContents.executeJavaScript("Boolean(document.querySelector('#board-draft[data-pinned]'))"),
+    "the manager chat to stay open");
+  const submitForm = (text, attach = false) => window.webContents.executeJavaScript(`
+    (() => {
+      const form = document.querySelector("#board-draft");
+      if (${attach}) {
+        const files = new DataTransfer();
+        files.items.add(new File(["QA"], "delayed.txt", { type: "text/plain" }));
+        const picker = form.querySelector("input[type=file]");
+        picker.files = files.files;
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      const input = form.querySelector("textarea[name=request]");
+      input.value = ${JSON.stringify(text)};
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      form.requestSubmit();
+    })()
+  `);
   const waitForQueue = () => waitFor(async () => {
     const result = await evaluate(window, "boardQueue", [project, "list"]);
     assert.ok(result.ok, JSON.stringify(result));
     return !result.data.length && !(await bootstrap(window)).managerBusy;
   }, "the ordinary queue to drain");
+  const waitForAdd = previous => waitFor(() => queueAdds[previous], "the form to write its queued message");
   const beforePremature = show(hybrid).revision;
-  const hold = registerRuntime(project, { task: "manager:dialogue", kind: "task" });
-  assert.ok(hold);
-  let queuedQuestion;
+  assert.equal(await visibleQuestion(), undefined);
+  replies.set("319", managerInput("319", "reviewer", beforePremature));
+  const gate = { started: Promise.withResolvers(), release: Promise.withResolvers() };
+  attachmentGate = gate;
+  let firstQuestion;
+  const beforeAdd = queueAdds.length;
   try {
-    replies.set("319", managerInput("319", "reviewer", beforePremature));
-    queuedQuestion = await saveToQueue(scoped);
-    await saveToQueue("319");
+    await submitForm("319", true);
+    await waitFor(() => Promise.race([gate.started.promise.then(() => true), delay(50, false)]), "attachment preparation to pause");
+    assert.equal(queueAdds.length, beforeAdd);
+    firstQuestion = await askForCard();
+    assert.equal(queueAdds.length, beforeAdd);
   } finally {
-    hold();
+    gate.release.resolve();
   }
-  await refreshQueue();
+  const premature = await waitForAdd(beforeAdd);
+  assert.equal(premature.draft, "319");
+  assert.equal(premature.questionId, undefined);
   await waitForQueue();
   const queuedTurn = async clientId => {
     const result = await evaluate(window, "boardHistory", [project, null, "chat"]);
     assert.ok(result.ok, JSON.stringify(result));
     return result.data.turns.find(turn => turn.messages.some(message => message.clientId === clientId));
   };
-  assert.deepEqual((await queuedTurn(queuedQuestion)).items.filter(item => item.type === "agentMessage").map(item => item.text),
-    ["Какой карточке?"]);
   assert.equal(receipts.at(-1).error.code, "USER_DIRECTION_REQUIRED");
   assert.equal(show(hybrid).revision, beforePremature);
   assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer-human");
-  await askForCard();
-  replies.set("319", managerInput("319", "reviewer"));
-  const afterQuestion = await saveToQueue("319");
-  await refreshQueue();
-  await waitForQueue();
+  const sendNumber = async input => {
+    const question = await askForCard();
+    const offset = queueAdds.length;
+    replies.set("319", input);
+    await submitForm("319");
+    const queued = await waitForAdd(offset);
+    assert.equal(queued.questionId, question);
+    await waitForQueue();
+    return queued.id;
+  };
+  assert.ok(firstQuestion);
+  const afterQuestion = await sendNumber(managerInput("319", "reviewer"));
   assert.deepEqual((await queuedTurn(afterQuestion)).items.filter(item => item.type === "agentMessage").map(item => item.text),
     ["Для T-0319 сохранён режим «Ревьюер»."]);
   assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer");
   assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
-  await askForCard();
-  assert.equal((await manager("319", managerInput("319", "reviewer", show(hybrid).revision - 1))).error.code, "REVISION_CONFLICT");
+  await sendNumber(managerInput("319", "reviewer", show(hybrid).revision - 1));
+  assert.equal(receipts.at(-1).error.code, "REVISION_CONFLICT");
   assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer-human");
   await askForCard();
   assert.equal((await manager("319x", managerInput("319x", "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
   assert.equal((await manager("319", managerInput("319", "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
-  await askForCard();
-  const receipt = await manager("319", managerInput("319", "reviewer"));
+  await sendNumber(managerInput("319", "reviewer"));
+  const receipt = receipts.at(-1);
   assert.equal(receipt.data.reviewMode, "reviewer");
   assert.equal(receipt.data.revision, show(hybrid).revision);
   await manager("Покажи карточку 319", "Какой карточке?");
@@ -349,7 +427,7 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
     assert.equal((await manager(invalid, managerInput(invalid, "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
   }
   assert.equal((await manager(original, managerInput(mixed, "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
-  log("PASS: the ordinary queue rejected a number sent before the question and accepted a fresh answer sent after it. Both chats produced one application-generated question about the mode and displayed confirmations derived from saved results.");
+  log("PASS: the form submitted 319 before a question appeared and wrote it only after the question appeared. The card and revision stayed unchanged. The form accepted a fresh reply after the question was visible. Both chats used one application-generated mode question and confirmed the saved mode.");
   log("PASS: the original 319 request, accented negation, full ID, current card and adjacent card-number clarification saved the exact review mode. Wrong mode, stale revision, invalid number, quote, forged question and authorization mismatch were rejected.");
   assert.equal((await discussion("Верни наследование режима доски", { mode: null })).data.inherited, true);
   const ambiguous = "Use reviewer-human for " + hybrid + " or " + normal;

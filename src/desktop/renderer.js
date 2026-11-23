@@ -3701,8 +3701,8 @@ function draftComposer() {
     }).catch(() => {});
   }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
-  const queueStorage = async (action, id, draft, goal, attachments) => {
-    const result = await api.boardQueue(project, action, id, draft, goal, attachments);
+  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId) => {
+    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId);
     if (!result.ok) throw new Error(boardError(result.error));
     return result.data;
   };
@@ -4159,12 +4159,16 @@ function draftComposer() {
     const draft = quoteMessage(text, quotes);
     const goal = goalMode;
     const submitted = [...files];
+    const replies = log.querySelectorAll(".board-manager-message[data-message-id]");
+    const lastReply = replies[replies.length - 1];
+    const reviewModeQuestionId = canBrowseHistory() && lastReply?.checkVisibility({ visibilityProperty: true })
+      ? lastReply.dataset.reviewModeCardQuestion : undefined;
     let id;
     savingQueuedMessage = true;
     quoteDraft.sync();
     try {
       await restoreQueue();
-      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted));
+      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted), reviewModeQuestionId);
     } catch (error) {
       if (!disposed) message(error.message);
       return;

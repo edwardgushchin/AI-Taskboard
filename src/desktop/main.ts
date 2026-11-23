@@ -2319,7 +2319,7 @@ function boardThreadPath(project: string, dialogue = false) {
 
 type QueuedBoardMessage = {
   id: string; draft: string; goal: boolean; created: number; failed?: boolean;
-  reviewModeQuestionId?: string;
+  displayedReviewModeQuestionId?: string;
   files: { name: string; type: string; bytes: string; link?: FileLink }[];
 };
 
@@ -2346,7 +2346,7 @@ function listQueuedMessages(directory: string) {
 }
 
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
-  goal?: unknown, files?: unknown) => {
+  goal?: unknown, files?: unknown, displayedQuestionId?: unknown) => {
   const state = stateOf(event);
   const board = state.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
@@ -2390,17 +2390,20 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         if (!job) return;
         if (action === "retry") { writeJson(path, { ...job, failed: undefined }); return; }
         if (!(draft as string).trim() && (job.goal || !job.files.length)) return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
-        writeJson(path, { ...job, draft, reviewModeQuestionId: job.draft === draft ? job.reviewModeQuestionId : undefined });
+        writeJson(path, { ...job, draft,
+          displayedReviewModeQuestionId: job.draft === draft ? job.displayedReviewModeQuestionId : undefined,
+        });
       });
       if (error) return error;
     } else if (action === "add" && typeof draft === "string" && typeof goal === "boolean" &&
         Array.isArray(files) && files.every(isPastedFile) && (draft.trim() || (!goal && files.length)) &&
         files.reduce((total, file) => total + file.bytes.byteLength, 0) <= maxAttachmentBytes) {
       storageDirectory(directory, true);
-      const question = !goal && reviewModeReplyTarget(draft)
+      const question = !goal && typeof displayedQuestionId === "string" && reviewModeReplyTarget(draft)
         ? readManagerHistory(project, null, "chat")?.turns.at(-1)?.items.at(-1) : undefined;
-      const reviewModeQuestionId = question?.reviewModeCardQuestion ? question.id : undefined;
-      writeJson(path, { id, draft, goal, created: Date.now(), reviewModeQuestionId,
+      const displayedReviewModeQuestionId = question?.reviewModeCardQuestion && question.id === displayedQuestionId
+        ? question.id : undefined;
+      writeJson(path, { id, draft, goal, created: Date.now(), displayedReviewModeQuestionId,
         files: files.map(file => ({ name: file.name, type: file.type, ...(file.link ? { link: file.link } : {}), bytes: Buffer.from(file.bytes).toString("base64") })) });
     } else return cliFailure("INVALID_INPUT", t("errors.ef091a00af0e1a46"));
     broadcastBoardChat(project, "orchestrator-queue", {}, event.sender);
@@ -2887,8 +2890,6 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
   }
   if (closingProjects.has(board.project)) return cliFailure("PROJECT_CLOSING", t("ui.the_project_is_closing_beb637fb"));
-  const directQuestion = !queuedPath && !background && !goal && reviewModeReplyTarget(request)
-    ? readManagerHistory(board.project, null, "chat")?.turns.at(-1)?.items.at(-1) : undefined;
   const claimWriter = () => agentSlots.claim(board.project, context);
   let writer;
   try {
@@ -3393,7 +3394,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       delivered();
       return { ok: true as const, data: { answer, items, changes, id: threadId } };
     }
-    const questionId = queuedPath ? queued?.reviewModeQuestionId : directQuestion?.reviewModeCardQuestion ? directQuestion.id : undefined;
+    const questionId = queued?.displayedReviewModeQuestionId;
     const previousChat = (allowReviewModeChange && questionId) || (lane === "chat" && !threadId)
       ? readManagerHistory(project, null, "chat")?.turns : undefined;
     const previousTurn = previousChat?.at(-1);
