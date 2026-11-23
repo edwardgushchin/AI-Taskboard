@@ -15,6 +15,13 @@ globalThis.providerLimitSummary = (providers, now = Date.now()) => {
     unavailable: fresh.filter(provider => provider.state !== "ready").length };
 };
 
+globalThis.providerLimitResetCount = (provider, now = Date.now()) => {
+  const { state, observedAt, availableResetCount } = provider;
+  if (!["ready", "no_windows", "unknown"].includes(state)) return;
+  if (observedAt === undefined || observedAt > now || now - observedAt > 180_000) return;
+  if (Number.isSafeInteger(availableResetCount) && availableResetCount >= 0) return availableResetCount;
+};
+
 globalThis.providerLimitWindowLabel = (minutes, locale) => {
   const t = (key, parameters) => globalThis.taskboardLocalization.text(key, parameters, globalThis.taskboardLocalization.resolve([locale]));
   if (minutes === 10080) return t("limits.weekly");
@@ -38,7 +45,8 @@ if (typeof document !== "undefined") {
     if (!localization.state().english) return;
     const label = t("limits.label");
     panel.setAttribute("aria-label", label);
-    const summary = globalThis.providerLimitSummary(providers);
+    const now = Date.now();
+    const summary = globalThis.providerLimitSummary(providers, now);
     const lowest = summary.lowest;
     control.querySelector("span").textContent = lowest ? `${label} ${Math.floor(lowest.remaining)}%` : label + " ?";
     const warning = lowest && lowest.remaining <= 10 ? t("limits.low") : "";
@@ -55,7 +63,7 @@ if (typeof document !== "undefined") {
       overview.textContent = overviewText;
       content.append(overview);
     }
-    for (const provider of summary.providers) {
+    for (const [index, provider] of summary.providers.entries()) {
       const group = document.createElement("section");
       const header = document.createElement("header");
       header.className = "limits-header";
@@ -70,13 +78,13 @@ if (typeof document !== "undefined") {
       }
       group.append(header);
       content.append(group);
-      if (provider.state !== "ready") {
+      if (!["ready", "unsupported", "no_windows"].includes(provider.state)) {
         const status = document.createElement("p");
         status.textContent = t("limits." + provider.state);
         group.append(status);
-        continue;
       }
-      for (const window of provider.windows) {
+      const windows = provider.state === "ready" ? provider.windows : [];
+      for (const window of windows) {
         const quota = document.createElement("div");
         quota.className = "limits-window";
         const row = document.createElement("p");
@@ -106,6 +114,25 @@ if (typeof document !== "undefined") {
           quota.append(warning);
         }
         group.append(quota);
+      }
+      const snapshot = providers[index];
+      const count = globalThis.providerLimitResetCount(snapshot, now);
+      if (count === undefined) continue;
+      const resets = document.createElement("p");
+      resets.className = "limits-reset-count";
+      resets.textContent = t("limits.available_resets", { count: new Intl.NumberFormat(localization.locale).format(count) });
+      group.append(resets);
+      const expirations = count > 0 ? snapshot.resetCreditExpirations?.filter(time => time === null || time > now) : undefined;
+      if (expirations?.length) {
+        const list = document.createElement("ul");
+        list.className = "limits-reset-credits";
+        for (const time of expirations) {
+          const item = document.createElement("li");
+          item.textContent = time === null ? t("limits.reset_expiry_unknown") :
+            t("limits.reset_expires", { time: new Date(time).toLocaleString(localization.locale) });
+          list.append(item);
+        }
+        group.append(list);
       }
     }
     if (boardBudget) {
