@@ -47,7 +47,7 @@ import type { ArchiveLink, BoardSettings, BoardTag, ReviewMode, RunActivity, Tas
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, maxAttachmentBytes, reviewsAcceptanceRepair, reviewVerifier, taskIdPattern, TaskboardError, usesIndependentReviewer } from "../cli/model.ts";
 import { managerGoalBinding, managerGoalState } from "../cli/manager-goal.ts";
 import { BoardStore, directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, withProjectRulesLock, writeJson } from "../cli/storage.ts";
-import { readBoardProjectRules, writeBoardProjectRules } from "../cli/board-agents.ts";
+import { migrateBoardProjectRules, readBoardProjectRules, writeBoardProjectRules } from "../cli/board-agents.ts";
 import { applyDesktopAcceptance } from "../cli/acceptance.ts";
 import { missingCodexThread, startCodexRun, writeProbeTimeoutCode } from "./codex-run.ts";
 import type { ExecutorTask } from "./codex-run.ts";
@@ -3355,6 +3355,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const reviewTaskTools = usesIndependentReviewer(reviewMode)
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
     const allowAutoModeChange = !background;
+    const allowRulesMigration = !background && !goal && !reviewIds && !cleanupJob && !repairTask &&
+      !approvalNotices && !draftNotice;
+    const migrateRulesTool: BoardMcpTool = {
+      name: "board_import_project_rules",
+      description: "Migrate the current board's root AGENTS.md into project rules. Use only when the latest owner message explicitly asks to perform this migration. Interpret the request by meaning in the owner's language. Questions about behavior, attachments, file contents, history and background requests do not authorize it. Pass the latest owner message verbatim as authorization. Report the tool's actual result, including a successful no-op or an error.",
+      inputSchema: { type: "object", properties: { authorization: { type: "string" } },
+        required: ["authorization"], additionalProperties: false },
+    };
     const stages = hasMode("manager") ? phaseStageReporter(project, "review") : undefined;
     let mcpTools: BoardMcpTool[] = boardMcpTools.filter(({ name }) =>
       (name !== "board_set_auto_mode" || allowAutoModeChange) &&
@@ -3372,6 +3380,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     const allowReviewModeChange = !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
+    if (allowRulesMigration) mcpTools.push(migrateRulesTool);
     if (goal) mcpTools = goalActionTools(mcpTools);
     if (approvalNotices) mcpTools = mcpTools.filter(({ name }) => name === "task_review" || name === "task_accept");
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
@@ -3469,6 +3478,16 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         confirmApproval(t(scope === "local" ? "ui.git_delete_local_branch" : "ui.git_delete_remote_branch", { branch, head, remote }), decision));
     const run = async (name: string, args: unknown, toolSignal?: AbortSignal): Promise<CliReply> => {
       try {
+        if (name === migrateRulesTool.name) {
+          const authorization = (args as { authorization?: unknown } | null)?.authorization;
+          if (!allowRulesMigration || !ownerReviewRequest || authorization !== ownerReviewRequest) {
+            return cliFailure("USER_DIRECTION_REQUIRED", "The latest owner message must request migration on this board.");
+          }
+          signal.throwIfAborted();
+          const location = locateBoard(board.project);
+          const { changed, imported } = withProjectRulesLock(location, () => migrateBoardProjectRules(location.root));
+          return { ok: true, data: { changed, imported } };
+        }
         if (name === boardReviewModeTool.name) {
           if (!allowReviewModeChange) return cliFailure("USER_DIRECTION_REQUIRED", "Use the owner's manager chat to change review mode.");
           signal.throwIfAborted();
@@ -4871,7 +4890,7 @@ async function confirmHumanAcceptance(state: ProjectTab, project: string, id: st
   }
 }
 
-ipcMain.handle("board:projectRules", (event, project: unknown, input?: { text: unknown; revision: unknown }) => {
+ipcMain.handle("board:projectRules", (event, project: unknown, input?: Parameters<typeof writeBoardProjectRules>[1]) => {
   const state = stateOf(event);
   if (!state.board || !state.project || project !== state.project) {
     return cliFailure("INVALID_INPUT", t("errors.38d774058da8c2d9"));

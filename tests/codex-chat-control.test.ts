@@ -324,7 +324,13 @@ test("board chat keeps a goal streaming across turns and times out only after in
   const oldRules = writeBoardProjectRules(directory, {
     text: "Manager OLD rule", revision: readBoardProjectRules(directory).revision,
   });
-  writeBoardProjectRules(directory, { text: "Manager CURRENT rule", revision: oldRules.revision });
+  writeBoardProjectRules(directory, {
+    revision: oldRules.revision,
+    rules: [
+      { text: "Manager CURRENT rule", enabled: true },
+      { text: "Manager DISABLED rule", enabled: false },
+    ],
+  });
   const script = join(directory, "provider.cjs");
   const captured = join(directory, "requests.json");
   const threadId = "00000000-0000-0000-0000-000000000001";
@@ -568,7 +574,7 @@ test("board chat keeps a goal streaming across turns and times out only after in
   assert.ok(requests.slice(2).every(({ params }: { params: { threadId: string } }) => params.threadId === threadId));
   const suppliedRules = requests[8].params.additionalContext.ai_taskboard_project_rules.value;
   assert.match(suppliedRules, /Manager CURRENT rule/);
-  assert.doesNotMatch(suppliedRules, /Manager OLD rule/);
+  assert.doesNotMatch(suppliedRules, /Manager (OLD|DISABLED) rule/);
   assert.equal(requests[6].params.model, "manager-model");
   assert.equal(requests[6].params.permissions, "ai-taskboard-manager");
   assert.equal(requests[6].params.sandbox, undefined);

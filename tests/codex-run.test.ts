@@ -163,7 +163,11 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     symlinkSync("executor-rules.md", join(folder, "AGENTS.md"), "file");
   }
   writeBoardProjectRules(folder, {
-    text: "Executor CURRENT rule", revision: readBoardProjectRules(folder).revision,
+    revision: readBoardProjectRules(folder).revision,
+    rules: [
+      { text: "Executor CURRENT rule", enabled: true },
+      { text: "Executor DISABLED rule", enabled: false },
+    ],
   });
   const stub = join(folder, "codex.cjs");
   const capture = join(folder, "captured.json");
@@ -411,7 +415,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(turn.params.effort, "high");
   const suppliedRules = turn.params.additionalContext.ai_taskboard_project_rules.value;
   assert.match(suppliedRules, /Executor CURRENT rule/);
-  assert.doesNotMatch(suppliedRules, /Executor OLD rule/);
+  assert.doesNotMatch(suppliedRules, /Executor (OLD|DISABLED) rule/);
   assert.match(readFileSync(join(worktree, "AGENTS.md"), "utf8"), /Executor OLD rule/);
   assert.match(turn.params.input[0].text, /T-0001.*Проверка/s);
   assert.match(turn.params.input[0].text, /После записи результата в карточку и перед итоговым ответом.*mcp__ai_taskboard__worklog_record/);

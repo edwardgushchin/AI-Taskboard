@@ -38,7 +38,13 @@ test("task discussion streams task usage before success, provider failure, or a 
   const oldRules = writeBoardProjectRules(folder, {
     text: "Reviewer OLD rule", revision: readBoardProjectRules(folder).revision,
   });
-  writeBoardProjectRules(folder, { text: "Reviewer CURRENT rule", revision: oldRules.revision });
+  writeBoardProjectRules(folder, {
+    revision: oldRules.revision,
+    rules: [
+      { text: "Reviewer CURRENT rule", enabled: true },
+      { text: "Reviewer DISABLED rule", enabled: false },
+    ],
+  });
   const stub = join(folder, "server.cjs");
   writeFileSync(stub, `
     const send = value => console.log(JSON.stringify(value));
@@ -83,7 +89,7 @@ test("task discussion streams task usage before success, provider failure, or a 
           assert.ok(params.outputSchema.required.includes("verifyRisk"));
           const rules = params.additionalContext.ai_taskboard_project_rules.value;
           assert.match(rules, /Reviewer CURRENT rule/);
-          assert.doesNotMatch(rules, /Reviewer OLD rule/);
+          assert.doesNotMatch(rules, /Reviewer (OLD|DISABLED) rule/);
           assert.equal(typeof params.clientUserMessageId, "string");
           require("node:fs").writeFileSync("review-client-id", params.clientUserMessageId);
         }
