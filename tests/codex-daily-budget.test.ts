@@ -15,7 +15,7 @@ function report(turnId: string, completedAt: number, dailyTokens: number | null,
     sequence,
     records: [{
       ...emptyTokenCounts(), threadId: "thread", turnId, model: "model",
-      incomplete: true, completedAt, dailyTokens,
+      incomplete: true, completedAt, dailyTokens, dailyTokensExcludeCache: true as const,
     }],
   };
 }
@@ -77,8 +77,135 @@ test("a late usage notification keeps the completion date from Codex", () => {
     method: "thread/tokenUsage/updated",
     params: { threadId: "root", turnId: "turn", tokenUsage: { total: counts, last: counts } },
   });
-  assert.equal(updated?.records[0].dailyTokens, 30);
+  assert.equal(updated?.records[0].dailyTokens, 22);
   assert.equal(updated?.records[0].completedAt, ended);
+});
+
+test("budget waits for a missing cache count and retains the gross statistics", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-breakdown-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const ended = new Date(2026, 10, 23, 23, 59, 59).getTime();
+  const nextDay = ended + 1000;
+  for (const [cached, output, charge] of [[700, 200, 500], [0, 200, 1200], [1000, 0, 0]]) {
+    const turnId = "turn-" + cached;
+    const last = {
+      inputTokens: 1000, outputTokens: output, cachedInputTokens: cached,
+      totalTokens: 1000 + output, reasoningOutputTokens: 0, cacheWriteInputTokens: 0,
+    };
+    // Each iteration uses a separate stream so its first sample supplies a baseline.
+    const stream = new CodexTokenUsage();
+    stream.track("thread", "model", true);
+    stream.begin("thread", turnId);
+    const observe = (cache: number | null, totalCache = cache) => {
+      return stream.observe({
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread", turnId,
+          tokenUsage: {
+            total: { ...last, cachedInputTokens: totalCache },
+            last: { ...last, cachedInputTokens: cache },
+          },
+        },
+      });
+    };
+    observe(null, cached === 700 ? cached : null);
+    const pending = stream.completeTurn("thread", { id: turnId, completedAt: ended / 1000 })!;
+    assert.equal(recordCodexDailyUsage(project, "manager", pending), true);
+    assert.equal(codexDailyBudget(project, 1701, ended).reason, "unknown");
+    const completed = observe(cached)!;
+    for (const [key, value] of Object.entries(last)) {
+      assert.equal(completed.records[0][key as keyof typeof last], value);
+    }
+    assert.equal(completed.records[0].dailyTokens, charge);
+    assert.equal(recordCodexDailyUsage(project, "manager", completed), true);
+    assert.equal(recordCodexDailyUsage(project, "manager", completed), false);
+    assert.equal(recordCodexDailyUsage(project, "manager", { ...completed, id: "other-window" }), false);
+    assert.equal(recordCodexDailyUsage(project, "manager", pending), false);
+  }
+  assert.equal(codexDailyBudget(project, 1700, ended).reason, "exhausted");
+  assert.equal(codexDailyBudget(project, 1700, ended).spent, 1700);
+  assert.equal(codexDailyBudget(project, 1700, nextDay).remaining, 1700);
+});
+
+test("a later cumulative snapshot reconciles cache gaps within the same model", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-cache-gap-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const completedAt = new Date(2026, 10, 23, 23, 59, 59).getTime();
+  const collector = new CodexTokenUsage();
+  collector.track("thread", "model", true);
+  collector.begin("thread", "turn");
+  const observe = (totalTokens: number, cachedInputTokens: number | null) => {
+    const total = { totalTokens, inputTokens: totalTokens - 50, cachedInputTokens, outputTokens: 50 };
+    return collector.observe({
+      method: "thread/tokenUsage/updated",
+      params: { threadId: "thread", turnId: "turn", tokenUsage: { total, last: total } },
+    });
+  };
+  observe(200, 100);
+  observe(300, null);
+  const pending = collector.completeTurn("thread", { id: "turn", completedAt: completedAt / 1000 })!;
+  assert.equal(pending.records[0].dailyTokens, null);
+  assert.equal(recordCodexDailyUsage(project, "executor", pending), true);
+  assert.equal(codexDailyBudget(project, 300, completedAt).reason, "unknown");
+  const stillPending = observe(350, null)!;
+  assert.equal(stillPending.records[0].dailyTokens, null);
+  assert.equal(recordCodexDailyUsage(project, "executor", stillPending), true);
+
+  const resolved = observe(400, 200)!;
+  const [record] = resolved.records;
+  assert.equal(record.totalTokens, 400);
+  assert.equal(record.inputTokens, 350);
+  assert.equal(record.cachedInputTokens, 200);
+  assert.equal(record.outputTokens, 50);
+  assert.equal(record.dailyTokens, 200);
+  assert.equal(record.completedAt, completedAt);
+  assert.equal(recordCodexDailyUsage(project, "executor", resolved), true);
+  assert.equal(recordCodexDailyUsage(project, "executor", resolved), false);
+  assert.equal(recordCodexDailyUsage(project, "executor", pending), false);
+  assert.equal(codexDailyBudget(project, 300, completedAt).spent, 200);
+  assert.equal(codexDailyBudget(project, 300, completedAt).reason, undefined);
+  assert.equal(codexDailyBudget(project, 300, completedAt + 1000).spent, 0);
+});
+
+test("restoring a legacy queue upgrades a matching gross charge exactly once", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-upgrade-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const ledger = join(project, ".tasks", "codex-daily-usage");
+  const profile = join(project, "profile");
+  const pending = join(profile, "pending-token-usage");
+  mkdirSync(ledger, { recursive: true });
+  mkdirSync(pending, { recursive: true });
+  const completedAt = new Date(2026, 10, 23, 12).getTime();
+  const legacyCharge = { reportId: "turn", sequence: 1, role: "manager", completedAt, tokens: 1200 };
+  writeFileSync(join(ledger, "2026-11-23.json"), JSON.stringify({
+    '["thread","turn"]': legacyCharge,
+    '["thread","unreported"]': { ...legacyCharge, reportId: "unreported", tokens: 30 },
+  }));
+  const { dailyTokensExcludeCache, ...record } = report("turn", completedAt, 1200).records[0];
+  const queue = new TokenUsageQueue(profile, []);
+  const deliver = (breakdown: Partial<typeof record>, id = "turn") => {
+    const entry = {
+      project, budgetRole: "manager",
+      report: { id, sequence: 1, records: [{ ...record, ...breakdown }] },
+    };
+    writeFileSync(join(pending, "report.json"), JSON.stringify(entry));
+    queue.restore();
+  };
+  deliver({});
+  assert.equal(codexDailyBudget(project, 2000, completedAt).spent, 1230);
+  const breakdown = {
+    incomplete: false, totalTokens: 1200, inputTokens: 1000, cachedInputTokens: 700,
+    outputTokens: 200, reasoningOutputTokens: 20, cacheWriteInputTokens: 0,
+  };
+  deliver(breakdown, "other-report");
+  assert.equal(codexDailyBudget(project, 2000, completedAt).spent, 1230);
+  deliver(breakdown);
+  assert.equal(codexDailyBudget(project, 2000, completedAt).spent, 530);
+  deliver({});
+  deliver(breakdown);
+  assert.equal(codexDailyBudget(project, 2000, completedAt).remaining, 1470);
 });
 
 test("restart replays a budget report after a temporary storage failure", t => {

@@ -648,7 +648,7 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
       assert.equal(record.completedAt, undefined);
       assert.equal(record.dailyTokens, undefined);
     } else {
-      assert.equal(record.dailyTokens, 120);
+      assert.equal(record.dailyTokens, 70);
       assert.equal(typeof record.completedAt, "number");
     }
   }
