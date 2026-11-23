@@ -74,7 +74,7 @@ import { acknowledgeInterval, goalQueueCondition, intervalDeadline, iterativeEna
   goalEventConditions, goalReserveTarget, iterationDirectiveAfterEdit, normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
   type GoalReason, type IterationDirective, type IterativeGoalState } from "./iterative-goal.ts";
 import type { taskActivity } from "../cli/task-activity.ts";
-import { nextReadyTask } from "./auto-queue.ts";
+import { launchableTasks, nextReadyTask } from "./auto-queue.ts";
 import { automationDelivery, pendingReviewApprovals } from "./automation-delivery.ts";
 import type { AgentRole } from "./agent-limits.ts";
 import { ApplicationUpdates, applicationUpdateTools, prepareWindowsUpdate } from "./installation-updates.ts";
@@ -1534,7 +1534,10 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
   };
   if (isManual(watch.board.settings) || subscriptions.get(project) !== watch || closingProjects.has(project) ||
       (!watch.board.settings.autoMode && !watch.board.tasks.some(task =>
-        (task.status === "ready" && task.launchRequested) || missingPlan(task, watch.board.settings)) &&
+        (task.status === "ready" && (task.launchRequested || (task.schedule && !task.schedule.paused &&
+          Date.parse(task.schedule.nextAt) <= now))) || task.discussionReturn !== undefined ||
+        missingPlan(task, watch.board.settings)) &&
+        !agentSlots.entries(project).some(entry => entry.kind === "queue") &&
         !pendingReviewApprovals(watch.board).length &&
         !watch.board.managerInbox?.some(message => message.draftQuestion))) return;
   let state = autoBoards.get(watch);
@@ -1552,6 +1555,7 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
     boardRequests.get(projectIdentity(project))?.automationEvent?.({ error });
   };
   void (async () => {
+    const attemptedDeferred = new Set<string>();
     // Read again before every decision; watch snapshots can lag a CLI write.
     for (;;) {
       if (quotaWait || closingProjects.has(project) || subscriptions.get(project) !== watch) return;
@@ -1560,9 +1564,73 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
       const board = current.data;
       if (quotaWait || isManual(board.settings) || boardBudgetFailure(project, board.settings)) return;
       const controls = board.settings.autoMode ? board.settings.autoQueue : undefined;
-      const queued = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested);
+      const queued = board.settings.autoMode ? board.tasks : board.tasks.filter(task => task.launchRequested || task.schedule);
       const eligibleTasks = queued.filter(task => planned(task, board.settings));
       const key = projectIdentity(project);
+      const available = {
+        executor: agentSlots.available(key, "executor", board.settings.taskLimits),
+        reviewer: agentSlots.available(key, "reviewer", board.settings.taskLimits),
+      };
+      const dispatch = async (deferred: DeferredCandidate | undefined) => {
+        const decisionTime = Date.now();
+        const ready = launchableTasks(eligibleTasks, decisionTime, controls, board.tasks).filter(task =>
+          available[task.mergeRepair ? "reviewer" : "executor"] && !executorBusy(project, task.id) &&
+          !queue.launches.has(task.id + ":" + task.revision));
+        const scheduled = board.settings.autoMode ? [] : ready.filter(task => task.schedule);
+        const automatic = board.settings.autoMode ? ready : ready.filter(task => !task.schedule);
+        const next = nextReadyTask(automatic, queue.dates, () => false, decisionTime, controls, board.tasks);
+        const task = scheduled.find(task => task.priority === "urgent") ??
+          (next?.priority === "urgent" ? next : scheduled[0] ?? next);
+        const loadMilestones = task && (board.settings.autoMode || !task.schedule) && automatic.some(candidate => candidate.milestone &&
+          (candidate.priority === "urgent") === (task.priority === "urgent"));
+        const refreshMilestones = loadMilestones && decisionTime - queue.milestonesAt >= 60_000;
+        if (deferred && (!task || deferred.task.priority === "urgent" || task.priority !== "urgent" ||
+            (loadMilestones && queue.milestonesError && !refreshMilestones))) {
+          attemptedDeferred.add(deferred.task.id);
+          await launchDeferredExecutor(project, deferred);
+          return true;
+        }
+        if (!task) return false;
+        if (refreshMilestones) {
+          queue.milestonesAt = decisionTime;
+          const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
+          if (!milestones.ok) {
+            queue.milestonesError = milestones.error.message;
+            failed(milestones.error.message);
+            return Boolean(deferred);
+          }
+          queue.milestonesError = undefined;
+          queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
+          return true; // A deadline, setting or card may have changed during the network request.
+        }
+        if (loadMilestones && queue.milestonesError) return false;
+        const attempt = task.id + ":" + task.revision;
+        queue.launches.add(attempt);
+        const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false,
+          Boolean(board.settings.autoMode), false, controls?.revision ?? 0);
+        if (!result.ok) {
+          if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
+              "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED",
+              "AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(result.error.code)) {
+            queue.launches.delete(attempt);
+            return false; // Retry on the next event/tick, never spin on the same snapshot.
+          }
+          if (task.launchRequested) { queue.launches.delete(attempt); failed(task.id + ": " + result.error.message); return false; }
+          const blocked = await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
+            reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab"),
+            autoMode: Boolean(board.settings.autoMode), autoQueueRevision: controls?.revision ?? 0 });
+          if (!blocked.ok && ["AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(blocked.error.code)) {
+            queue.launches.delete(attempt);
+          }
+        }
+        return true;
+      };
+      // Persisted continuations used to be dispatched ahead of the board work below.
+      const deferred = nextDeferredExecutor(board, watch, available, attemptedDeferred);
+      if (deferred) {
+        if (await dispatch(deferred)) continue;
+        return;
+      }
       if (board.settings.autoMode) {
         const integrationKey = (task: Board["tasks"][number]) =>
           JSON.stringify([task.id, task.revision, taskReviewModeVersion(task, board.settings), task.reviewApprovalTargetHead]);
@@ -1798,51 +1866,59 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           })
           .catch(error => failed((error as Error).message));
       }
-      if (controls?.paused) return;
-      const available = {
-        executor: agentSlots.available(key, "executor", board.settings.taskLimits),
-        reviewer: agentSlots.available(key, "reviewer", board.settings.taskLimits),
-      };
-      if (!eligibleTasks.some(task => task.status === "ready" && available[task.mergeRepair ? "reviewer" : "executor"])) return;
-      if (eligibleTasks.some(task => task.status === "ready" && task.milestone) && Date.now() - queue.milestonesAt >= 60_000) {
-        queue.milestonesAt = Date.now();
-        const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
-        if (!milestones.ok) { queue.milestonesError = milestones.error.message; failed(milestones.error.message); return; }
-        queue.milestonesError = undefined;
-        queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
-        continue; // A deadline, setting or card may have changed during the network request.
-      }
-      if (queue.milestonesError && eligibleTasks.some(task => task.status === "ready" && task.milestone)) return;
-      const task = nextReadyTask(eligibleTasks, queue.dates, id => {
-        const candidate = board.tasks.find(task => task.id === id)!;
-        return !available[candidate.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id) ||
-          queue.launches.has(id + ":" + candidate.revision);
-      }, Date.now(), controls, board.tasks);
-      if (!task) return;
-      const attempt = task.id + ":" + task.revision;
-      queue.launches.add(attempt);
-      const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false,
-        Boolean(board.settings.autoMode), false, controls?.revision ?? 0);
-      if (!result.ok) {
-        if (["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS", "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT",
-            "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET", "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED",
-            "AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(result.error.code)) {
-          queue.launches.delete(attempt);
-          return; // Retry on the next event/tick, never spin on the same snapshot.
-        }
-        if (task.launchRequested) { queue.launches.delete(attempt); failed(task.id + ": " + result.error.message); return; }
-        const blocked = await callCli(project, ["block", task.id, "--compact"], { revision: task.revision, allowUnstarted: true,
-          reason: result.error.message, condition: t("ui.fix_the_launch_error_and_unblock_the_task_9eea19ab"),
-          autoMode: true, autoQueueRevision: controls?.revision ?? 0 });
-        if (!blocked.ok && ["AUTO_MODE_DISABLED", "AUTO_QUEUE_PAUSED", "AUTO_QUEUE_CHANGED", "AUTO_RELEASE_WAIT"].includes(blocked.error.code)) {
-          queue.launches.delete(attempt);
-        }
-      }
+      if (!await dispatch(nextDeferredExecutor(board, watch, available, attemptedDeferred))) return;
     }
   })().catch(error => failed((error as Error).message)).finally(() => { queue.running = false; });
 }
 
 const queuedRecoveryDelay = new Set<string>();
+
+type DeferredCandidate = { task: Board["tasks"][number]; entry?: RuntimeEntry };
+
+function nextDeferredExecutor(board: Board, watch: BoardWatch, available: { executor: number; reviewer: number },
+  attempted: ReadonlySet<string>) {
+  const { project, tasks, settings } = board;
+  const candidates: DeferredCandidate[] = [];
+  const now = Date.now();
+  for (const entry of agentSlots.entries(project)) {
+    const { task: id, revision, quotaPaused, reviewReturn, earlyLaunch, writeProbeRetry, routingRetryAt } = entry;
+    if (entry.kind !== "queue" || !id || revision === undefined || attempted.has(id)) continue;
+    const task = tasks.find(task => task.id === id);
+    // The queue can be saved before the snapshot sees the new card revision.
+    if (task && task.revision < revision) continue;
+    if (!task || !matchesQueuedExecutor(entry, task)) {
+      agentSlots.defer(project, id, undefined, revision);
+      notifyRunChange(project);
+      continue;
+    }
+    if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch && !writeProbeRetry && !routingRetryAt) ||
+        Math.max(writeProbeRetry?.notBefore ?? 0, routingRetryAt ?? 0) > now ||
+        queuedRecoveryDelay.has(project + "\0" + id) ||
+        !available[task.mergeRepair ? "reviewer" : "executor"] || executorBusy(project, id)) continue;
+    candidates.push({ task, entry });
+  }
+  if (available.executor) {
+    for (const task of tasks) {
+      if (task.status !== "in_progress" || task.discussionReturn === undefined || attempted.has(task.id) ||
+          executorBusy(project, task.id) || (watch.failedDiscussionStarts?.get(task.id) ?? -1) >= task.revision) continue;
+      candidates.push({ task });
+    }
+  }
+  return candidates.find(candidate => candidate.task.priority === "urgent") ?? candidates[0];
+}
+
+async function launchDeferredExecutor(project: string, { task, entry }: DeferredCandidate) {
+  const { id } = task;
+  const result = await launchTask(project, id, undefined, false, entry && task.revision, entry?.continuation,
+    false, false, false, false, false, undefined, entry?.revision, entry ? undefined : task.discussionReturn);
+  if (result.ok) return;
+  if (entry && !["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY", "BOARD_CODEX_BUDGET",
+    "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING", "REVISION_CONFLICT", "INVALID_TRANSITION", "CODEX_START_UNCONFIRMED", "PROVIDER_QUOTA"].includes(result.error.code)) {
+    agentSlots.defer(project, id, undefined, entry.revision);
+    notifyRunChange(project);
+    broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + result.error.message });
+  }
+}
 
 function scheduleAgentWork() {
   if (applicationUpdates.installing) {
@@ -1856,44 +1932,6 @@ function scheduleAgentWork() {
     if (quotaWait) return;
     try {
       for (const watch of subscriptions.values()) {
-        const { project, tasks, settings } = watch.board;
-        if (closingProjects.has(project) || boardBudgetFailure(project, settings)) continue;
-        for (const entry of agentSlots.entries(project)) {
-          const { kind, task: id, revision, continuation, quotaPaused, reviewReturn, earlyLaunch, writeProbeRetry, routingRetryAt } = entry;
-          if (kind !== "queue" || !id || revision === undefined) continue;
-          const task = tasks.find(task => task.id === id);
-          // The queue can be saved before the watch sees the new card revision.
-          if (task && task.revision < revision) continue;
-          if (!task || !matchesQueuedExecutor(entry, task)) {
-            agentSlots.defer(project, id, undefined, revision);
-            notifyRunChange(project);
-            continue;
-          }
-          const role = task.mergeRepair ? "reviewer" : "executor";
-          const key = project + "\0" + id;
-          if ((quotaPaused && !settings.autoMode && !reviewReturn && !earlyLaunch && !writeProbeRetry && !routingRetryAt) ||
-              Math.max(writeProbeRetry?.notBefore ?? 0, routingRetryAt ?? 0) > Date.now() || queuedRecoveryDelay.has(key) ||
-              !agentSlots.available(projectIdentity(project), role, settings?.taskLimits) || executorBusy(project, id)) continue;
-          const failed = (error: string) => broadcastBoardChat(project, "orchestrator-review-error", { error: id + " · " + error });
-          void launchTask(project, id, undefined, false, task.revision, continuation,
-            false, false, false, false, false, undefined, revision).then(result => {
-            if (result.ok || ["EXECUTOR_LIMIT", "REVIEWER_LIMIT", "BOARD_BUSY", "CHAT_BUSY", "BOARD_CODEX_BUDGET",
-              "LAUNCH_IN_PROGRESS", "PROJECT_CLOSING", "REVISION_CONFLICT", "INVALID_TRANSITION", "CODEX_START_UNCONFIRMED", "PROVIDER_QUOTA"].includes(result.error.code)) return;
-            agentSlots.defer(project, id, undefined, revision);
-            notifyRunChange(project);
-            failed(result.error.message);
-          }).catch(error => failed((error as Error).message));
-        }
-      }
-      for (const watch of subscriptions.values()) {
-        const { project, settings, tasks } = watch.board;
-        if (!closingProjects.has(project) && !isManual(settings) && !boardBudgetFailure(project, settings)) for (const task of tasks) {
-          if (task.status !== "in_progress" || task.discussionReturn === undefined || executorBusy(project, task.id) ||
-              (watch.failedDiscussionStarts?.get(task.id) ?? -1) >= task.revision ||
-              !agentSlots.available(projectIdentity(project), "executor", settings?.taskLimits)) continue;
-          void launchTask(project, task.id, undefined, false, undefined, undefined, false, false, false, false, false, undefined, undefined, task.discussionReturn)
-            .catch(error => broadcastBoardChat(project, "orchestrator-review-error", { error: task.id + " · " + (error as Error).message }));
-        }
         scheduleAutoReview(watch);
         scheduleAutoBoard(watch);
       }
@@ -2079,24 +2117,6 @@ function scheduleRecurringTasks(now = Date.now()) {
       if (task.status === "review" && ["queued", "checking", "running"].includes(task.acceptanceRepair?.phase ?? "")) void continueAcceptance(project, task).catch(error => console.error("Could not continue acceptance", task.id, error));
     }
     scheduleAutoBoard(watch, now);
-    if (watch.board.settings?.autoMode) continue;
-    const projectKey = projectIdentity(project);
-    for (const task of watch.board.tasks) {
-      if (task.status !== "ready" || !task.schedule || task.schedule.paused || !(Date.parse(task.schedule.nextAt) <= now) ||
-          task.unfinishedDependencies?.length || launchingTasks.has(project + "\0" + task.id) || executorBusy(project, task.id)) continue;
-      if (!task.expertWorkPlanned && !task.expertStage && !task.mergeRepair) continue;
-      if (!agentSlots.available(projectKey, task.mergeRepair ? "reviewer" : "executor", watch.board.settings?.taskLimits)) continue;
-      const { id, revision } = task;
-      void launchTask(project, id, undefined, false, revision, undefined, true).then(async result => {
-        if (result.ok || ["BOARD_BUSY", "REVISION_CONFLICT", "INVALID_TRANSITION", "LAUNCH_IN_PROGRESS",
-          "CHAT_BUSY", "EXECUTOR_LIMIT", "REVIEWER_LIMIT", "PROVIDER_QUOTA", "BOARD_CODEX_BUDGET",
-          "PROJECT_CLOSING", "DEPENDENCIES_INCOMPLETE", "EXPERT_PLAN_REQUIRED"].includes(result.error.code)) return;
-        await callCli(project, ["block", id], {
-          revision, allowUnstarted: true, reason: result.error.message,
-          condition: t("ui.fix_the_launch_error_and_unblock_the_task_to_res_279223d6"),
-        });
-      }).catch(error => console.error("Could not launch scheduled task", id, (error as Error).message));
-    }
   }
 }
 

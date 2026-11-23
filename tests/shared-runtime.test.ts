@@ -13,7 +13,7 @@ import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWritePro
   runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 
-test("comments retain a queued first launch in an assigned directory, including older manual requests", t => {
+test("comments and priority changes retain saved manual executor requests", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-manual-first-launch-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
   initializeBoard(locateBoard(project, true), () => {});
@@ -53,6 +53,17 @@ test("comments retain a queued first launch in an assigned directory, including 
   forgetExecutor(project, id);
   taskCommand(["comment", id], { text: "Comment after stopping the launch" });
   assert.equal(queued(), undefined);
+
+  const codexThreadId = "01234567-1234-5678-1234-123456789012";
+  const linked = taskCommand(["update", id], { codexThreadId });
+  taskCommand(["start", id], { actor: "user", queueExecutor: true, revision: linked.revision });
+  const pending = queued();
+  assert.ok(pending && matchesQueuedExecutor(pending, linked));
+  const promoted = taskCommand(["update", id], { revision: linked.revision, priority: "urgent" });
+  assert.equal(promoted.priority, "urgent");
+  const preserved = queued();
+  assert.ok(preserved && matchesQueuedExecutor(preserved, promoted));
+  assert.ok(matchesQueuedExecutor(preserved, linked));
 });
 
 test("write probe retry persists its delay and respects shared slots and cancellation", t => {

@@ -262,7 +262,7 @@ export function preserveLegacyFirstLaunch(project: string, task: QueuedTask & Pi
   const cwd = task.git?.worktree ?? task.workingDirectory;
   if (!cwd || task.status !== "in_progress" || task.codexThreadId) return;
   // An older manual queue entry can only be upgraded while it still matches
-  // the card, before the comment publishes the next revision.
+  // the card, before the next revision is saved.
   const legacy = (entry: RuntimeEntry) => entry.revision === task.revision &&
     !entry.earlyLaunch && !entry.reviewReturn && !entry.restart && !entry.newThread &&
     !entry.quotaPaused && !entry.continuation && !entry.linkedThread && !entry.turnRequest &&
