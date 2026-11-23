@@ -1,4 +1,8 @@
 {
+  "review_mode.card_question": "Какой карточке?",
+  "review_mode.mode_question": "Какой режим ревью выбрать?",
+  "review_mode.saved": "Для {id} сохранён режим «{mode}».",
+  "review_mode.inherited": "{id} наследует режим «{mode}» от доски.",
   "ui.acceptance_wait_local_changes": "Приёмка ждёт устранения конфликта с локальными правками",
   "ui.acceptance_wait_local_changes_help": "Сохраните конфликтующие правки в отдельном коммите или отложите их в Git stash. Доска перепроверит сдачу после изменения целевой рабочей копии.",
   "ui.acceptance_wait_diagnostics": "Диагностика приёмки",

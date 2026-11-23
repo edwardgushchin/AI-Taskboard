@@ -1,4 +1,8 @@
 {
+  "review_mode.card_question": "Which card?",
+  "review_mode.mode_question": "Which review mode?",
+  "review_mode.saved": "{id} now uses the “{mode}” review mode.",
+  "review_mode.inherited": "{id} inherits the “{mode}” review mode from the board.",
   "ui.acceptance_wait_local_changes": "Acceptance is waiting for conflicting local changes to be resolved",
   "ui.acceptance_wait_local_changes_help": "Commit the conflicting changes separately or set them aside with Git stash. The board will check the submission again when the target worktree changes.",
   "ui.acceptance_wait_diagnostics": "Acceptance diagnostics",

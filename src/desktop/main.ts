@@ -32,7 +32,8 @@ import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
-import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
+import { boardReviewModeTool, reviewModeCardReply, reviewModeConfirmation, reviewModeQuestion, reviewModeReceipt,
+  reviewModeReplyTarget, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
 import { phaseStageReporter } from "./expert-tools.ts";
 import type { BoardChange, PendingReviewDecision, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
@@ -1238,6 +1239,14 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       publishDiscussionActivity(project, id, []);
     }
     notifyRunChange(project);
+    if (!active && !automatic && !task.closedAt && !isManual(readBoardSettings(runtimeLocation(project))) &&
+        reviewModeQuestion(message.text ?? "", id) === "mode") {
+      const result = await callCli<Task>(project, ["chat", id], {
+        text: t("review_mode.mode_question"), actor: "agent", model, effort, replyTo: last, revision: task.revision,
+      });
+      if (result.ok) savedDiscussionRevision = result.data.revision;
+      return { saved, result };
+    }
     const activeFiles = new Set(message?.chat?.files);
     const inspectDraft = task.status === "draft";
     const images: string[] = [];
@@ -1307,7 +1316,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       return { saved, result: { ok: true as const, data: task } };
     }
     const replyStarted = performance.now();
-    let replyTarget = { index: last, revision: task.revision };
+    let replyTarget: { index: number; revision: number; reviewConfirmation?: string } = { index: last, revision: task.revision };
     let actionIndex = last;
     const pendingSteering = new Set<Promise<void>>();
     const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
@@ -1325,7 +1334,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       project, card, card.history[target.index]?.text ?? "", revision => {
         target.revision = revision;
         notify({ type: "changed" });
-      }, requestChanges, target.index + 1,
+      }, requestChanges, target.index + 1, receipt => {
+        target.reviewConfirmation = reviewModeConfirmation(receipt);
+      },
     );
     let runAction = actionsFor(task, replyTarget);
     const ready = Promise.withResolvers<AgentControl>();
@@ -1367,7 +1378,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
       ...answer,
-      text: automatic && managerReply === undefined && !answer.text ? t("draft_discussion.ready") : answer.text,
+      text: replyTarget.reviewConfirmation ??
+        (automatic && managerReply === undefined && !answer.text ? t("draft_discussion.ready") : answer.text),
       actor: "agent", model, effort, replyTo: replyTarget.index, durationMs: Math.round(performance.now() - replyStarted),
       ...(inspectDraft ? { revision: replyTarget.revision } : {}),
       ...(automatic ? { draftDiscussion: true, managerReply } : {}),
@@ -2307,6 +2319,7 @@ function boardThreadPath(project: string, dialogue = false) {
 
 type QueuedBoardMessage = {
   id: string; draft: string; goal: boolean; created: number; failed?: boolean;
+  displayedReviewModeQuestionId?: string;
   files: { name: string; type: string; bytes: string; link?: FileLink }[];
 };
 
@@ -2333,7 +2346,7 @@ function listQueuedMessages(directory: string) {
 }
 
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
-  goal?: unknown, files?: unknown) => {
+  goal?: unknown, files?: unknown, displayedQuestionId?: unknown) => {
   const state = stateOf(event);
   const board = state.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
@@ -2377,14 +2390,20 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         if (!job) return;
         if (action === "retry") { writeJson(path, { ...job, failed: undefined }); return; }
         if (!(draft as string).trim() && (job.goal || !job.files.length)) return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
-        writeJson(path, { ...job, draft });
+        writeJson(path, { ...job, draft,
+          displayedReviewModeQuestionId: job.draft === draft ? job.displayedReviewModeQuestionId : undefined,
+        });
       });
       if (error) return error;
     } else if (action === "add" && typeof draft === "string" && typeof goal === "boolean" &&
         Array.isArray(files) && files.every(isPastedFile) && (draft.trim() || (!goal && files.length)) &&
         files.reduce((total, file) => total + file.bytes.byteLength, 0) <= maxAttachmentBytes) {
       storageDirectory(directory, true);
-      writeJson(path, { id, draft, goal, created: Date.now(),
+      const question = !goal && typeof displayedQuestionId === "string" && reviewModeReplyTarget(draft)
+        ? readManagerHistory(project, null, "chat")?.turns.at(-1)?.items.at(-1) : undefined;
+      const displayedReviewModeQuestionId = question?.reviewModeCardQuestion && question.id === displayedQuestionId
+        ? question.id : undefined;
+      writeJson(path, { id, draft, goal, created: Date.now(), displayedReviewModeQuestionId,
         files: files.map(file => ({ name: file.name, type: file.type, ...(file.link ? { link: file.link } : {}), bytes: Buffer.from(file.bytes).toString("base64") })) });
     } else return cliFailure("INVALID_INPUT", t("errors.ef091a00af0e1a46"));
     broadcastBoardChat(project, "orchestrator-queue", {}, event.sender);
@@ -3080,6 +3099,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let requestText = queued?.draft.trim() ?? request.trim();
   if (draftNotice) requestText = "AI Taskboard queue: answer these draft questions through team_message. " + JSON.stringify(draftQuestions);
   let ownerReviewRequest = !background && !goal ? requestText : "";
+  let previousReviewRequest: string | undefined;
+  let reviewConfirmation: string | undefined;
   let pendingAction: Promise<unknown> = Promise.resolve();
   const iterationReceipt = pendingIteration;
   let iterationDispatched = false;
@@ -3360,10 +3381,33 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         clientId: typeof messageId === "string" ? messageId : undefined,
       };
     }
+    const reviewQuestion = allowReviewModeChange && reviewModeQuestion(ownerReviewRequest);
+    if (historyMessage && reviewQuestion) {
+      const answer = t(reviewQuestion === "card" ? "review_mode.card_question" : "review_mode.mode_question");
+      items = [{
+        id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "",
+        phase: "final_answer", text: answer, status: "completed",
+        reviewModeCardQuestion: reviewQuestion === "card" ? true : undefined,
+      }];
+      historyAccepted = true;
+      saveHistory();
+      delivered();
+      return { ok: true as const, data: { answer, items, changes, id: threadId } };
+    }
+    const questionId = queued?.displayedReviewModeQuestionId;
+    const previousChat = (allowReviewModeChange && questionId) || (lane === "chat" && !threadId)
+      ? readManagerHistory(project, null, "chat")?.turns : undefined;
+    const previousTurn = previousChat?.at(-1);
+    const previousQuestion = previousTurn?.items.at(-1);
+    if (allowReviewModeChange && previousQuestion?.reviewModeCardQuestion && previousQuestion.id === questionId &&
+        previousTurn?.messages.length === 1) {
+      previousReviewRequest = previousTurn.messages[0]?.text;
+    }
+    const clarifiedReview = previousReviewRequest && reviewModeCardReply(ownerReviewRequest, previousReviewRequest);
     let imageIndex = 0;
     const unread = draftNotice ? draftQuestions : cleanupJob || reviewIds || approvalNotices || (!goal && boardWorkRequests.get(projectKey)?.goalRunning) ? [] :
       (subscriptions.get(project)?.board ?? board).managerInbox ?? [];
-    const priorChat = lane === "chat" && !threadId ? readManagerHistory(project, null, "chat")?.turns.slice(-8)
+    const priorChat = lane === "chat" && !threadId ? previousChat?.slice(-8)
       .flatMap(turn => turn.lane === "notice" ? [] : [{
         user: turn.messages.map(message => message.text).join("\n").slice(-1200),
         manager: turn.items.findLast(item => item.type === "agentMessage" && item.phase !== "commentary")?.text.slice(-1200),
@@ -3407,11 +3451,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         if (name === boardReviewModeTool.name) {
           if (!allowReviewModeChange) return cliFailure("USER_DIRECTION_REQUIRED", "Use the owner's manager chat to change review mode.");
           signal.throwIfAborted();
-          const result = setReviewModeFromChat(board.project, ownerReviewRequest, args);
+          const result = setReviewModeFromChat(board.project, ownerReviewRequest, args, undefined, previousReviewRequest);
           if (!result.ok) return result;
           const { id, status, title, revision } = result.data;
           changes.push({ id, status, title, revision, action: "set_review_mode" });
-          return { ok: true, data: reviewModeReceipt(result.data) };
+          const receipt = reviewModeReceipt(result.data);
+          reviewConfirmation = reviewModeConfirmation(receipt);
+          return { ok: true, data: receipt };
         }
         if (name.startsWith("project_git_") && !mcpTools.some(tool => tool.name === name)) {
           return cliFailure("INVALID_INPUT", "This Git action is unavailable in this board session.");
@@ -3747,7 +3793,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           });
         };
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
-      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") + "\n" + initialSettings.text + (iteration ?
+      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
+        (clarifiedReview ? "\nThe application verified the owner's answer to its card question: " + JSON.stringify(clarifiedReview) +
+          ". Use the latest owner message as authorization." : "") + "\n" + initialSettings.text + (iteration ?
         "\nThis is a single planning turn. Handle the specified goal questions and owner instructions. Only acknowledge the specified questions. " +
         "When ready work is below target, prepare approved work to reach the ready target after free executor slots fill. " +
         "Leave dispatch and routine review to the board. Put the iteration result and the next concrete step or waiting condition in the final answer. " +
@@ -3964,12 +4012,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               attachments.push(...prepared);
               const receipt = messageId ? Promise.withResolvers<boolean>() : undefined;
               if (messageId && receipt) steering.set(messageId, receipt);
-              const previousReviewRequest = ownerReviewRequest;
+              const previousOwnerRequest = ownerReviewRequest;
+              const previousClarification = previousReviewRequest;
+              const previousConfirmation = reviewConfirmation;
               ownerReviewRequest = text.trim();
+              previousReviewRequest = undefined;
+              reviewConfirmation = undefined;
               try {
                 await control.steer(prompt, prepared.flatMap(file => file.image ? [file.image] : []), messageId);
               } catch (error) {
-                ownerReviewRequest = previousReviewRequest;
+                ownerReviewRequest = previousOwnerRequest;
+                previousReviewRequest = previousClarification;
+                reviewConfirmation = previousConfirmation;
                 attachments.length = firstAttachment;
                 throw error;
               }
@@ -4011,9 +4065,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const error = !stoppedIteration && response.goalStatus ? goalNotice[response.goalStatus] : undefined;
     historyAccepted = true;
     historyModel = response.model ?? historyModel;
-    if (response.text && !items.some(item => item.type === "agentMessage" && item.phase !== "commentary")) {
+    const answer = reviewConfirmation ?? response.text;
+    const finalMessage = items.findLastIndex(item => item.type === "agentMessage" && item.phase !== "commentary");
+    if (reviewConfirmation && finalMessage >= 0) {
+      items[finalMessage] = { ...items[finalMessage], text: reviewConfirmation };
+    } else if (answer && finalMessage < 0) {
       items = [...items, { id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "", phase: "final_answer",
-        text: response.text, status: "completed" }];
+        text: answer, status: "completed" }];
     }
     if (iteration && response.goalStatus === "active" && currentActiveGoal(project) === iteration.id && response.text.trim()) {
       const state = readIterativeGoal(project, iteration.id);
@@ -4024,7 +4082,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       saveHistory();
       delivered();
     }
-    return { ok: true as const, data: { answer: response.text, items: lane === "chat" ? managerChatItems(items) : items, changes, model: response.model, error, id: threadId,
+    return { ok: true as const, data: { answer, items: lane === "chat" ? managerChatItems(items) : items, changes, model: response.model, error, id: threadId,
       keepQueued: Boolean(queuedPath && error && !acceptedMessage) } };
   } catch (error) {
     await pendingAction;

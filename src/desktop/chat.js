@@ -580,6 +580,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     if (context?.dialogue) {
       final.classList.add("board-manager-message");
       final.dataset.messageId = item.id;
+      if (item.reviewModeCardQuestion) final.dataset.reviewModeCardQuestion = item.id;
     }
     final.append(chatText(item.text, messageContext));
     appendAnswerImages(final, item);
