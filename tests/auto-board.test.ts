@@ -7,14 +7,15 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
-import { nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { launchableTasks, nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { matchesQueuedExecutor, type RuntimeEntry } from "../src/desktop/board-runtime.ts";
 import { pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 import { reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion, usesIndependentReviewer } from "../src/cli/model.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
 const code = parsed.statements.filter(node => ts.isFunctionDeclaration(node) &&
-  (node.name?.text === "scheduleAutoBoard" || node.name?.text === "resumeDeferredBoardGoal") ||
+  ["scheduleAutoBoard", "nextDeferredExecutor", "launchDeferredExecutor", "resumeDeferredBoardGoal"].includes(node.name?.text ?? "") ||
   ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) &&
     (d.name.text === "autoBoards" || d.name.text === "managerNoticeKey")))
   .map(node => node.getText(parsed)).join("\n");
@@ -25,11 +26,13 @@ function fixture(mode = "human") {
   const watch: any = { board, tabs: new Set([{ window: { isDestroyed: () => false, webContents: {} } },
     { window: { isDestroyed: () => false, webContents: {} } }]), reviewerRuns: new Map() };
   const slots = createAgentSlots();
+  const queued: RuntimeEntry[] = [];
   const managers = new Map<string, any>(), dialogues = new Map<string, any>();
   const busy = new Map<string, () => void>();
   const launches: string[] = [], accepted: string[] = [], reviews: string[] = [], notices: any[] = [], calls: string[][] = [], errors: string[] = [];
   let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, afterReviewRead: (() => void) | undefined, launchError: string | undefined;
   let noticeError: string | undefined;
+  let milestonesError: string | undefined;
   let budgetWaiting = false;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
@@ -38,9 +41,10 @@ function fixture(mode = "human") {
     applicationUpdates: { installing: false },
     subscriptions: new Map([["project", watch]]), closingProjects: new Set(), boardWorkRequests: managers, boardRequests: dialogues,
     backgroundManagerRequests: new Map(),
-    isManual, nextReadyTask, pendingReviewApprovals, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, usesIndependentReviewer,
+    isManual, launchableTasks, nextReadyTask, pendingReviewApprovals, taskReviewMode, taskReviewModeVersion, reviewsAcceptanceRepair, usesIndependentReviewer,
     currentActiveGoal: () => undefined,
-    agentSlots: slots, projectIdentity: (path: string) => path,
+    agentSlots: { ...slots, entries: () => queued },
+    matchesQueuedExecutor, queuedRecoveryDelay: new Set(), projectIdentity: (path: string) => path,
     executorBusy: (_: string, id: string) => busy.has(id), t: (key: string) => localization.text(key, {}, "en"),
     broadcastBoardChat: (_: string, __: string, value: any) => errors.push(value.error),
     reserveAgent: (_: string, role: "reviewer", _task: string, _revision: number | undefined, review: { id: string; mode: string }) =>
@@ -69,7 +73,10 @@ function fixture(mode = "human") {
           board.tasks.find((task: any) => task.id === id)?.status !== "done");
         return { ok: true, data: structuredClone(board) };
       }
-      if (args[0] === "milestones") return { ok: true, data: { repository: "owner/repo", milestones: [{ number: 1, due_on: "2026-11-20T00:00:00Z" }] } };
+      if (args[0] === "milestones") {
+        if (milestonesError) return fail(milestonesError);
+        return { ok: true, data: { repository: "owner/repo", milestones: [{ number: 1, due_on: "2026-11-20T00:00:00Z" }] } };
+      }
       if (args[0] === "review") {
         afterReviewRead?.();
         return { ok: true, data: { revision: task.revision, targetHead: "target", stale: false,
@@ -89,13 +96,19 @@ function fixture(mode = "human") {
       return { ok: true, data: task };
     },
     launchTask: async (_: string, id: string, ...args: any[]) => {
-      assert.equal(args[7], Boolean(board.settings.autoMode));
+      if (args[10] === undefined && args[11] === undefined) {
+        assert.equal(args[7], Boolean(board.settings.autoMode));
+      } else {
+        assert.equal(args[7], false);
+      }
       if (launchError) { const error = launchError; launchError = undefined; return fail(error); }
       const task = board.tasks.find((task: any) => task.id === id);
       const release = slots.acquire("project", task.mergeRepair ? "reviewer" : "executor", board.settings.taskLimits);
       assert.ok(release, "dispatch exceeded its role limit");
       busy.set(id, release); launches.push(id);
       task.status = "in_progress";
+      const pending = queued.findIndex(entry => entry.task === id);
+      if (pending >= 0) queued.splice(pending, 1);
       afterLaunch?.();
       return { ok: true, data: {} };
     },
@@ -117,13 +130,48 @@ function fixture(mode = "human") {
     const task = board.tasks.find((task: any) => task.id === id);
     task.status = "review"; task.revision++; task.reviewApproved = mode === "reviewer";
   };
-  return { board, watch, slots, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers, dialogues,
+  return { board, watch, slots, queued, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers, dialogues,
     failNotice: (code: string) => { noticeError = code; },
+    setMilestonesError: (code?: string) => { milestonesError = code; },
+    expireMilestones: () => { runtime.autoBoards.get(watch).milestonesAt = 0; },
     waitForBudget: (value: boolean) => { budgetWaiting = value; },
     afterLaunch: (callback: () => void) => { afterLaunch = callback; }, beforeAccept: (callback: () => void) => { beforeAccept = callback; },
     afterReviewRead: (callback: () => void) => { afterReviewRead = callback; },
     failLaunch: (code: string) => { launchError = code; } };
 }
+
+test("a free executor slot goes to the eligible urgent card across ready and persisted starts", async () => {
+  for (const urgentReturn of [false, true]) {
+    const f = fixture();
+    const occupied = f.slots.acquire("project", "executor", f.board.settings.taskLimits)!;
+    f.add("T-0001", { status: "in_progress", reviewReturn: 1 });
+    f.queued.push({ id: "queue:T-0001", owner: 0, kind: "queue", task: "T-0001", revision: 1, reviewReturn: true });
+    f.add("T-0002", { dueDate: "2026-01-01", priority: urgentReturn ? "normal" : "urgent" });
+    await f.tick();
+    assert.deepEqual(f.launches, []);
+    if (urgentReturn) {
+      f.board.tasks[0].priority = "urgent";
+      f.board.tasks[0].revision++;
+    }
+    occupied();
+    await f.tick();
+    assert.deepEqual(f.launches, [urgentReturn ? "T-0001" : "T-0002"]);
+  }
+});
+
+test("auto mode off preserves a queued urgent return ahead of a due recurring launch", async () => {
+  const f = fixture();
+  f.board.settings.autoMode = false;
+  f.add("T-0001", { status: "in_progress", priority: "urgent", reviewReturn: 1 });
+  f.queued.push({ id: "queue:T-0001", owner: 0, kind: "queue", task: "T-0001", revision: 1, reviewReturn: true });
+  f.add("T-0002", { schedule: { everyMinutes: 60, nextAt: "2026-01-01T00:00:00Z" } });
+  f.add("T-0003", { priority: "urgent" });
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001"]);
+  f.finish("T-0001");
+  await f.tick();
+  assert.deepEqual(f.launches, ["T-0001", "T-0002"]);
+});
 
 test("the daily budget defers dispatch until the next eligible scheduler pass", async () => {
   const first = fixture();
@@ -319,7 +367,7 @@ test("missing plans reach the manager for due schedules and reviews independentl
     f.board.tasks[0].expertWorkPlanned = true;
     f.board.tasks[0].revision++;
     await f.tick();
-    assert.deepEqual(f.launches, autoMode ? ["T-0001"] : []);
+    assert.deepEqual(f.launches, ["T-0001"]);
   }
 });
 
@@ -468,6 +516,38 @@ test("milestones are fetched once for the board and the queue is recalculated af
   await f.tick();
   assert.deepEqual(f.launches, ["T-0001", "T-0003"]);
   assert.equal(f.calls.filter(args => args[0] === "milestones").length, 1);
+});
+
+test("a milestone lookup failure leaves the urgent card without a milestone eligible", async () => {
+  for (const hasDeferred of [false, true]) {
+    const f = fixture();
+    f.setMilestonesError("GITHUB_UNAVAILABLE");
+    if (hasDeferred) {
+      f.add("T-0001", { status: "in_progress", reviewReturn: 1 });
+      f.queued.push({ id: "queue:T-0001", owner: 0, kind: "queue", task: "T-0001", revision: 1, reviewReturn: true });
+    }
+    f.add("T-0002", { priority: "urgent", dueDate: "2026-01-02" });
+    f.add("T-0003", {
+      priority: "urgent",
+      dueDate: "2026-01-01",
+      milestone: { repository: "owner/repo", number: 1, title: "1.0.0" },
+    });
+    await f.tick();
+    assert.deepEqual(f.errors, ["GITHUB_UNAVAILABLE"]);
+    assert.deepEqual(f.launches, ["T-0002"]);
+
+    f.finish("T-0002");
+    await f.tick();
+    assert.deepEqual(f.launches, hasDeferred ? ["T-0002", "T-0001"] : ["T-0002"]);
+    assert.equal(f.calls.filter(([command]) => command === "milestones").length, 1);
+    if (hasDeferred) f.finish("T-0001");
+
+    f.setMilestonesError();
+    f.expireMilestones();
+    await f.tick();
+    assert.equal(f.launches.at(-1), "T-0003");
+    assert.equal(f.calls.filter(([command]) => command === "milestones").length, 2);
+  }
 });
 
 test("a changed target is reviewed again, and missing evidence does not cause repeated unchanged reviews", async () => {

@@ -29,6 +29,8 @@ export function nextReadyTask<T extends QueueTask>(tasks: T[], milestoneDates: R
   const positions = new Map(queue?.order.map((id, index) => [id, index]));
   return launchableTasks(tasks, now, queue, boardTasks).filter(task => !busy(task.id))
     .sort((a, b) => {
+      const urgency = Number(b.priority === "urgent") - Number(a.priority === "urgent");
+      if (urgency) return urgency;
       const left = positions.get(a.id) ?? Infinity, right = positions.get(b.id) ?? Infinity;
       return left === right ? compareReadyTasks(a, b, milestoneDates) : left - right;
     })[0];

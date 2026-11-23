@@ -10,12 +10,14 @@ import { setTimeout as wait } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
-import { taskIdPattern } from "../src/cli/model.ts";
+import { reviewsAcceptanceRepair, taskIdPattern, taskReviewMode, usesIndependentReviewer } from "../src/cli/model.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import { missingCodexThread } from "../src/desktop/codex-run.ts";
 import { createAgentSlots, parseAgentLimits } from "../src/desktop/agent-limits.ts";
 import type { DeferredExecutor } from "../src/desktop/board-runtime.ts";
 import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, prepareQueuedTurn, rememberExecutor, runtimeEntries } from "../src/desktop/board-runtime.ts";
+import { launchableTasks, nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -23,6 +25,7 @@ const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "
   "beginOperation", "confirmProjectClose", "projectOperations", "closingProjects", "launchingTasks", "runningTasks", "runActivityByTask",
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
   "queuedRecoveryDelay", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance",
+  "scheduleAutoBoard", "autoBoards", "nextDeferredExecutor", "launchDeferredExecutor", "discussionActivityByTask", "managerNoticeKey",
   "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
@@ -34,6 +37,7 @@ const previousThread = "01234567-1234-5678-1234-123456789012";
 const nextThread = "01234567-1234-5678-1234-123456789013";
 const scratch = mkdtempSync(join(tmpdir(), "task-launch-"));
 after(() => rmSync(scratch, { recursive: true }));
+const tab = () => ({ window: { isDestroyed: () => false, webContents: {} } });
 
 function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered" | "disconnect" | "closing" | "closing-on-retry" | "board-busy",
   activity?: RunActivity) {
@@ -44,7 +48,7 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
   const launched: any[] = [];
   const closeDialogs: { message: string; detail: string }[] = [];
   const access = { full: false };
-  const subscriptions = new Map();
+  const subscriptions = new Map<string, any>();
   const savedSettings = new Map<string, Partial<import("../src/cli/model.ts").BoardSettings>>();
   const previousTurn = { status: "completed", completedAt: 1 as number | null, reads: 0 };
   type Completion = { reason: string; disconnected?: boolean; interrupted?: boolean } | undefined;
@@ -72,7 +76,9 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
     AbortController, AbortSignal, wait, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
-    scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
+    scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleDraftDiscussions: () => {},
+    launchableTasks, nextReadyTask, pendingReviewApprovals, reviewsAcceptanceRepair, taskReviewMode, usesIndependentReviewer,
+    currentActiveGoal: () => undefined, backgroundManagerRequests: new Map(),
     projectIdentity: (project: string) => project, matchesQueuedExecutor,
     rememberExecutor: (project: string, ...args: Parameters<typeof rememberExecutor> extends [string, ...infer Rest] ? Rest : never) =>
       rememberExecutor(location(project), ...args),
@@ -92,6 +98,13 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
       return previousTurn;
     },
     callCli: async (project: string, args: string[], input: any) => {
+      if (args[0] === "list") {
+        const board = subscriptions.get(project).board;
+        return { ok: true, data: structuredClone({
+          ...board,
+          tasks: board.tasks.map((snapshot: Task) => snapshot.id === task.id ? { ...snapshot, ...task } : snapshot),
+        }) };
+      }
       calls.push({ args, input });
       if (args[0] === "request-changes") {
         if (input.revision !== task.revision) return failure("REVISION_CONFLICT", "The task changed.");
@@ -252,11 +265,13 @@ test("the scheduler launches a due approved card once, waits for an executor slo
     { ...snapshot, id: "T-0004", unfinishedDependencies: ["T-0002"] },
     { ...snapshot, id: "T-0005", schedule: { time: "09:00", nextAt: new Date(2100, 0, 1, 9).toISOString() } }, snapshot,
   ];
-  f.subscriptions.set("project", { board: { tasks, settings: { taskLimits } }, listeners: [], tabs: new Set([1, 2]) });
+  f.subscriptions.set("project", { board: { project: "project", tasks, settings: { taskLimits } },
+    listeners: [], tabs: new Set([tab(), tab()]) });
   const release = f.slots.acquire("project", "executor", taskLimits)!;
   f.runtime.scheduleRecurringTasks();
   assert.equal(f.calls.length, 0);
-  f.subscriptions.set("other", { board: { tasks }, listeners: [], tabs: new Set([1]) });
+  f.subscriptions.set("other", { board: { project: "other", tasks, settings: {} },
+    listeners: [], tabs: new Set([tab()]) });
   f.runtime.scheduleRecurringTasks();
   f.runtime.scheduleRecurringTasks();
   await new Promise(resolve => setImmediate(resolve));
@@ -278,7 +293,8 @@ test("pausing while waiting for a slot prevents launch across windows; an active
     f.task.status = "ready";
     f.task.schedule = { ...rule, nextAt: "2000-01-01T00:00:00Z" };
     Object.assign(f.task, { expertWorkPlanned: true });
-    const watch = { board: { tasks: [f.task], settings: { taskLimits: { executor: 1 } } }, listeners: [], tabs: new Set([1, 2]) };
+    const watch = { board: { project: "project", tasks: [f.task], settings: { taskLimits: { executor: 1 } } },
+      listeners: [], tabs: new Set([tab(), tab()]) };
     f.subscriptions.set("project", watch);
     const release = f.slots.acquire("project", "executor", { executor: 1 })!;
     f.runtime.scheduleRecurringTasks();
@@ -537,7 +553,7 @@ test("a recovered turn keeps its result without starting another turn", async ()
   ]) {
     const f = fixture("recovered");
     f.task.status = "in_progress";
-    f.subscriptions.set("project", { board: { project: "project", tasks: [f.task] }, listeners: [] });
+    f.subscriptions.set("project", { board: { project: "project", tasks: [f.task], settings: {} }, listeners: [] });
     f.slots.defer("project", f.task.id, { revision: f.task.revision });
     f.runtime.scheduleAgentWork();
     await new Promise(resolve => setImmediate(resolve));

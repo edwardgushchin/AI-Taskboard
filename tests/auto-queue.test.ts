@@ -7,7 +7,7 @@ import { goalQueueCondition } from "../src/desktop/iterative-goal.ts";
 
 const task = (id: string, extra: Partial<QueueTask> = {}): QueueTask => ({ id, status: "ready", priority: "normal", ...extra });
 const milestone = (number: number) => ({ repository: "owner/repo", number, title: "Release" });
-test("ready selection compares deadlines, priority and milestone dates before readiness or column position", () => {
+test("ready selection compares urgency, deadlines, priority and milestone dates before readiness or column position", () => {
   const dates = new Map([[1, "2026-11-20T00:00:00Z"], [2, "2026-11-21T00:00:00Z"]]);
   const winner = (a: Partial<QueueTask>, b: Partial<QueueTask>) => {
     const first = task("T-0002", a), second = task("T-0001", b);
@@ -22,7 +22,8 @@ test("ready selection compares deadlines, priority and milestone dates before re
   winner({ milestone: milestone(1) }, { milestone: milestone(2) });
   winner({ milestone: milestone(1) }, {});
   winner({ readySince: "2026-11-01T00:00:00Z" }, { readySince: "2026-11-02T00:00:00Z" });
-  winner({ dueDate: "2026-11-18", priority: "low" }, { dueDate: "2026-11-19", priority: "urgent" });
+  winner({ dueDate: "2026-11-19", priority: "urgent" }, { dueDate: "2026-11-18", priority: "low" });
+  winner({ dueDate: "2026-11-18", priority: "urgent" }, { dueDate: "2026-11-19", priority: "urgent" });
   const pair = [task("T-0002"), task("T-0001")];
   assert.equal(nextReadyTask(pair, dates, () => false)?.id, "T-0001");
   pair[0].dueDate = "2026-11-18";
@@ -52,6 +53,11 @@ test("explicit queue ordering and holds preserve eligibility and restore default
   const tasks = [task("T-0001", { priority: "urgent" }), task("T-0002"), task("T-0003", { unfinishedDependencies: ["T-0001"] })];
   const controls = { revision: 1, paused: false, order: ["T-0003", "T-0002"], held: [] as string[] };
   const next = () => nextReadyTask(tasks, new Map(), () => false, Date.now(), controls)?.id;
+  assert.equal(next(), "T-0001");
+  controls.held = ["T-0001"];
+  assert.equal(next(), "T-0002");
+  controls.held = [];
+  tasks[1].priority = "urgent";
   assert.equal(next(), "T-0002");
   controls.held = ["T-0002"];
   assert.equal(next(), "T-0001");

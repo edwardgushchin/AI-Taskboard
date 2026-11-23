@@ -1090,6 +1090,16 @@ function run(
     return cancelled;
   }
   if ((command === "update" || command === "unblock") && input.dependencies !== undefined) validateDependencies(store, updated);
+  if (command === "update" && input.queuedExecutor !== true && updated.priority !== task.priority && task.status === "in_progress") {
+    const project = store.location.root;
+    if (task.codexThreadId) {
+      if (runtimeEntries(project).some(entry => matchesQueuedExecutor(entry, task))) {
+        linkQueuedExecutor(project, task, updated);
+      }
+    } else {
+      preserveLegacyFirstLaunch(project, task);
+    }
+  }
   if (command === "request-changes" && !discussionReturn) {
     if (input.actor === "reviewer") updated = withOwnerQuestion(updated);
     // Publish the request first. It becomes eligible only when the matching return is saved.
