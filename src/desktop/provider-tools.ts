@@ -1,7 +1,7 @@
 import { TaskboardError } from "../cli/model.ts";
 import type { Task } from "../cli/model.ts";
 import { callCli, cliFailure } from "./cli.ts";
-import { computerUseServer, computerUseUnavailable } from "./computer-use.ts";
+import { computerUseServer, computerUseSurfaces, computerUseSurfaceStatus, computerUseUnavailable } from "./computer-use.ts";
 
 export type ProviderRequest = <T>(method: string, params: object) => Promise<T>;
 type ServerConfig = { enabled?: boolean; required?: boolean; enabled_tools?: string[]; disabled_tools?: string[];
@@ -9,6 +9,8 @@ type ServerConfig = { enabled?: boolean; required?: boolean; enabled_tools?: str
 type ServerStatus = { name: string; tools: Record<string, unknown>; toolsError?: string | null; authStatus?: string };
 export interface ProviderTool {
   kind: "mcp" | "app"; server: string; tool: string; available: boolean; assignable: boolean; reason?: string;
+  surfaces?: string[];
+  unavailableSurfaces?: { url: string; code: string; reason: string }[];
 }
 
 async function pages<T>(request: ProviderRequest, method: string, params: object): Promise<T[]> {
@@ -42,10 +44,17 @@ export async function providerTools(request: ProviderRequest, threadId: string, 
         settings?.tools?.[tool]?.enabled !== false;
       const assignable = available && Boolean(settings?.command || settings?.url);
       tools.push({ kind: "mcp", server: status.name, tool, available, assignable,
+        ...(status.name === computerUseServer ? computerUseSurfaceStatus(tool) : undefined),
         ...(!available ? { reason: status.authStatus === "notLoggedIn" ? "Provider authorization is required. Sign in through the provider settings and retry discovery." :
           status.toolsError ? "Provider MCP startup or authorization failed. Check provider settings; raw diagnostics are withheld to protect credentials." :
           tool ? "Disabled by provider configuration or policy." : "Provider advertised no callable tools for this server." } :
           !assignable ? { reason: "This plugin has no task-scoped MCP transport in the effective provider configuration." } : {}) });
+    }
+  }
+  if (!browserConnected) {
+    for (const [tool, surfaces] of Object.entries(computerUseSurfaces)) {
+      tools.push({ kind: "mcp", server: computerUseServer, tool, available: false, assignable: false,
+        reason: computerUseUnavailable, surfaces });
     }
   }
   let appsReason: string | undefined;
@@ -74,7 +83,19 @@ export function providerActions(project: string, request: ProviderRequest, threa
       const selected = catalog.tools.find(tool => tool.kind === "mcp" && tool.server === input?.server && tool.tool === input?.tool);
       if (!selected?.assignable) return cliFailure("TOOL_UNAVAILABLE", selected?.reason ?? "Tool was not discovered for this provider session. Use provider_tools; no assignment was saved.");
       if (typeof input?.id !== "string") return cliFailure("INVALID_INPUT", "Supply the task ID and current revision.");
-      return callCli(project, ["tool-grant", input.id, "--compact"], { revision: input.revision, server: selected.server, tool: selected.tool });
+      const reply = await callCli<object>(project, ["tool-grant", input.id, "--compact"],
+        { revision: input.revision, server: selected.server, tool: selected.tool });
+      if (!reply.ok || !selected.surfaces) return reply;
+      return {
+        ok: true as const,
+        data: {
+          ...reply.data,
+          server: selected.server,
+          tool: selected.tool,
+          surfaces: selected.surfaces,
+          unavailableSurfaces: selected.unavailableSurfaces,
+        },
+      };
     } catch {
       return cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Provider discovery failed or is unsupported. Check the connected version, account and policy. No assignment was saved.");
     }
@@ -95,10 +116,13 @@ export async function executorToolConfig(request: ProviderRequest, cwd: string, 
     if (grant.server === computerUseServer && !browserConnected) {
       throw new TaskboardError("TOOL_UNAVAILABLE", computerUseUnavailable + " Check the assigned tool and relaunch the task.");
     }
-    if (!original || original.enabled === false || (!original.command && !original.url) ||
-        original.enabled_tools && !original.enabled_tools.includes(grant.tool) || original.disabled_tools?.includes(grant.tool) ||
+    if (!original || (!original.command && !original.url)) {
+      throw new TaskboardError("TOOL_UNAVAILABLE", `${grant.server}/${grant.tool} is unavailable because its MCP transport is missing.`);
+    }
+    if (original.enabled === false || original.enabled_tools && !original.enabled_tools.includes(grant.tool) ||
+        original.disabled_tools?.includes(grant.tool) ||
         original.tools?.[grant.tool]?.enabled === false) {
-      throw new TaskboardError("TOOL_UNAVAILABLE", "An assigned tool is unavailable under the current provider configuration or policy. Ask the manager to review the assignment.");
+      throw new TaskboardError("TOOL_UNAVAILABLE", `Provider configuration does not allow ${grant.server}/${grant.tool}. Ask the manager to review the assignment.`);
     }
     const prior = selected[grant.server];
     selected[grant.server] = { ...original, enabled: true, required: false,
@@ -120,8 +144,14 @@ export async function verifyExecutorTools(request: ProviderRequest, threadId: st
     throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Local board tools did not initialize.");
   }
   if (requiredBoardTools.some(name => !Object.hasOwn(board.tools, name))) throw new TaskboardError("PROVIDER_TOOLS_UNAVAILABLE", "Required recurring executor tools did not initialize.");
-  for (const grant of grants ?? []) if (!rows.some(row => row.name === grant.server && !row.toolsError && row.authStatus !== "notLoggedIn" && Object.hasOwn(row.tools, grant.tool))) {
-    throw new TaskboardError("TOOL_UNAVAILABLE", "An assigned tool failed provider discovery or authorization at launch. No tool access was confirmed.");
+  for (const grant of grants ?? []) {
+    const row = rows.find(entry => entry.name === grant.server);
+    if (row?.authStatus === "notLoggedIn") {
+      throw new TaskboardError("TOOL_UNAVAILABLE", `Provider authorization is required for ${grant.server}/${grant.tool}.`);
+    }
+    if (!row || row.toolsError || !Object.hasOwn(row.tools, grant.tool)) {
+      throw new TaskboardError("TOOL_UNAVAILABLE", `Provider discovery did not confirm ${grant.server}/${grant.tool} at launch. No tool access was confirmed.`);
+    }
   }
   return Object.keys(board.tools);
 }
