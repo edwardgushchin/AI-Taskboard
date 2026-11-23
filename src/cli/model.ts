@@ -157,6 +157,7 @@ export interface GitHubMilestone {
 }
 
 export const scheduleTimePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+export const defaultCodexDailyResetTime = "09:00";
 
 export type TaskScheduleRule =
   | ({ time: string; everyMinutes?: never } & (
@@ -295,6 +296,7 @@ export interface BoardSettings {
   reviewer?: BoardAgentSettings | null;
   taskLimits?: Partial<AgentLimits>;
   codexDailyTokens?: number;
+  codexDailyResetTime?: string;
   reviewMode?: ReviewMode;
   reviewModeVersion?: number;
   autoReview?: boolean;

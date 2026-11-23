@@ -1322,6 +1322,8 @@
   "limits.board.invalid": "Введите целое положительное число токенов десятичными цифрами или очистите поле.",
   "limits.board.title": "Дневной бюджет Codex этой доски",
   "limits.board.reset": "Сбросить суточный лимит доски",
+  "limits.board.reset_time": "Время суточного сброса бюджета доски (ЧЧ:ММ, местное)",
+  "limits.board.reset_time_invalid": "Укажите местное время в формате ЧЧ:ММ, от 00:00 до 23:59.",
   "task_chat.waiting_for_limit": "Ожидает сброса лимита",
   "limits.reset_codex": "Сбросить лимиты Codex",
   "limits.reset_confirmation": "Будет потрачен один доступный сброс текущего аккаунта Codex.",

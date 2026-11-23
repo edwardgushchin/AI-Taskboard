@@ -317,6 +317,7 @@ export function replyToTask(
   reviewCard = false,
   closedCard = false,
   draft = false,
+  beforeStart?: () => void,
 ) {
   const worklog = boardWorklog(project, "executor", taskId);
   const draftDialogue = draft && mode === undefined;
@@ -377,6 +378,7 @@ export function replyToTask(
     ].join(" ") + manualContext(readBoardSettings(locateBoard(project))), { manual, taskWriting: mode !== "initial" }),
     onCommentary: mode === "initial" ? undefined : onCommentary,
     onActivity: mode === "initial" || !onActivity ? undefined : discussionActivity,
+    beforeStart,
     onTokenUsage, onControl, signal,
     imageDirectory: mode === "initial" ? undefined : imageDirectory, imageLimit,
     finalAnswerSchema: mode === "initial" ? {
@@ -802,6 +804,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   specialistDelegation?: boolean;
   stageReporter?: ReturnType<typeof phaseStageReporter>;
   observeProvider?: (message: RpcMessage, threadId: string) => void;
+  beforeStart?: () => void;
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
@@ -855,7 +858,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         ...(session.iterativeGoal ? { "features.goals": false } : {}),
       } } : {}),
     };
-    type StartedThread = { thread: { id: string; name?: string | null; model?: string }; model?: string;
+    type StartedThread = { thread: { id: string; name?: string | null; model?: string; path?: string | null }; model?: string;
       activePermissionProfile?: { id: string }; approvalPolicy?: string; approvalsReviewer?: string };
     let started: StartedThread;
     let waiting = false;
@@ -925,12 +928,33 @@ function reply(profile: string, project: string, prompt: string, images: string[
       refreshTimeout(goal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
       session?.onGoal?.(goal);
     };
+    let stopping = false;
+    let activeBudgetTurn: string | undefined;
+    let notifiedTurn: string | undefined;
+    const interruptBudgetTurn = async () => {
+      if (!activeBudgetTurn) return;
+      const id = activeBudgetTurn;
+      activeBudgetTurn = undefined;
+      await turnControl(request, thread.id, id).interrupt();
+    };
+    setBudgetInterrupt(async () => {
+      stopping = true;
+      await interruptBudgetTurn();
+    });
     async function notify(message: RpcMessage) {
       options.observeProvider?.(message, thread.id);
       const data = message.params as TurnNotification | undefined;
       if (data?.threadId === thread.id && /^(?:item\/|turn\/|thread\/(?:goal\/|tokenUsage\/))/.test(message.method ?? "")) {
         // Codex may compact an active goal's history without sending intermediate App Server notifications.
         refreshTimeout(currentGoal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
+      }
+      if (data?.threadId === thread.id && data.turn) {
+        if (message.method === "turn/started") {
+          activeBudgetTurn = notifiedTurn = data.turn.id;
+          if (stopping) void interruptBudgetTurn().catch(() => {});
+        } else if (message.method === "turn/completed" && activeBudgetTurn === data.turn.id) {
+          activeBudgetTurn = undefined;
+        }
       }
       tokens.queue(tokens.observe(message), onTokenUsage);
       if (data?.threadId !== thread.id) return;
@@ -1021,7 +1045,8 @@ function reply(profile: string, project: string, prompt: string, images: string[
             throw Object.assign(new Error("Codex has not confirmed the reviewer turn's completion."),
               { code: "CODEX_START_UNCONFIRMED" });
           }
-          tokens.save(tokens.recover(thread.id, saved), onTokenUsage);
+          const recovered = tokens.recover(thread.id, saved);
+          tokens.save(await tokens.recoverRollout(thread.path, thread.id, saved) ?? recovered, onTokenUsage);
           if (isRoutingTimeout(saved)) throw new CodexRoutingTimeout(saved.error!.message!);
           if (saved.status !== "completed") throw new Error(saved.error?.message ?? "Codex did not complete the review.");
           turn = saved;
@@ -1036,6 +1061,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
         session?.onTurnStarting?.();
         const reviewClientId = reviewThread?.saveTurn ? randomUUID() : undefined;
         if (reviewClientId) reviewThread?.saveTurn?.({ clientId: reviewClientId });
+        options.beforeStart?.();
         const response = await request<{ turn: NonNullable<TurnNotification["turn"]> }>("turn/start", {
           threadId: thread.id, effort,
           ...(!research ? { sandboxPolicy: { type: "readOnly", networkAccess: false } } : {}),
@@ -1061,19 +1087,18 @@ function reply(profile: string, project: string, prompt: string, images: string[
           throw error;
         });
         turn = response.turn;
+        if (!notifiedTurn && turn.status === "inProgress") {
+          activeBudgetTurn = turn.id;
+          if (stopping) await interruptBudgetTurn();
+        }
         if (reviewClientId) reviewThread?.saveTurn?.({ clientId: reviewClientId, turnId: turn.id });
         options.worklog?.start(thread.id, turn.id);
         refreshTimeout(currentGoal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
         tokens.save(tokens.begin(thread.id, turn.id), onTokenUsage);
       }
-      let stopping = false;
       const interrupt = async () => {
         if (turn?.status === "inProgress") await turnControl(request, thread.id, turn.id).interrupt();
       };
-      setBudgetInterrupt(async () => {
-        stopping = true;
-        await interrupt();
-      });
       const applyGoal = async (action: BoardGoalAction) => {
         const wasActive = currentGoal?.status === "active";
         const updated = await changeGoal(request, thread.id, action, currentGoal, notify);

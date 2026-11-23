@@ -307,6 +307,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
   const tokens = new CodexTokenUsage(onTokenUsage?.observe, onTokenUsage?.recover);
   let activeThreadId: string | undefined;
   let activeTurnId: string | undefined;
+  let rolloutPath: string | null | undefined;
   let control: AgentControl | undefined;
   let stopMail: (() => void) | undefined;
   let interruptTimeout: NodeJS.Timeout | undefined;
@@ -419,6 +420,8 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         await close();
         await worklog.drain();
         await tokens.save(tokens.finish(Boolean(failure)), onTokenUsage);
+        const terminal = turns.get(turnId) ?? { id: turnId, status: "inProgress" };
+        await tokens.save(await tokens.recoverRollout(rolloutPath, activeThreadId!, terminal), onTokenUsage);
       }
     }
     if (failure && signal?.aborted) return { reason: signal.reason instanceof Error
@@ -467,7 +470,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       throw Object.assign(new Error("The queued start belongs to another Codex thread."), { code: "CODEX_START_UNCONFIRMED" });
     }
     type ThreadReply = {
-      thread: { id: string; model?: string }; model?: string; activePermissionProfile?: { id: string };
+      thread: { id: string; model?: string; path?: string | null }; model?: string; activePermissionProfile?: { id: string };
       approvalPolicy?: string; approvalsReviewer?: string;
     };
     const threadOptions = {
@@ -504,6 +507,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
         "Codex did not enable automatic approval review. Check the connected Codex version and its approval policy.");
     }
     const threadId = started.thread.id;
+    rolloutPath = started.thread.path;
     if (!codexThreadPattern.test(threadId) || (existing && threadId !== existing)) throw new Error("Codex returned an unexpected thread ID.");
     // The early start already owns a durable request. Link the chat as soon as
     // Codex returns its ID, before tool discovery can be interrupted by closing.

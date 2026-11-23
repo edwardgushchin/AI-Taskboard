@@ -9,7 +9,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { discoverRepository, excludeBoard, git } from "./git.ts";
 import type { Repository } from "./git.ts";
-import { boardAgentRoles, codexThreadPattern, defaultBoardAgents, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validDueDate, validScheduleDate } from "./model.ts";
+import { boardAgentRoles, codexThreadPattern, defaultBoardAgents, defaultCodexDailyResetTime, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validDueDate, validScheduleDate } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 import { parseUsageReport, tokenFields, totalTokenUsage } from "./token-usage.ts";
 import { writeBoardProjectRules } from "./board-agents.ts";
@@ -311,6 +311,8 @@ function readIndex(path: string): BoardIndex {
       (index.settings.codexDailyTokens !== undefined &&
         (typeof index.settings.codexDailyTokens !== "number" ||
           !Number.isSafeInteger(index.settings.codexDailyTokens) || index.settings.codexDailyTokens < 1)) ||
+      (index.settings.codexDailyResetTime !== undefined &&
+        (typeof index.settings.codexDailyResetTime !== "string" || !scheduleTimePattern.test(index.settings.codexDailyResetTime))) ||
       !boardAgentRoles.every(role => validRoleSettings((index.settings as Record<string, unknown>)[role])) ||
       !(index.settings.archiveAfterDays === null ||
         (Number.isSafeInteger(index.settings.archiveAfterDays) && Number(index.settings.archiveAfterDays) >= 0))) {
@@ -362,7 +364,7 @@ function readIndex(path: string): BoardIndex {
   if (isRecord(manager) && manager.model === "gpt-6.1-sol" && manager.effort === "medium") {
     settings.manager = defaultBoardAgents.manager;
   }
-  return { ...index, settings: { ...defaultBoardAgents, ...settings } } as unknown as BoardIndex;
+  return { ...index, settings: { codexDailyResetTime: defaultCodexDailyResetTime, ...defaultBoardAgents, ...settings } } as unknown as BoardIndex;
 }
 
 export function validateCard(value: unknown, id: string): Task {

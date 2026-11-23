@@ -1,13 +1,45 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { emptyTokenCounts } from "../src/cli/token-usage.ts";
 import { BoardCodexUsage, codexDailyBudget, recordCodexDailyUsage } from "../src/desktop/codex-daily-budget.ts";
 import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import { codexLimitSnapshot, confirmedQuota } from "../src/desktop/provider-limits.ts";
 import { TokenUsageQueue } from "../src/desktop/token-usage-queue.ts";
+
+test("boards validate and preserve independent local reset settings", t => {
+  const parent = mkdtempSync(join(tmpdir(), "codex-budget-settings-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const first = join(parent, "first");
+  const second = join(parent, "second");
+  mkdirSync(first);
+  mkdirSync(second);
+  const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
+  function cli(project: string, command: string, settings?: Record<string, unknown>) {
+    const result = spawnSync(process.execPath, [
+      entry, "--project", project, "--json", command, ...(settings ? ["--stdin"] : []),
+    ], { encoding: "utf8", input: settings && JSON.stringify(settings) });
+    assert.ok(result.stdout, result.stderr);
+    return JSON.parse(result.stdout);
+  }
+  for (const project of [first, second]) {
+    assert.equal(cli(project, "init", { git: false }).ok, true);
+    assert.equal(cli(project, "settings").data.codexDailyResetTime, "09:00");
+  }
+  for (const invalid of ["9:00", "09:00x", " 09:00", "09:00\n", "24:00", "09:60", "0x09:00", "０９:００", 900]) {
+    assert.equal(cli(first, "settings", { codexDailyResetTime: invalid }).error.code, "INVALID_INPUT");
+  }
+  assert.equal(cli(first, "settings", { codexDailyResetTime: "14:30" }).ok, true);
+  assert.equal(cli(first, "settings").data.codexDailyResetTime, "14:30");
+  assert.equal(cli(second, "settings").data.codexDailyResetTime, "09:00");
+  assert.equal(cli(first, "settings", { codexDailyResetTime: "09:00" }).ok, true);
+  assert.equal(cli(first, "settings").data.codexDailyResetTime, "09:00");
+});
 
 function report(turnId: string, completedAt: number, dailyTokens: number | null, sequence = 1) {
   return {
@@ -277,13 +309,13 @@ test("a recovered active turn remains unknown even if later notifications contai
   assert.equal(final.records[0].dailyTokens, null);
 });
 
-test("live accounting survives midnight, a reset, and replay of a terminal report", t => {
+test("live accounting survives the default 09:00 boundary, a reset, and terminal replay", t => {
   const project = mkdtempSync(join(tmpdir(), "codex-budget-live-"));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   mkdirSync(join(project, ".tasks"));
-  const midnight = new Date(2026, 10, 24).getTime();
-  const before = midnight - 1000;
-  const after = midnight + 1000;
+  const boundary = new Date(2026, 10, 24, 9).getTime();
+  const before = boundary - 1000;
+  const after = boundary + 1000;
   const ledger = new BoardCodexUsage(project);
   const sample = (turnId: string, tokens: number, observedAt: number) => ({
     threadId: "thread", turnId, tokens, observedAt,
@@ -291,7 +323,8 @@ test("live accounting survives midnight, a reset, and replay of a terminal repor
   ledger.observe(sample("executor", 80, before));
   ledger.observe(sample("review", 20, before));
   assert.equal(ledger.get(100, before).reason, "exhausted");
-  assert.equal(ledger.get(100, after).spent, 0);
+  assert.equal(ledger.get(100, before).resetsAt, boundary);
+  assert.equal(ledger.get(100, boundary).spent, 0);
   ledger.observe(sample("executor", 95, after));
   assert.equal(ledger.get(100, after).spent, 15);
   ledger.reset(after + 1);
@@ -302,17 +335,17 @@ test("live accounting survives midnight, a reset, and replay of a terminal repor
   const restored = new BoardCodexUsage(project);
   assert.equal(restored.reconcile(report("executor", after + 3, 110)).records.length, 0);
   assert.equal(restored.get(100, after + 3).spent, 15);
-  assert.equal(restored.get(100, midnight + 86_400_000).spent, 0);
+  assert.equal(restored.get(100, new Date(2026, 10, 25, 9).getTime()).spent, 0);
 });
 
 test("a confirmed completion before a boundary moves a delayed increment once", t => {
   const project = mkdtempSync(join(tmpdir(), "codex-budget-late-"));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   mkdirSync(join(project, ".tasks"));
-  const midnight = new Date(2026, 10, 24).getTime();
-  const first = midnight - 5000;
+  const boundary = new Date(2026, 10, 24, 9).getTime();
+  const first = boundary - 5000;
   const finished = first + 1000;
-  const delivered = midnight + 1000;
+  const delivered = boundary + 1000;
   const ledger = new BoardCodexUsage(project);
   ledger.observe({ threadId: "thread", turnId: "midnight", tokens: 10, observedAt: first });
   ledger.observe({ threadId: "thread", turnId: "midnight", tokens: 30, observedAt: delivered });
@@ -330,6 +363,138 @@ test("a confirmed completion before a boundary moves a delayed increment once", 
   ledger.reconcile(report("manual", delivered + 500, 25));
   assert.equal(ledger.get(100, delivered + 3000).spent, 0);
   assert.equal(ledger.get(100, delivered + 500).spent, 25);
+});
+
+test("late model rows reconcile against the confirmed total of the same turn", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-models-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const at = new Date(2026, 10, 24, 13, 59).getTime();
+  const ledger = new BoardCodexUsage(project);
+  ledger.observe({ threadId: "thread", turnId: "routed", tokens: 60, observedAt: at });
+  ledger.reset(at + 1000);
+  const final = report("routed", at + 500, 50);
+  final.records.push({ ...final.records[0], model: "second" });
+  ledger.reconcile(final);
+  assert.equal(ledger.get(200, at + 1500, "14:00").spent, 0);
+  assert.equal(ledger.get(200, at + 500, "14:00").spent, 100);
+  const restored = new BoardCodexUsage(project);
+  restored.reconcile(final);
+  assert.equal(restored.get(200, at + 500, "14:00").spent, 100);
+  assert.equal(restored.get(200, at + 1500, "14:00").resetsAt, new Date(2026, 10, 24, 14).getTime());
+  assert.equal(restored.get(200, at + 1500).resetsAt, new Date(2026, 10, 25, 9).getTime());
+});
+
+test("historical snapshots move only the verified portion behind a reset", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-refine-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const boundary = new Date(2026, 10, 24, 9).getTime();
+  const ledger = new BoardCodexUsage(project);
+  const sample = { threadId: "thread", turnId: "turn", tokens: 100, observedAt: boundary + 1000 };
+  ledger.observe(sample);
+  assert.equal(ledger.get(200, boundary + 1000).spent, 100);
+  const recovered = { ...sample, tokens: 60, observedAt: boundary - 1000, historical: true as const };
+  assert.equal(ledger.observe(recovered), true);
+  assert.equal(ledger.observe(recovered), false);
+  assert.equal(ledger.get(200, boundary - 1000).spent, 60);
+  assert.equal(ledger.get(200, boundary + 1000).spent, 40);
+  ledger.reconcile(report("turn", boundary + 2000, 100));
+  assert.equal(new BoardCodexUsage(project).get(200, boundary + 2000).spent, 40);
+});
+
+test("recovery without counters persists a new baseline and charges later confirmed deltas", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-seed-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const ledger = new BoardCodexUsage(project);
+  function collector(board: BoardCodexUsage) {
+    const usage = new CodexTokenUsage(sample => board.observe(sample), (...key) => board.recover(...key));
+    usage.track("thread", "model", true);
+    usage.recover("thread", { id: "turn", status: "inProgress" });
+    return usage;
+  }
+  function observe(usage: CodexTokenUsage, totalTokens: number, cachedInputTokens: number) {
+    const totals = { totalTokens, cachedInputTokens };
+    return usage.observe({ method: "thread/tokenUsage/updated",
+      params: { threadId: "thread", turnId: "turn", tokenUsage: { total: totals, last: totals } },
+    });
+  }
+  observe(collector(ledger), 100, 90);
+  assert.equal(ledger.get(100).spent, 0);
+  assert.equal(ledger.flush(), true);
+  const restored = new BoardCodexUsage(project);
+  const resumed = collector(restored);
+  observe(resumed, 125, 100);
+  assert.equal(restored.get(100).spent, 15);
+  const result = resumed.completeTurn("thread", { id: "turn", status: "completed" }, Date.now())!;
+  assert.equal(result.records[0].dailyTokens, null);
+  restored.reconcile(result);
+  assert.equal(restored.get(100).spent, 15);
+  assert.equal(restored.recover("thread", "turn"), undefined);
+});
+
+test("a saved completed rollout with no terminal event recovers 110355 observed tokens", async t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-rollout-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const path = join(project, "rollout.jsonl");
+  const at = new Date(2026, 10, 24, 11).getTime();
+  const tokenCount = (i: number, total: number, cached: number) => {
+    const counters = { total_tokens: total, cached_input_tokens: cached };
+    return { type: "event_msg", timestamp: new Date(at + i * 1000).toISOString(), payload: {
+      type: "token_count", info: { total_token_usage: counters, last_token_usage: counters },
+    } };
+  };
+  const rollout = [
+    { type: "session_meta", payload: { id: "thread" } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+    ...Array.from({ length: 11 }, (_, i) => tokenCount(i, 100 * (i + 1), 90 * (i + 1))),
+    tokenCount(11, 1_051_795, 941_440),
+  ];
+  writeFileSync(path, rollout.map(item => JSON.stringify(item)).join("\n") + "\n");
+  const ledger = new BoardCodexUsage(project);
+  const usage = new CodexTokenUsage(sample => ledger.observe(sample));
+  usage.track("thread", "model", true);
+  const completion = { id: "turn", status: "completed", completedAt: (at + 12_000) / 1000 };
+  assert.equal(usage.recover("thread", completion)?.records[0].dailyTokens, null);
+  const report = await usage.recoverRollout(path, "thread", completion);
+  assert.equal(report?.records[0].dailyTokens, 110_355);
+  assert.equal(ledger.get(200_000, at + 12_000).spent, 110_355);
+  assert.equal(ledger.reconcile(report!).records.length, 0);
+  await usage.recoverRollout(path, "thread", completion);
+  assert.equal(ledger.get(200_000, at + 12_000).spent, 110_355);
+});
+
+test("completion releases active state and an early flush durably saves the remaining live sample", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-release-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const ledger = new BoardCodexUsage(project);
+  const at = new Date(2026, 10, 24, 11).getTime();
+  function observe(turnId: string) {
+    ledger.observe({ threadId: "thread", turnId, tokens: 5, observedAt: at,
+      counters: { ...emptyTokenCounts(), totalTokens: 15, cachedInputTokens: 10 },
+    });
+    assert.ok(ledger.recover("thread", turnId));
+  }
+  for (let i = 0; i < 64; i++) {
+    const id = "completed-" + i;
+    observe(id);
+    ledger.reconcile(report(id, at + 1, 5));
+    assert.equal(ledger.recover("thread", id), undefined);
+  }
+  observe("still-active");
+  assert.equal(ledger.flush(), true);
+  const reopened = new BoardCodexUsage(project);
+  assert.equal(reopened.get(1_000, at + 2).spent, 325);
+  assert.equal(reopened.recover("thread", "still-active")?.tokens, 5);
+  const db = new DatabaseSync(join(project, ".tasks", "codex-daily-usage", "usage.sqlite"), { readOnly: true });
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) AS rows FROM turns WHERE counters IS NOT NULL").get()?.rows, 1);
+  } finally {
+    db.close();
+  }
 });
 
 test("a missing final event preserves the observed 110355 tokens and a recovered baseline", t => {

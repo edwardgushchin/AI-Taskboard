@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { configuredCodex, withAccountServer } from "./codex.ts";
+import { codexSupportsResetCredit, configuredCodex, withAccountServer } from "./codex.ts";
 import { CodexRpcRejection } from "./codex-rpc.ts";
 
 export interface LimitWindow { name: string; remaining: number; durationMins?: number; resetsAt?: number }
@@ -90,7 +90,22 @@ export function codexLimitSnapshot(data: unknown, observedAt = Date.now()): Prov
 }
 
 type LimitAccount = { type: string; email?: string; planType?: string; accountId?: string };
-const unsupportedResetClients = new Set<string>();
+type ResetClient = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
+const resetSupport = new Map<string, Promise<boolean>>();
+const resetClientKey = (client: ResetClient) => JSON.stringify([client.path, client.version, client.args]);
+
+function supportsReset(client: ResetClient) {
+  const key = resetClientKey(client);
+  let supported = resetSupport.get(key);
+  if (!supported) {
+    supported = codexSupportsResetCredit(client).catch(() => {
+      resetSupport.delete(key);
+      return false;
+    });
+    resetSupport.set(key, supported);
+  }
+  return supported;
+}
 
 function resetIdentity(account: LimitAccount, clientPath: string) {
   if (account.type !== "chatgpt" || !account.email) return;
@@ -102,17 +117,19 @@ export async function readCodexLimits(profile: string): Promise<ProviderLimits |
   if (!client) return undefined;
   let plan: string | undefined;
   try {
-    return await withAccountServer(client, async rpc => {
+    const snapshot = await withAccountServer<ProviderLimits>(client, async rpc => {
       const { account } = await rpc.request<{ account: LimitAccount | null }>("account/read", {});
       if (!account) return { provider: "Codex", state: "auth", windows: [] };
       if (account.type !== "chatgpt") return { provider: "Codex", state: "unsupported", windows: [] };
       const planType = account.planType?.trim();
       if (planType && planType.toLowerCase() !== "unknown") plan = planType;
       const snapshot = codexLimitSnapshot(await rpc.request("account/rateLimits/read", {}));
-      const resetAccount = snapshot.availableResetCount && !unsupportedResetClients.has(client.path)
-        ? resetIdentity(account, client.path) : undefined;
-      return { ...snapshot, plan, resetAccount };
+      return { ...snapshot, plan, resetAccount: resetIdentity(account, client.path) };
     });
+    if (!snapshot.resetAccount || !snapshot.availableResetCount || !await supportsReset(client)) {
+      delete snapshot.resetAccount;
+    }
+    return snapshot;
   } catch (error) {
     const message = String(error);
     return { provider: "Codex", state: /auth|unauthorized|login|401/i.test(message) ? "auth" :
@@ -123,7 +140,7 @@ export async function readCodexLimits(profile: string): Promise<ProviderLimits |
 export async function consumeCodexReset(profile: string, expected: string, idempotencyKey: string) {
   type Outcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
   const client = await configuredCodex(profile);
-  if (!client || unsupportedResetClients.has(client.path)) return "unavailable";
+  if (!client || !await supportsReset(client)) return "unavailable";
   let sent = false;
   const consume = () => withAccountServer(client, async rpc => {
     const { account } = await rpc.request<{ account: LimitAccount | null }>("account/read", {});
@@ -145,7 +162,7 @@ export async function consumeCodexReset(profile: string, expected: string, idemp
     });
   } catch (error) {
     if (/not supported|method not found/i.test(String(error))) {
-      unsupportedResetClients.add(client.path);
+      resetSupport.set(resetClientKey(client), Promise.resolve(false));
       return "unavailable";
     }
     return "failed";

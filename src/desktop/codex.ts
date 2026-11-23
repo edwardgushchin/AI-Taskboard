@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type { Task } from "../cli/model.ts";
@@ -275,6 +276,22 @@ export async function configuredCodex(dataDirectory: string) {
   const mode = codexAuthMode(dataDirectory);
   const client = await detectedCodex(dataDirectory);
   return client && withAuthMode(client, dataDirectory, mode);
+}
+
+export async function codexSupportsResetCredit(client: Client): Promise<boolean> {
+  const folder = await mkdtemp(join(tmpdir(), "codex-reset-schema-"));
+  try {
+    await run(client.path, [...client.args, "app-server", "generate-json-schema", "--out", folder], {
+      env: client.env, windowsHide: true, timeout: 10_000,
+    });
+    const schema = JSON.parse(await readFile(join(folder, "ClientRequest.json"), "utf8")) as {
+      oneOf?: { properties?: { method?: { enum?: string[] } } }[];
+    };
+    return schema.oneOf?.some(request =>
+      request.properties?.method?.enum?.includes("account/rateLimitResetCredit/consume")) ?? false;
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
 }
 
 export async function withAccountServer<T>(client: Client, action: (rpc: ReturnType<typeof codexRpc>) => Promise<T>): Promise<T> {

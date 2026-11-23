@@ -15,7 +15,7 @@ import {
   addAttachment, addChatMessage, archiveCancelled, archiveDiagnostics, createWithAttachments, isArchived, reactivateArchivedTask, readAttachment, readTask, restoreReplyImages, sweepArchives,
   setAttachmentCover, upgradeTagCatalog,
 } from "./archive.ts";
-import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, hasDraftConfirmation, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
+import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, hasDraftConfirmation, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, scheduleTimePattern, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import { activeManagerGoal } from "./manager-goal.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
@@ -819,6 +819,12 @@ function run(
       if (input.codexDailyTokens === null) delete store.index.settings.codexDailyTokens;
       else store.index.settings.codexDailyTokens = number(input.codexDailyTokens, "codexDailyTokens");
     }
+    if (input.codexDailyResetTime !== undefined) {
+      if (typeof input.codexDailyResetTime !== "string" || !scheduleTimePattern.test(input.codexDailyResetTime)) {
+        throw new TaskboardError("INVALID_INPUT", "Use a local reset time in HH:MM format.");
+      }
+      store.index.settings.codexDailyResetTime = input.codexDailyResetTime;
+    }
     if (taskLimits !== undefined) {
       if (!validAgentLimitOverrides(taskLimits) || Object.hasOwn(taskLimits, "manager")) {
         throw new TaskboardError("INVALID_INPUT", "Task limits must be non-negative whole numbers for work and review.");
@@ -1015,6 +1021,21 @@ function run(
     throw new TaskboardError("PENDING_OPERATION", "Retry the interrupted Git operation before modifying the task.");
   }
   if (command === "chat") {
+    if (input.deferAt !== undefined) {
+      if (Object.keys(input).length !== 1) throw new TaskboardError("INVALID_INPUT", "Deferral takes only the saved message index.");
+      const at = number(input.deferAt, "deferAt", 0);
+      const latest = task.history.findLastIndex(event => event.chat);
+      if (task.pendingLimitChat?.includes(at)) return task;
+      if (at !== latest || task.history[at]?.actor !== "user") {
+        throw new TaskboardError("CHAT_CHANGED", "The saved message is no longer awaiting a reply.");
+      }
+      return store.save({
+        ...task,
+        revision: task.revision + 1,
+        updatedAt: new Date().toISOString(),
+        pendingLimitChat: [...(task.pendingLimitChat ?? []), at],
+      });
+    }
     if (input.retryAt === undefined) return addChatMessage(store, task, input);
     if (Object.keys(input).length !== 1) throw new TaskboardError("INVALID_INPUT", "Retry takes only the saved message index.");
     number(input.retryAt, "retryAt", 0);

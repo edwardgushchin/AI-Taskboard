@@ -9,6 +9,7 @@ import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task
 import { confirmedQuota, consumeCodexReset, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import { BoardCodexUsage, type CodexBudgetRole } from "./codex-daily-budget.ts";
 import type { ConfirmedTurnUsage, UsageWriter } from "./codex-token-usage.ts";
+import { CodexTokenUsage } from "./codex-token-usage.ts";
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
@@ -31,7 +32,7 @@ import { createRequire } from "node:module";
 import { callCli, cliChild, cliFailure, cliSpawnFailure } from "./cli.ts";
 import { TokenUsageQueue } from "./token-usage-queue.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
-import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
+import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess, withAccountServer } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { boardReviewModeTool, reviewModeCardReply, reviewModeConfirmation, reviewModeQuestion, reviewModeReceipt,
@@ -116,6 +117,7 @@ interface WindowState {
 }
 
 interface BoardWatch {
+  usageRecovery?: { nextAt: number; cursor: number; running: boolean };
   lastBudget?: string;
   unreadMigration?: AbortController;
   unreadMigrationNeeded?: boolean;
@@ -677,6 +679,7 @@ interface ProjectOperation {
   label?: string;
   agent?: boolean;
   budgeted?: boolean;
+  ownerReply?: boolean;
   controller: AbortController;
   done: Promise<void>;
   finish: () => void;
@@ -1170,10 +1173,9 @@ const tokenUsageQueue = () => tokenUsage ??= new TokenUsageQueue(app.getPath("us
 
 function boardCodexBudget(project: string, settings?: BoardSettings) {
   try {
-    const limit = (settings ?? subscriptions.get(project)?.board.settings ??
-      readBoardSettings(runtimeLocation(project))).codexDailyTokens;
-    if (limit === undefined) return;
-    return usageForBoard(project).get(limit);
+    const effective = settings ?? subscriptions.get(project)?.board.settings ?? readBoardSettings(runtimeLocation(project));
+    if (effective.codexDailyTokens === undefined) return;
+    return usageForBoard(project).get(effective.codexDailyTokens, Date.now(), effective.codexDailyResetTime);
   } catch (error) {
     console.warn("Could not read the board Codex budget.", error);
   }
@@ -1196,6 +1198,42 @@ function saveDailyUsage(project: string, role: CodexBudgetRole, report: TokenUsa
     }
   }
   tokenUsageQueue().enqueueBudget(project, role, reconciled, task);
+}
+
+function recoverBoardUsage(watch: BoardWatch) {
+  const { project, settings } = watch.board;
+  if (settings.codexDailyTokens === undefined || closingProjects.has(project)) return;
+  const now = Date.now();
+  const recovery = watch.usageRecovery ??= { nextAt: 0, cursor: 0, running: false };
+  if (recovery.running || recovery.nextAt > now) return;
+  recovery.nextAt = now + 60_000;
+  recovery.running = true;
+  void Promise.resolve().then(async () => {
+    const unresolved = usageForBoard(project).unresolved(now);
+    if (!unresolved.length) return;
+    const charge = unresolved[recovery.cursor++ % unresolved.length];
+    const client = await configuredCodex(app.getPath("userData"));
+    if (!client) return;
+    const { thread } = await withAccountServer(client, rpc => rpc.request<{
+      thread: { id: string; path?: string | null };
+    }>("thread/read", { threadId: charge.threadId, includeTurns: false }));
+    if (thread.id !== charge.threadId || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
+    const write = usageWriter(project, async report => saveDailyUsage(project, charge.role, report, charge.task));
+    const usage = new CodexTokenUsage(sample => {
+      if (subscriptions.get(project) === watch && !closingProjects.has(project)) write.observe?.(sample);
+    });
+    const report = await usage.recoverRollout(thread.path, charge.threadId, {
+      id: charge.turnId,
+      status: "completed",
+      completedAt: charge.completedAt / 1000,
+    });
+    if (report && subscriptions.get(project) === watch && !closingProjects.has(project)) await write(report);
+  }).catch(() => {
+    // A missing provider or rollout can be temporary. Revisit the journal
+    // without delaying normal admission while the known balance is positive.
+  }).finally(() => {
+    recovery.running = false;
+  });
 }
 
 async function saveTaskTokenUsage(project: string, id: string, role: TaskUsageRole, report: TokenUsageReport,
@@ -1229,7 +1267,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const writer = persistOnly ? undefined : active
     ? registerRuntime(project, { kind: "task", task: id }) : agentSlots.claim(project, id);
   if (!writer && !persistOnly) return { saved: false, result: cliFailure("CHAT_BUSY", t("task_chat.writer_busy")) };
-  const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id, !persistOnly);
+  const operation = beginOperation(project, t("ui.task_discussion_97daf76e") + " · " + id, !persistOnly, Boolean(automatic));
+  operation.ownerReply = !automatic;
   const signal = operation.controller.signal;
   const steering = active ? steeringOperations.get(key) ?? new Set<ProjectOperation>() : undefined;
   if (!persistOnly && steering) {
@@ -1246,6 +1285,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   let discussionFailure = t("draft_discussion.interrupted");
   let savedDiscussionRevision: number | undefined;
   let managerReply: number | undefined;
+  let deferredIndex: number | undefined;
+  const deferReply = new Error("The saved reply is waiting for Codex limits.");
   try {
     let { model, effort } = request;
     const { text, files, retryAt } = request;
@@ -1332,6 +1373,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       return { saved, result: cliFailure("CHAT_CHANGED", t("ui.this_message_is_no_longer_awaiting_a_reply_6ec519ec")) };
     }
     if (retryAt !== undefined && message?.chat) ({ model, effort } = message.chat);
+    if (!automatic) deferredIndex = last;
     if (!active && !automatic) {
       replyingTasks.add(key);
       publishDiscussionActivity(project, id, []);
@@ -1398,6 +1440,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     });
     signal.throwIfAborted();
     if (active) {
+      if (quotaWait || boardBudgetFailure(project)) throw deferReply;
       // A finished turn must not silently turn a steering message into another run.
       if (activeAgents.get(key) !== active) throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
       // The request owns its staging files until it hands them to the active turn.
@@ -1471,7 +1514,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       usageWriter(project, report => saveTaskTokenUsage(project, id, "discussion", report, automatic ? "draft" : "discussion")),
       control => ready.resolve(control), signal, id, items => publishDiscussionActivity(project, id, items),
       automatic === undefined ? undefined : managerReply === undefined ? "initial" : "handoff",
-      task.status === "review", Boolean(task.closedAt), inspectDraft)).finally(() => ready.reject(new Error("The agent session ended.")));
+      task.status === "review", Boolean(task.closedAt), inspectDraft, () => {
+        if (!automatic && (quotaWait || boardBudgetFailure(project))) throw deferReply;
+      })).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     await Promise.all(pendingSteering);
     signal.throwIfAborted();
@@ -1491,6 +1536,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     return { saved, result };
   } catch (error) {
+    if (error === deferReply && deferredIndex !== undefined) {
+      const result = await callCli<Task>(project, ["chat", id], { deferAt: deferredIndex });
+      return { saved, result };
+    }
     if (interruptedForLimit(signal)) return { saved, result: quotaFailure() };
     const message = error instanceof Error ? error.message : String(error);
     discussionFailure = message;
@@ -6027,7 +6076,7 @@ function updateQuota(wait: QuotaWait | undefined) {
   if (wait && !wasWaiting) {
     for (const operations of projectOperations.values()) {
       for (const operation of operations) {
-        if (operation.agent) operation.controller.abort(quotaInterruption);
+        if (operation.agent && !operation.ownerReply) operation.controller.abort(quotaInterruption);
       }
     }
   }
@@ -6225,6 +6274,7 @@ else {
             if (changedAdmission) for (const tab of watch.tabs) send(tab);
           }
           resumeDeferredBoardGoal(watch);
+          recoverBoardUsage(watch);
           const next = watch.shared = {
             runtime: JSON.stringify(entries, (key, value) => key === "live" ? undefined : value),
             context: context?.id,

@@ -1,4 +1,6 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { defaultCodexDailyResetTime } from "../cli/model.ts";
 import { directory, exists, readJson, withLock, writeJson } from "../cli/storage.ts";
 import type { TaskUsageRole, TokenUsageReport } from "../cli/token-usage.ts";
 import { uncachedTokens, type ConfirmedTurnUsage } from "./codex-token-usage.ts";
@@ -84,145 +86,272 @@ export function codexDailyBudget(project: string, limit: number, now = Date.now(
   return { limit, spent, remaining: Math.max(0, limit - spent), resetsAt: reset.getTime(), reason };
 }
 
-type LiveJournal = {
+type TurnCharge = Pick<ConfirmedTurnUsage, "tokens" | "counters"> & { completedAt?: number; latestAt?: number };
+type PendingTurn = TurnCharge & { increments: { at: number; tokens: number }[] };
+type OldJournal = {
   resets: number[];
-  turns: Record<string, Pick<ConfirmedTurnUsage, "tokens" | "counters"> & {
-    periods: Record<string, number>;
-    completedAt?: number;
-  }>;
-  periods: Record<string, number>;
+  turns: Record<string, TurnCharge & { periods: Record<string, number> }>;
 };
+
+function dailyWindow(at: number, resetTime: string) {
+  const [hour, minute] = resetTime.split(":").map(Number);
+  const today = new Date(at);
+  const boundary = today.setHours(hour, minute, 0, 0);
+  const other = new Date(at);
+  other.setDate(other.getDate() + (at < boundary ? -1 : 1));
+  const neighbor = other.setHours(hour, minute, 0, 0);
+  return at < boundary ? { startsAt: neighbor, resetsAt: boundary } : { startsAt: boundary, resetsAt: neighbor };
+}
 
 export class BoardCodexUsage {
   private readonly project: string;
+  private readonly folder: string;
   private readonly path: string;
-  private readonly journal: LiveJournal;
-  private legacy?: { path: string; period: number; spent: number; charges: Record<string, Charge> };
-  private legacyDirty = false;
+  private readonly pending = new Map<string, PendingTurn>();
+  private balance?: { startsAt: number; resetsAt: number; spent: number; resetTime: string };
+  private initialized = false;
   private timer?: NodeJS.Timeout;
-  private dirty = false;
 
   constructor(project: string) {
     this.project = project;
-    this.path = join(project, ".tasks", "codex-daily-usage", "live.json");
-    this.journal = exists(this.path) ? readJson(this.path) as LiveJournal : {
-      resets: [], turns: {}, periods: {},
-    };
+    this.folder = join(project, ".tasks", "codex-daily-usage");
+    this.path = join(this.folder, "usage.sqlite");
   }
 
-  private period(at: number) {
-    const midnight = new Date(at).setHours(0, 0, 0, 0);
-    const reset = this.journal.resets.findLast(value => value <= at);
-    return Math.max(midnight, reset ?? 0);
-  }
-
-  private legacyDay(at: number) {
-    const path = dayPath(this.project, at);
-    const period = this.period(at);
-    if (this.legacy?.path !== path || this.legacy.period !== period || this.legacyDirty) {
-      try {
-        const charges = this.legacy?.path === path && !this.legacyDirty ? this.legacy.charges : readCharges(path);
-        const spent = Object.values(charges).reduce((sum, charge) =>
-          charge.completedAt >= period ? sum + (charge.tokens ?? 0) : sum, 0);
-        this.legacy = { path, period, spent, charges };
-        this.legacyDirty = false;
-      } catch (error) {
-        if (this.legacy?.path !== path) throw error;
+  private database<T>(action: (db: DatabaseSync) => T): T {
+    if (!this.initialized) directory(this.folder, true);
+    const db = new DatabaseSync(this.path);
+    try {
+      if (!this.initialized) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS turns (
+            id TEXT PRIMARY KEY, tokens INTEGER NOT NULL, counters TEXT, completed INTEGER
+          );
+          CREATE TABLE IF NOT EXISTS increments (turn TEXT NOT NULL, at INTEGER NOT NULL, tokens INTEGER NOT NULL);
+          CREATE INDEX IF NOT EXISTS increments_by_time ON increments(at);
+          CREATE INDEX IF NOT EXISTS increments_by_turn ON increments(turn, at);
+          CREATE TABLE IF NOT EXISTS resets (at INTEGER PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS migration (version INTEGER PRIMARY KEY);
+        `);
+        const old = join(this.folder, "live.json");
+        if (exists(old) && !db.prepare("SELECT 1 FROM migration WHERE version = 1").get()) {
+          this.transaction(db, () => {
+            if (db.prepare("SELECT 1 FROM migration WHERE version = 1").get()) return;
+            const journal = readJson(old) as OldJournal;
+            const insert = db.prepare("INSERT INTO increments VALUES (?, ?, ?)");
+            for (const [key, turn] of Object.entries(journal.turns)) {
+              this.storeTurn(db, key, turn);
+              for (const [at, amount] of Object.entries(turn.periods)) insert.run(key, Number(at), amount);
+            }
+            const reset = db.prepare("INSERT OR IGNORE INTO resets VALUES (?)");
+            for (const at of journal.resets) reset.run(at);
+            db.exec("INSERT INTO migration VALUES (1)");
+          });
+        }
+        this.initialized = true;
       }
+      return action(db);
+    } finally {
+      db.close();
     }
-    return this.legacy;
   }
 
-  get(projectLimit: number, now = Date.now()) {
-    const spent = this.legacyDay(now).spent + (this.journal.periods[this.period(now)] ?? 0);
-    return {
-      limit: projectLimit,
-      spent,
-      remaining: Math.max(0, projectLimit - spent),
-      resetsAt: new Date(now).setHours(24, 0, 0, 0),
-      reason: spent >= projectLimit ? "exhausted" as const : undefined,
-    };
+  private transaction(db: DatabaseSync, action: () => void) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      action();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private storeTurn(db: DatabaseSync, key: string, turn: TurnCharge) {
+    db.prepare(`INSERT INTO turns VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET tokens = excluded.tokens, counters = excluded.counters, completed = excluded.completed`)
+      .run(key, turn.tokens, turn.counters ? JSON.stringify(turn.counters) : null, turn.completedAt ?? null);
+  }
+
+  private readTurn(key: string): TurnCharge | undefined {
+    const pending = this.pending.get(key);
+    if (pending) return pending;
+    if (!this.initialized && !exists(this.path) && !exists(join(this.folder, "live.json"))) return;
+    return this.database(db => {
+      const row = db.prepare(`SELECT tokens, counters, completed,
+        (SELECT MAX(at) FROM increments WHERE turn = turns.id) AS latest
+        FROM turns WHERE id = ?`).get(key);
+      if (row) return {
+        tokens: row.tokens as number,
+        counters: typeof row.counters === "string" ? JSON.parse(row.counters) as ConfirmedTurnUsage["counters"] : undefined,
+        completedAt: typeof row.completed === "number" ? row.completed : undefined,
+        latestAt: typeof row.latest === "number" ? row.latest : undefined,
+      };
+    });
+  }
+
+  get(limit: number, now = Date.now(), resetTime = defaultCodexDailyResetTime) {
+    let balance = this.balance;
+    if (!balance || balance.resetTime !== resetTime || now < balance.startsAt || now >= balance.resetsAt) {
+      const { startsAt, resetsAt } = dailyWindow(now, resetTime);
+      const saved = this.database(db => {
+        const start = Math.max(startsAt, (db.prepare("SELECT MAX(at) AS at FROM resets WHERE at <= ?")
+          .get(now)?.at as number | null) ?? 0);
+        const spent = db.prepare("SELECT COALESCE(SUM(tokens), 0) AS spent FROM increments WHERE at >= ? AND at < ?")
+          .get(start, resetsAt)?.spent as number;
+        return { start, spent };
+      });
+      const paths = new Set([dayPath(this.project, saved.start), dayPath(this.project, resetsAt - 1)]);
+      let spent = saved.spent;
+      for (const path of paths) {
+        for (const charge of Object.values(readCharges(path))) {
+          if (charge.completedAt >= saved.start && charge.completedAt < resetsAt) spent += charge.tokens ?? 0;
+        }
+      }
+      for (const turn of this.pending.values()) {
+        for (const charge of turn.increments) {
+          if (charge.at >= saved.start && charge.at < resetsAt) spent += charge.tokens;
+        }
+      }
+      this.balance = balance = { startsAt: saved.start, resetsAt, spent, resetTime };
+    }
+    const { spent, resetsAt } = balance;
+    return { limit, spent, remaining: Math.max(0, limit - spent), resetsAt,
+      reason: spent >= limit ? "exhausted" as const : undefined };
   }
 
   recover(threadId: string, turnId: string) {
-    const previous = this.journal.turns[JSON.stringify([threadId, turnId])];
+    const previous = this.readTurn(JSON.stringify([threadId, turnId]));
     if (previous?.counters) return { tokens: previous.tokens, counters: previous.counters };
   }
 
-  observe({ threadId, turnId, tokens, observedAt, counters }: ConfirmedTurnUsage) {
+  unresolved(now: number) {
+    const previous = new Date(now);
+    previous.setDate(previous.getDate() - 1);
+    const paths = [dayPath(this.project, now), dayPath(this.project, previous.getTime())];
+    return paths.flatMap(path => Object.entries(readCharges(path)).flatMap(([key, charge]) => {
+      if (charge.tokens !== null || this.readTurn(key)?.completedAt !== undefined) return [];
+      const [threadId, turnId] = JSON.parse(key) as [string, string];
+      return [{ ...charge, threadId, turnId }];
+    }));
+  }
+
+  private refineTime(key: string, tokens: number, at: number) {
+    if (tokens <= 0 || !this.flush()) return false;
+    let changed = false;
+    this.database(db => {
+      const earlier = db.prepare("SELECT COALESCE(SUM(tokens), 0) AS spent FROM increments WHERE turn = ? AND at <= ?")
+        .get(key, at)?.spent as number;
+      let remaining = tokens - earlier;
+      if (remaining <= 0) return;
+      this.transaction(db, () => {
+        const later = db.prepare("SELECT rowid, tokens FROM increments WHERE turn = ? AND at > ? ORDER BY at, rowid")
+          .iterate(key, at);
+        const reduce = db.prepare("UPDATE increments SET tokens = tokens - ? WHERE rowid = ?");
+        const move = db.prepare("UPDATE increments SET at = ? WHERE rowid = ?");
+        const insert = db.prepare("INSERT INTO increments VALUES (?, ?, ?)");
+        for (const row of later) {
+          const amount = row.tokens as number;
+          const id = row.rowid as number;
+          if (amount <= remaining) {
+            move.run(at, id);
+          } else {
+            reduce.run(remaining, id);
+            insert.run(key, at, remaining);
+          }
+          changed = true;
+          remaining -= amount;
+          if (remaining <= 0) break;
+        }
+      });
+    });
+    if (changed) this.balance = undefined;
+    return changed;
+  }
+
+  observe({ threadId, turnId, tokens, observedAt, counters, historical }: ConfirmedTurnUsage) {
     const key = JSON.stringify([threadId, turnId]);
-    const turn = this.journal.turns[key] ?? {
-      tokens: this.legacyDay(observedAt).charges[key]?.tokens ?? 0, periods: {},
-    };
-    if (tokens <= turn.tokens) return false;
-    const period = this.period(turn.completedAt ?? observedAt);
-    const increment = tokens - turn.tokens;
+    const known = this.readTurn(key);
+    const previousDay = new Date(observedAt);
+    previousDay.setDate(previousDay.getDate() - 1);
+    const previous = known?.tokens ?? (
+      readCharges(dayPath(this.project, observedAt))[key]?.tokens ??
+      readCharges(dayPath(this.project, previousDay.getTime()))[key]?.tokens ?? 0);
+    const refined = historical && known?.latestAt !== undefined && known.latestAt > observedAt
+      ? this.refineTime(key, Math.min(tokens, previous), observedAt)
+      : false;
+    if (tokens < previous || tokens === previous &&
+        (!counters || known?.completedAt !== undefined ||
+          counters.totalTokens === known?.counters?.totalTokens)) return refined;
+    const turn = this.pending.get(key) ?? { ...known, tokens: previous, increments: [] };
+    const at = Math.min(turn.completedAt ?? observedAt, observedAt);
+    const increment = tokens - previous;
     turn.tokens = tokens;
     if (turn.completedAt === undefined && counters) turn.counters = counters;
-    turn.periods[period] = (turn.periods[period] ?? 0) + increment;
-    this.journal.turns[key] = turn;
-    this.journal.periods[period] = (this.journal.periods[period] ?? 0) + increment;
-    this.dirty = true;
-    this.timer ??= setTimeout(() => this.flush(), 2_000);
-    return true;
+    if (increment > 0) {
+      turn.increments.push({ at, tokens: increment });
+      turn.latestAt = Math.max(turn.latestAt ?? at, at);
+    }
+    this.pending.set(key, turn);
+    if (this.balance && at >= this.balance.startsAt && at < this.balance.resetsAt) this.balance.spent += increment;
+    this.timer ??= setTimeout(() => this.flush(), 2_000).unref();
+    return increment > 0 || refined;
   }
 
   reconcile(report: TokenUsageReport): TokenUsageReport {
+    const completed = new Map<string, { at: number; tokens: number }>();
     const records = report.records.filter(record => {
       const key = JSON.stringify([record.threadId, record.turnId]);
-      const turn = this.journal.turns[key];
-      if (!turn) return true;
+      if (!this.readTurn(key)) return true;
       if (record.completedAt !== undefined) {
-        if (turn.completedAt !== record.completedAt) {
-          turn.completedAt = record.completedAt;
-          this.dirty = true;
-          // A terminal time can establish that a delayed increment happened
-          // before a boundary we previously crossed using receipt time.
-          const period = this.period(record.completedAt);
-          for (const [source, amount] of Object.entries(turn.periods)) {
-            if (Number(source) <= period) continue;
-            delete turn.periods[source];
-            turn.periods[period] = (turn.periods[period] ?? 0) + amount;
-            this.journal.periods[source] -= amount;
-            this.journal.periods[period] = (this.journal.periods[period] ?? 0) + amount;
-          }
-        }
-        if (record.dailyTokensExcludeCache && record.dailyTokens != null) {
-          this.observe({ ...record, tokens: record.dailyTokens, observedAt: record.completedAt });
-        }
-        if (turn.counters) {
-          delete turn.counters;
-          this.dirty = true;
-        }
+        const group = completed.get(key) ?? { at: record.completedAt, tokens: 0 };
+        if (record.dailyTokensExcludeCache && record.dailyTokens != null) group.tokens += record.dailyTokens;
+        completed.set(key, group);
       }
       return false;
     });
+    for (const [key, final] of completed) {
+      const old = this.readTurn(key)!;
+      const turn = this.pending.get(key) ?? { ...old, increments: [] };
+      if (turn.completedAt === final.at && final.tokens <= turn.tokens) continue;
+      turn.completedAt = final.at;
+      turn.counters = undefined;
+      if (final.tokens > turn.tokens) {
+        turn.increments.push({ at: final.at, tokens: final.tokens - turn.tokens });
+        turn.tokens = final.tokens;
+      }
+      this.pending.set(key, turn);
+      this.balance = undefined;
+    }
     this.flush();
     return { ...report, records };
   }
 
   invalidateLegacy() {
-    this.legacyDirty = true;
+    this.balance = undefined;
   }
 
   reset(now = Date.now()) {
-    this.journal.resets.push(now);
-    this.dirty = true;
-    if (!this.flush()) {
-      this.journal.resets.pop();
-      throw new Error("Could not save the board budget reset.");
-    }
-    this.legacy = undefined;
+    if (!this.flush()) throw new Error("Could not save confirmed board Codex usage.");
+    this.database(db => db.prepare("INSERT OR IGNORE INTO resets VALUES (?)").run(now));
+    this.balance = undefined;
   }
 
   flush() {
     clearTimeout(this.timer);
     this.timer = undefined;
-    if (!this.dirty) return true;
+    if (!this.pending.size) return true;
     try {
-      directory(dirname(this.path), true);
-      writeJson(this.path, this.journal);
-      this.dirty = false;
+      this.database(db => this.transaction(db, () => {
+        const insert = db.prepare("INSERT INTO increments VALUES (?, ?, ?)");
+        const reassign = db.prepare("UPDATE increments SET at = ? WHERE turn = ? AND at > ?");
+        for (const [key, turn] of this.pending) {
+          this.storeTurn(db, key, turn);
+          for (const charge of turn.increments) insert.run(key, charge.at, charge.tokens);
+          if (turn.completedAt !== undefined) reassign.run(turn.completedAt, key, turn.completedAt);
+        }
+      }));
+      this.pending.clear();
       return true;
     } catch (error) {
       console.warn("Could not save confirmed board Codex usage.", error);

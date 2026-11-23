@@ -5746,6 +5746,7 @@ function boardSettings() {
     { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
     { name: "reviewerLimit", type: "number", label: () => t("limits.review"), value: current.taskLimits?.reviewer },
     { name: "codexDailyTokens", label: () => t("limits.board.setting"), value: current.codexDailyTokens },
+    { name: "codexDailyResetTime", label: () => t("limits.board.reset_time"), value: current.codexDailyResetTime ?? "09:00" },
     { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
         ["ask", t("ui.ask_for_approval_cc8bdc3b")],
@@ -5759,6 +5760,11 @@ function boardSettings() {
       return;
     }
     const codexDailyTokens = daily === "" ? null : Number(daily);
+    const codexDailyResetTime = values.codexDailyResetTime;
+    if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(codexDailyResetTime)) {
+      notice(t("limits.board.reset_time_invalid"));
+      return;
+    }
     const agents = {};
     const taskLimits = {};
     for (const [role, title] of roles) {
@@ -5779,6 +5785,7 @@ function boardSettings() {
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...(codexDailyTokens !== (current.codexDailyTokens ?? null) ? { codexDailyTokens } : {}),
+      ...(codexDailyResetTime !== (current.codexDailyResetTime ?? "09:00") ? { codexDailyResetTime } : {}),
       ...agents,
     })) {
       if (values.managerAccess !== managerAccess) {
