@@ -32,6 +32,7 @@ function fixture(mode = "human") {
   const launches: string[] = [], accepted: string[] = [], reviews: string[] = [], notices: any[] = [], calls: string[][] = [], errors: string[] = [];
   let afterLaunch: (() => void) | undefined, beforeAccept: (() => void) | undefined, afterReviewRead: (() => void) | undefined, launchError: string | undefined;
   let noticeError: string | undefined;
+  let milestonesError: string | undefined;
   let budgetWaiting = false;
   const fail = (code: string) => ({ ok: false, error: { code, message: code } });
   const runtime = runInNewContext(stripTypeScriptTypes(code) + "\n({scheduleAutoBoard, autoBoards})", {
@@ -72,7 +73,10 @@ function fixture(mode = "human") {
           board.tasks.find((task: any) => task.id === id)?.status !== "done");
         return { ok: true, data: structuredClone(board) };
       }
-      if (args[0] === "milestones") return { ok: true, data: { repository: "owner/repo", milestones: [{ number: 1, due_on: "2026-11-20T00:00:00Z" }] } };
+      if (args[0] === "milestones") {
+        if (milestonesError) return fail(milestonesError);
+        return { ok: true, data: { repository: "owner/repo", milestones: [{ number: 1, due_on: "2026-11-20T00:00:00Z" }] } };
+      }
       if (args[0] === "review") {
         afterReviewRead?.();
         return { ok: true, data: { revision: task.revision, targetHead: "target", stale: false,
@@ -128,6 +132,8 @@ function fixture(mode = "human") {
   };
   return { board, watch, slots, queued, launches, accepted, reviews, notices, calls, errors, tick, add, finish, managers, dialogues,
     failNotice: (code: string) => { noticeError = code; },
+    setMilestonesError: (code?: string) => { milestonesError = code; },
+    expireMilestones: () => { runtime.autoBoards.get(watch).milestonesAt = 0; },
     waitForBudget: (value: boolean) => { budgetWaiting = value; },
     afterLaunch: (callback: () => void) => { afterLaunch = callback; }, beforeAccept: (callback: () => void) => { beforeAccept = callback; },
     afterReviewRead: (callback: () => void) => { afterReviewRead = callback; },
@@ -510,6 +516,38 @@ test("milestones are fetched once for the board and the queue is recalculated af
   await f.tick();
   assert.deepEqual(f.launches, ["T-0001", "T-0003"]);
   assert.equal(f.calls.filter(args => args[0] === "milestones").length, 1);
+});
+
+test("a milestone lookup failure leaves the urgent card without a milestone eligible", async () => {
+  for (const hasDeferred of [false, true]) {
+    const f = fixture();
+    f.setMilestonesError("GITHUB_UNAVAILABLE");
+    if (hasDeferred) {
+      f.add("T-0001", { status: "in_progress", reviewReturn: 1 });
+      f.queued.push({ id: "queue:T-0001", owner: 0, kind: "queue", task: "T-0001", revision: 1, reviewReturn: true });
+    }
+    f.add("T-0002", { priority: "urgent", dueDate: "2026-01-02" });
+    f.add("T-0003", {
+      priority: "urgent",
+      dueDate: "2026-01-01",
+      milestone: { repository: "owner/repo", number: 1, title: "1.0.0" },
+    });
+    await f.tick();
+    assert.deepEqual(f.errors, ["GITHUB_UNAVAILABLE"]);
+    assert.deepEqual(f.launches, ["T-0002"]);
+
+    f.finish("T-0002");
+    await f.tick();
+    assert.deepEqual(f.launches, hasDeferred ? ["T-0002", "T-0001"] : ["T-0002"]);
+    assert.equal(f.calls.filter(([command]) => command === "milestones").length, 1);
+    if (hasDeferred) f.finish("T-0001");
+
+    f.setMilestonesError();
+    f.expireMilestones();
+    await f.tick();
+    assert.equal(f.launches.at(-1), "T-0003");
+    assert.equal(f.calls.filter(([command]) => command === "milestones").length, 2);
+  }
 });
 
 test("a changed target is reviewed again, and missing evidence does not cause repeated unchanged reviews", async () => {

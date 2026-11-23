@@ -1577,33 +1577,32 @@ function scheduleAutoBoard(watch: BoardWatch, now = Date.now()) {
           available[task.mergeRepair ? "reviewer" : "executor"] && !executorBusy(project, task.id) &&
           !queue.launches.has(task.id + ":" + task.revision));
         const scheduled = board.settings.autoMode ? [] : ready.filter(task => task.schedule);
-        const automatic = board.settings.autoMode ? ready : ready.filter(task => !task.schedule);
+        const canRefreshMilestones = decisionTime - queue.milestonesAt >= 60_000;
+        const automatic = ready.filter(task => (board.settings.autoMode || !task.schedule) &&
+          (!task.milestone || queue.milestonesError === undefined || canRefreshMilestones));
         const next = nextReadyTask(automatic, queue.dates, () => false, decisionTime, controls, board.tasks);
         const task = scheduled.find(task => task.priority === "urgent") ??
           (next?.priority === "urgent" ? next : scheduled[0] ?? next);
         const loadMilestones = task && (board.settings.autoMode || !task.schedule) && automatic.some(candidate => candidate.milestone &&
           (candidate.priority === "urgent") === (task.priority === "urgent"));
-        const refreshMilestones = loadMilestones && decisionTime - queue.milestonesAt >= 60_000;
-        if (deferred && (!task || deferred.task.priority === "urgent" || task.priority !== "urgent" ||
-            (loadMilestones && queue.milestonesError && !refreshMilestones))) {
+        if (deferred && (!task || deferred.task.priority === "urgent" || task.priority !== "urgent")) {
           attemptedDeferred.add(deferred.task.id);
           await launchDeferredExecutor(project, deferred);
           return true;
         }
         if (!task) return false;
-        if (refreshMilestones) {
-          queue.milestonesAt = decisionTime;
+        if (loadMilestones && canRefreshMilestones) {
           const milestones = await callCli<{ repository: string; milestones: { number: number; due_on: string | null }[] }>(project, ["milestones"]);
+          queue.milestonesAt = Date.now();
           if (!milestones.ok) {
             queue.milestonesError = milestones.error.message;
             failed(milestones.error.message);
-            return Boolean(deferred);
+          } else {
+            queue.milestonesError = undefined;
+            queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
           }
-          queue.milestonesError = undefined;
-          queue.dates = new Map(milestones.data.milestones.map(entry => [entry.number, entry.due_on]));
           return true; // A deadline, setting or card may have changed during the network request.
         }
-        if (loadMilestones && queue.milestonesError) return false;
         const attempt = task.id + ":" + task.revision;
         queue.launches.add(attempt);
         const result = await launchTask(project, task.id, undefined, false, task.revision, undefined, Boolean(task.schedule), false, false,

@@ -11,12 +11,13 @@ import { locateBoard, onBoard } from "../src/cli/storage.ts";
 import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
 
-const phases = ["new", "return", "release", "auto-off", "restart"];
+const phases = ["new", "return", "release", "milestone-error-with-return", "milestone-error-without-return", "auto-off", "restart"];
 const selected = process.argv.find(arg => arg.startsWith("--scenario="))?.slice("--scenario=".length);
 assert.ok(!selected || phases.includes(selected), "Unknown scenario");
 const { scratch, artifacts, keepArtifacts } = electronCheck(import.meta.url, "urgent-executor-queue", 120_000,
   (selected === "restart" ? ["auto-off", "restart"] : selected ? [selected] : phases).map(name => [name]));
 const phase = process.argv.at(-1);
+const milestoneError = phase === "milestone-error-with-return" || phase === "milestone-error-without-return";
 const project = join(scratch, phase === "restart" ? "auto-off" : phase);
 const profile = join(project, "electron-profile");
 const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
@@ -90,6 +91,8 @@ const stateFile = join(scratch, "restart.json");
 let nextPending;
 let completed;
 let incumbent;
+let unavailableReleaseCard;
+let milestoneRequests = 0;
 
 if (phase !== "restart") {
   mkdirSync(project);
@@ -102,18 +105,38 @@ if (phase !== "restart") {
   incumbent = ready("Running incumbent");
 }
 
-if (phase === (selected && selected !== "restart" ? selected : selected === "restart" ? "auto-off" : phases[0])) {
-  const files = ["src/desktop/main.ts", "src/desktop/auto-queue.ts", "docs/reference/board.md",
-    "docs/explanation/architecture.md", "scripts/check-urgent-executor-queue.mjs"];
-  const hashes = files.map(path => createHash("sha256").update(readFileSync(join(root, path))).digest("hex") + "  " + path);
+const firstPhase = selected === "restart" ? "auto-off" : selected ?? phases[0];
+if (keepArtifacts && phase === firstPhase) {
+  assert.equal(cwdGit(root, "status", "--porcelain"), "", "Record artifact evidence from a clean Git checkout");
+  const head = cwdGit(root, "rev-parse", "HEAD");
+  const tree = cwdGit(root, "rev-parse", "HEAD^{tree}");
+  const files = [
+    "docs/explanation/architecture.md",
+    "docs/reference/board.md",
+    "scripts/check-urgent-executor-queue.mjs",
+    "src/cli/main.ts",
+    "src/desktop/auto-queue.ts",
+    "src/desktop/board-runtime.ts",
+    "src/desktop/main.ts",
+    "tests/auto-board.test.ts",
+    "tests/auto-queue.test.ts",
+    "tests/shared-runtime.test.ts",
+    "tests/task-launch.test.ts",
+  ];
+  const hashes = files.map(path => {
+    const bytes = execFileSync("git", ["cat-file", "blob", head + ":" + path], { cwd: root, windowsHide: true });
+    return createHash("sha256").update(bytes).digest("hex") + "  " + path;
+  });
   const header = [
     "Command: node scripts/check-urgent-executor-queue.mjs --artifacts .tasks/qa" + (selected ? " --scenario=" + selected : ""),
     `${process.platform} ${process.arch} ${release()}; Electron ${process.versions.electron}; Host ${execFileSync(node, ["--version"], { encoding: "utf8", windowsHide: true }).trim()}`,
-    "Source snapshot from Git HEAD " + cwdGit(root, "rev-parse", "HEAD") + " (SHA-256 of raw checkout bytes):",
+    "Test checkout commit: " + head,
+    "Test checkout Git tree: " + tree,
+    "SHA-256 of Git blob content from git cat-file blob <commit>:<path>:",
     ...hashes,
     "Real Electron main process, preload IPC, CLI and board persistence. Executor and milestone responses are fixtures.",
   ].join("\n") + "\n";
-  if (keepArtifacts) writeFileSync(report, header);
+  writeFileSync(report, header);
 }
 
 app.setPath("userData", profile);
@@ -142,6 +165,10 @@ globalThis.queueFixtureOpen = project => createWindow([project]).window;
 
 globalThis.queueFixtureCli = (call, board, args, ...rest) => {
   if (args[0] === "milestones") {
+    milestoneRequests++;
+    if (milestoneError) {
+      return { ok: false, error: { code: "GITHUB_UNAVAILABLE", message: "Fixture: milestone dates are unavailable." } };
+    }
     return { ok: true, data: { repository: "fixture/queue", milestones: [
       { number: 1, due_on: "2026-12-10T00:00:00Z" },
       { number: 2, due_on: "2026-12-01T00:00:00Z" },
@@ -258,6 +285,19 @@ async function run() {
       const future = review("Pending until application restart");
       nextPending = { pending: future, previous: completed, untouched: ordinary.id };
     }
+  } else if (milestoneError) {
+    const releaseCard = ready("Urgent card with unavailable milestone dates", { priority: "urgent", dueDate });
+    attachRelease(releaseCard, 1, "1.0.0");
+    unavailableReleaseCard = releaseCard.id;
+    const independent = ready("Urgent card without a milestone", { priority: "urgent" });
+    expected.push(independent.id);
+    if (phase === "milestone-error-with-return") {
+      const deferred = review("Ordinary saved return");
+      await returnFromReview(second, deferred);
+      expected.push(deferred.id);
+    }
+    cli(["auto-queue"], { revision: 0, order: [independent.id] });
+    enableAuto();
   } else {
     const earlier = ready("Early release with a later deadline");
     const later = ready("Late release with the urgent card", { priority: "urgent", dueDate });
@@ -277,6 +317,9 @@ async function run() {
   for (const [index, id] of expected.entries()) {
     const run = await until(() => launches[index + 1], "next executor " + id);
     assert.equal(run.id, id, JSON.stringify(started()));
+    if (milestoneError && index === 0) {
+      assert.ok(milestoneRequests > 0, "milestone lookup failed before selecting the independent card");
+    }
     if (index === 0 && (phase === "return" || phase === "auto-off")) {
       assert.equal(run.feedback, "Correct the fixture result.");
     }
@@ -299,6 +342,10 @@ async function run() {
   assert.deepEqual(interruptions, []);
   checked("single slot, no preemption or duplicate across two windows; order " + started().join(" → "));
   if (phase === "release") checked("earlier release ran before urgent later release and the urgent dependent card");
+  if (milestoneError) {
+    assert.equal(show(unavailableReleaseCard).status, "ready");
+    checked("urgent card without a milestone obtained the slot despite the failed request; the card with a milestone remained ready");
+  }
   if (nextPending) checked("auto-off restored queued returns and left an additional return pending for restart");
 }
 
