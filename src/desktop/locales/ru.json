@@ -92,6 +92,8 @@
   "task_question.approval_blocked": "Утверждение станет доступно, когда агент закроет вопрос в «Диалоге».",
   "task_question.open_dialogue_button": "Открыть диалог",
   "task_question.needs_answer": "Нужен ответ",
+  "task_question.waiting_for_manager": "Ждёт менеджера",
+  "task_question.approval_waiting_for_manager": "Утверждение станет доступно, когда агент завершит уточнение с менеджером.",
   "task_question.open_dialogue": "Нужен ответ. Открыть диалог задачи",
   "agentActivity.title": "Активность по доскам",
   "agentActivity.busy": "Занят",

@@ -107,6 +107,8 @@ export interface RunActivity {
 }
 
 export interface TaskEvent {
+  ownerBriefSource?: number;
+  submissionBrief?: Pick<Task, "title" | "description" | "criteria">;
   draftDependency?: {
     question: number;
     ownerMessage: number;
@@ -220,6 +222,7 @@ export type ArtifactKind = "png" | "text";
 
 export interface Task {
   awaitingAnswer?: boolean;
+  awaitingOwnerAnswer?: boolean;
   draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
@@ -458,6 +461,9 @@ export function record(
   }
   const at = new Date().toISOString();
   const event: Task["history"][number] = { at, actor, action };
+  if (action === "submit" && next === "review") {
+    event.submissionBrief = { title: task.title, description: task.description, criteria: [...task.criteria] };
+  }
   if (message) event.text = message;
   if (next !== task.status) {
     event.from = task.status;

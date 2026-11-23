@@ -2140,12 +2140,124 @@ test("task chat records a clarification once, with its sources and lifecycle int
   for (const status of ["review", "done"]) {
     const card = send("Уточнение после сдачи.");
     assert.equal(card.status, status);
-    const locked = await action(card)("task_update", { authorization: card.history.at(-1)!.text, description: "Другие условия" });
+    const locked = await action(card)("task_update", { authorization: card.history.at(-1)!.text,
+      ...(status === "review" ? { title: "Другой заголовок" } : { description: "Другие условия" }) });
     assert.ok(!locked.ok && locked.error.code === "REQUIREMENTS_LOCKED");
     assert.deepEqual(show(), card);
     if (status === "review") cli(root, ["accept", draft.id], { revision: card.revision });
   }
   assert.equal(refreshes, 2);
+});
+
+test("the exact reset-list clarification updates the brief in draft, work and review", async t => {
+  const clarification = "Сбросы нужно писать под полосой лимитов и нужно перечислить их со сроком экспирации";
+  const baseline = "Показывать число доступных сбросов Codex.";
+  const chat = { model: "fixture-model", effort: "medium" };
+  for (const phase of ["draft", "in_progress", "review"]) {
+    await t.test(phase, async t => {
+      const root = fixture(t);
+      cli(root, ["init"]);
+      cli(root, ["settings"], { reviewMode: "reviewer-human" });
+      const { id } = cli(root, ["create"], {
+        title: "Доступные сбросы Codex",
+        description: baseline,
+        criteria: [baseline],
+      });
+      const show = (): Task => cli(root, ["show", id]);
+      const send = (text: string): Task => cli(root, ["chat", id], { ...chat, text });
+      if (phase !== "draft") {
+        approveFixture(root, ["approve", id]);
+        cli(root, ["start", id]);
+      }
+      if (phase === "review") {
+        cli(root, ["submit", id], {
+          token: cli(root, ["preview", id]).token,
+          noChanges: true,
+          summary: "Счётчик показан.",
+          checks: ["Счётчик виден под полосами."],
+        });
+      }
+
+      const initial = show();
+      const message = send(clarification);
+      const review = () => cli(root, ["review", id], { compact: true, includeReviewerSettings: true });
+      if (phase === "review") {
+        const { revision, reviewMode, reviewModeVersion } = review();
+        cli(root, ["review-approve", id], {
+          revision, targetHead: null, reviewMode, reviewModeVersion,
+          summary: "Счётчик показан.", evidence: [baseline],
+        });
+        assert.equal(review().awaitingHumanAcceptance, true);
+      }
+      const apply = (card: Task, source: string, description = clarification, criteria = [baseline, clarification]) =>
+        taskChatActions(root, card, source, () => {})("task_update", { authorization: source, description, criteria });
+      assert.ok((await apply(message, clarification)).ok);
+      const updated = show();
+      assert.equal(updated.status, phase);
+      assert.equal(updated.description, clarification);
+      assert.deepEqual(updated.criteria, [baseline, clarification]);
+      if (phase === "review") {
+        const current = review();
+        assert.equal(current.reviewerApproval, undefined);
+        assert.equal(current.awaitingHumanAcceptance, false);
+        assert.equal(current.reviewDecision, updated.history.length);
+        assert.equal(updated.history.find(event => event.action === "review-approve")?.reviewApproval?.revision, message.revision);
+      }
+      assert.ok((await apply(updated, clarification)).ok);
+      assert.deepEqual(show(), updated);
+
+      if (phase !== "draft") {
+        const conflicting = await apply(updated, clarification, baseline, [baseline]);
+        assert.ok(!conflicting.ok && conflicting.error.code === "USER_DIRECTION_REQUIRED");
+        const ambiguous = "Может быть, список слишком длинный?";
+        const recent = send(ambiguous);
+        const staleSource = await apply(recent, clarification, baseline, [baseline]);
+        assert.ok(!staleSource.ok && staleSource.error.code === "USER_DIRECTION_REQUIRED");
+        const agentText = "Убрать список.";
+        const agentReply: Task = cli(root, ["chat", id], {
+          ...chat, actor: "agent", replyTo: recent.history.length - 1, text: agentText,
+        });
+        const unauthorized = await apply(agentReply, agentText);
+        assert.ok(!unauthorized.ok && unauthorized.error.code === "USER_DIRECTION_REQUIRED");
+        assert.deepEqual(show().criteria, updated.criteria);
+      }
+
+      if (phase === "review") {
+        const snapshot = initial.history.find(event => event.action === "submit");
+        assert.deepEqual(snapshot?.submissionBrief, {
+          title: initial.title, description: baseline, criteria: [baseline],
+        });
+        assert.deepEqual(show().history.find(event => event.action === "submit"), snapshot);
+        assert.deepEqual(show().result, initial.result);
+        assert.deepEqual(review().criteria, updated.criteria);
+        const { reviewMode, reviewModeVersion } = review();
+        cli(root, ["review-approve", id], {
+          revision: message.revision, targetHead: null, reviewMode, reviewModeVersion,
+          summary: "Счётчик показан.", evidence: [baseline],
+        }, "REVISION_CONFLICT");
+
+        const replacement = "Показывай только счётчик сбросов под полосами лимитов.";
+        assert.ok((await apply(send(replacement), replacement, replacement, [replacement])).ok);
+        assert.deepEqual(review().criteria, [replacement]);
+        assert.deepEqual(show().history.find(event => event.action === "submit"), snapshot);
+        const current = review();
+        const approval = {
+          revision: current.revision, targetHead: null, reviewDecision: current.reviewDecision,
+          reviewMode: current.reviewMode, reviewModeVersion: current.reviewModeVersion,
+          summary: "Счётчик показан.", evidence: [replacement],
+          ownerQuestion: "Счётчик соответствует постановке. Хотите вернуть список со сроками?",
+        };
+        cli(root, ["review-approve", id], approval);
+        cli(root, ["review-approve", id], approval);
+        assert.equal(show().history.filter(event => event.expertMessage?.to === "owner" &&
+          event.text === approval.ownerQuestion).length, 1);
+        assert.equal(review().awaitingHumanAcceptance, true);
+        cli(root, ["accept", id], {
+          revision: current.revision, targetHead: null, reviewModeVersion: current.reviewModeVersion, actor: "user",
+        }, "HUMAN_ACCEPTANCE_REQUIRED");
+      }
+    });
+  }
 });
 
 test("task chat stores messages and attachments together and archives the conversation", t => {

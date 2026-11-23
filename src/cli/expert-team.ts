@@ -404,8 +404,9 @@ export function sendTeamMessage(store: BoardStore, taskId: string, sender: strin
 
 export function reviewDecisionSequence(task: Task) {
   const submission = task.history.findLastIndex(event => event.action === "submit" && event.to === "review");
-  const latest = task.history.findLastIndex(event => event.messageKind === "decision" && event.expertMessage &&
+  const latest = task.history.findLastIndex(event => event.ownerBriefSource !== undefined ||
+    (event.messageKind === "decision" && event.expertMessage &&
     event.expertMessage.from === "owner" &&
-    (["team", "reviewer", "manager"].includes(event.expertMessage.to) || event.expertMessage.to.startsWith("review:")));
+    (["team", "reviewer", "manager"].includes(event.expertMessage.to) || event.expertMessage.to.startsWith("review:"))));
   return latest > submission ? latest + 1 : 0;
 }

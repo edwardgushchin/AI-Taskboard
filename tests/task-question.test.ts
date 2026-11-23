@@ -9,8 +9,8 @@ import { addChatMessage, readTask } from "../src/cli/archive.ts";
 import { sendTeamMessage } from "../src/cli/expert-team.ts";
 import { TaskboardError } from "../src/cli/model.ts";
 import { BoardStore, initializeBoard, validateCard } from "../src/cli/storage.ts";
-import { managerInbox } from "../src/cli/task-messages.ts";
-import { createTask } from "../src/cli/tasks.ts";
+import { managerInbox, sendTaskMessage, taskQuestionAudience, taskQuestionState } from "../src/cli/task-messages.ts";
+import { changeTask, createTask } from "../src/cli/tasks.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8");
 const start = source.indexOf("export function replyToTask(");
@@ -70,6 +70,102 @@ test("draft manager replies are linked, persisted once, and survive a concurrent
   assert.equal(ready.draftConfirmed, true);
   assert.equal(ready.draftManagerReplyThrough, second.sequence);
   assert.equal(ready.draftDiscussion, undefined);
+});
+
+test("saved owner and manager questions resolve independently", t => {
+  const root = mkdtempSync(join(tmpdir(), "task-question-audience-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  const store = initializeBoard(location, store => store);
+  const id = "T-0001";
+  const read = () => readTask(new BoardStore(location), id);
+  const audience = () => taskQuestionAudience(read());
+  store.create({
+    ...createTask(id, { title: "Publication format", criteria: ["Publish the report."] }),
+    awaitingAnswer: true,
+    draftDiscussion: { phase: "running" },
+  });
+  assert.equal(audience(), "owner");
+
+  const question = sendTeamMessage(store, id, id, { to: "manager", kind: "question", text: "Which format?" });
+  assert.equal(audience(), "manager");
+  assert.throws(() => changeTask(read(), "approve", {}), { code: "TASK_AWAITING_ANSWER" });
+  sendTeamMessage(store, id, "manager", { to: id, text: "Checking the format." });
+  assert.equal(audience(), "manager");
+  const answer = sendTeamMessage(store, id, "manager", { to: id, text: "Use CSV.", replyTo: question.sequence });
+  assert.equal(audience(), "manager");
+
+  const input = {
+    actor: "agent", model: "fixture", effort: "low", draftDiscussion: true, revision: read().revision,
+    text: "Who signs off on the CSV?", awaitingAnswer: true, managerReply: answer.sequence,
+  };
+  for (const invalid of ["true", 1, null]) {
+    assert.throws(() => addChatMessage(store, read(), { ...input, awaitingOwnerAnswer: invalid }), { code: "INVALID_INPUT" });
+  }
+  addChatMessage(store, read(), { ...input, awaitingOwnerAnswer: true });
+  assert.equal(audience(), "owner");
+
+  const destination = sendTeamMessage(store, id, id, { to: "manager", kind: "question", text: "Which destination?" });
+  assert.equal(audience(), "owner");
+  assert.equal(taskQuestionAudience({ ...read(), status: "cancelled" }), undefined);
+  const destinationReply = sendTeamMessage(store, id, "manager", { to: id, text: "Use the shared folder.", replyTo: destination.sequence });
+  store.save({ ...read(), draftDiscussion: { phase: "running", managerReply: destinationReply.sequence } });
+  addChatMessage(store, read(), {
+    actor: "agent", model: "fixture", effort: "low", draftDiscussion: true,
+    revision: read().revision, managerReply: destinationReply.sequence,
+    text: "Both clarifications are complete.", awaitingAnswer: false, awaitingOwnerAnswer: false,
+  });
+  assert.equal(audience(), undefined);
+  assert.equal(read().draftConfirmed, true);
+  assert.equal(changeTask(read(), "approve", {}).status, "ready");
+});
+
+test("an active task waits only for explicitly linked manager answers", () => {
+  const task = { ...createTask("T-0001", { title: "Report" }), status: "in_progress" as const };
+  const update = sendTaskMessage(task, { text: "Do we have a format? I will check." }, "agent");
+  assert.equal(taskQuestionAudience(update), undefined);
+
+  const question = sendTaskMessage(update, { kind: "question", text: "Which format?" }, "agent");
+  assert.equal(taskQuestionAudience(question), "manager");
+  const unrelated = sendTaskMessage(question, { text: "I have an update." }, "manager");
+  assert.equal(taskQuestionAudience(unrelated), "manager");
+
+  const answer = sendTaskMessage(unrelated, { text: "Use CSV.", replyTo: question.history.length }, "manager");
+  assert.equal(taskQuestionAudience(answer), undefined);
+});
+
+test("team questions use the saved recipient and close only on a linked reply from that recipient", t => {
+  const root = mkdtempSync(join(tmpdir(), "task-team-question-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  const store = initializeBoard(location, store => store);
+  const id = "T-0001";
+  const read = () => readTask(new BoardStore(location), id);
+  const audience = () => taskQuestionAudience(read());
+  store.create({ ...createTask(id, { title: "Report" }), status: "review" });
+  const ask = (sender: string, to: string, text: string) =>
+    sendTeamMessage(store, id, sender, { kind: "question", to, text });
+
+  const owner = ask(id, "owner", "Who should receive the report?");
+  const manager = ask("reviewer", "manager", "Which format is approved?");
+  const secondManager = ask(id, "manager", "Where should we publish it?");
+  assert.equal(audience(), "owner");
+
+  sendTeamMessage(store, id, "manager", { to: id, replyTo: owner.sequence, text: "The team." });
+  sendTeamMessage(store, id, "owner", { to: "reviewer", replyTo: owner.sequence, text: "The team." });
+  sendTeamMessage(store, id, "owner", { to: id, text: "Thanks." });
+  sendTeamMessage(store, id, "owner", { kind: "question", to: id, replyTo: owner.sequence, text: "Which report?" });
+  assert.equal(audience(), "owner");
+  assert.deepEqual(taskQuestionState(read()).openOwnerQuestionSequences, [owner.sequence]);
+  assert.deepEqual(taskQuestionState({ ...read(), status: "cancelled" }).openOwnerQuestionSequences, []);
+
+  sendTeamMessage(store, id, "owner", { to: id, replyTo: owner.sequence, text: "The team." });
+  assert.equal(audience(), "manager");
+  assert.deepEqual(taskQuestionState(read()).openOwnerQuestionSequences, []);
+  sendTeamMessage(store, id, "manager", { to: id, replyTo: secondManager.sequence, text: "Use the shared folder." });
+  assert.equal(audience(), "manager");
+  sendTeamMessage(store, id, "manager", { to: "reviewer", replyTo: manager.sequence, text: "Use CSV." });
+  assert.equal(audience(), undefined);
 });
 
 function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false, prompt = "{}") {
@@ -139,10 +235,12 @@ test("T-0140 question reconciliation uses the same rules in auto review and draf
 
 test("both discussion modes return explicit question state without parsing punctuation", async () => {
   for (const questions of ["Which format and destination?", ""]) {
-    const f = providerResult({ text: JSON.stringify({ questions }), commentary: ["hidden"] }, "initial");
+    const awaitingOwnerAnswer = Boolean(questions);
+    const f = providerResult({ text: JSON.stringify({ questions, awaitingOwnerAnswer }), commentary: ["hidden"] }, "initial");
     const result = await f.pending;
     assert.equal(result.text, questions);
-    assert.equal(result.awaitingAnswer, Boolean(questions));
+    assert.equal(result.awaitingAnswer, awaitingOwnerAnswer);
+    assert.equal(result.awaitingOwnerAnswer, awaitingOwnerAnswer);
     assert.deepEqual([...result.commentary], []);
   }
   for (const [text, awaitingAnswer] of [
@@ -150,13 +248,19 @@ test("both discussion modes return explicit question state without parsing punct
     ["Ready. Questions? Optional help is available.", false], ["All received.", false],
     ["The remaining question is no longer needed.", false],
   ] as const) {
-    const f = providerResult({ text: JSON.stringify({ text, awaitingAnswer }), attachmentSources: [{ name: "result.png" }] });
+    const f = providerResult({
+      text: JSON.stringify({ text, awaitingAnswer, awaitingOwnerAnswer: awaitingAnswer }),
+      attachmentSources: [{ name: "result.png" }],
+    });
     const result = await f.pending;
     assert.equal(result.text, text);
     assert.equal(result.awaitingAnswer, awaitingAnswer);
+    assert.equal(result.awaitingOwnerAnswer, awaitingAnswer);
     assert.equal(result.attachmentSources[0].name, "result.png");
-    assert.ok(f.options().finalAnswerSchema.required.includes("awaitingAnswer"));
+    assert.ok(f.options().finalAnswerSchema.required.includes("awaitingOwnerAnswer"));
   }
+  const manager = providerResult({ text: '{"text":"Waiting for the manager.","awaitingAnswer":true,"awaitingOwnerAnswer":false}' });
+  assert.equal((await manager.pending).awaitingOwnerAnswer, false);
 });
 
 test("draft dialogue requires explicit confirmation independently of open questions", async () => {

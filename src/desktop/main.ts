@@ -1282,7 +1282,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     })) : undefined;
     const prompt = JSON.stringify({
       task: { id, title: task.title, status: task.status, description: task.description,
-        criteria: task.criteria, openQuestions: task.questions, awaitingAnswer: task.awaitingAnswer, tags: task.tags, priority: task.priority,
+        criteria: task.criteria, openQuestions: task.questions, awaitingAnswer: task.awaitingAnswer,
+        awaitingOwnerAnswer: task.awaitingOwnerAnswer, tags: task.tags, priority: task.priority,
         subtasks: task.subtasks, dependencies: task.dependencies, milestone: task.milestone, dueDate: task.dueDate,
         schedule: task.schedule, workingDirectory: task.workingDirectory, execution: task.execution, expertTeam: task.expertTeam,
         summary: task.summary, nextStep: task.nextStep },
@@ -1333,7 +1334,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       project, card, card.history[target.index]?.text ?? "", revision => {
         target.revision = revision;
         notify({ type: "changed" });
-      }, requestChanges, receipt => { target.reviewConfirmation = reviewModeConfirmation(receipt); },
+      }, requestChanges, target.index + 1, receipt => {
+        target.reviewConfirmation = reviewModeConfirmation(receipt);
+      },
     );
     let runAction = actionsFor(task, replyTarget);
     const ready = Promise.withResolvers<AgentControl>();
@@ -4354,7 +4357,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
         // A manual retry starts fresh even if shutdown left the exhausted turn's checkpoint behind.
         const path = join(runtimeLocation(project).directory, "reviewer-quota-" + id + ".json");
         const binding = JSON.stringify([
-          submissionSequence, evidence.targetHead, expectedMode, settings,
+          submissionSequence, evidence.reviewDecision, evidence.targetHead, expectedMode, settings,
           ...(retry?.manual ? ["manual"] : []),
         ]);
         let checkpoint: { binding: string; threadId?: string; candidate?: Partial<ReviewReport>;
@@ -4420,7 +4423,8 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
   const queueRetry = { retryBusy: false };
   const recordDecision = async (report: ReviewReport, pending: PendingReviewDecision) => {
     const { retryAfter: _retryAfter, ...binding } = pending;
-    const input = { ...binding, reviewModeVersion: binding.reviewModeVersion ?? null, actor: "reviewer" };
+    const input = { ...binding, reviewModeVersion: binding.reviewModeVersion ?? null, actor: "reviewer",
+      ownerQuestion: report.ownerQuestion ?? undefined };
     const note = (summary: string) => callCli(project, ["review-note", id, "--compact"], { ...input, summary }, queueRetry);
     const needsMoreEvidence = !report.findings.length && (!report.evidence.length || report.evidence.includes(null));
     if (report.needsHuman || needsMoreEvidence) return note(report.summary);

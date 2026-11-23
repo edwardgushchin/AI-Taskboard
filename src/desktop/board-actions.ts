@@ -313,7 +313,14 @@ type TaskReview = { revision: number; targetHead: string | null; stale: boolean;
   artifacts: Pick<NonNullable<Task["artifacts"]>[number], "source" | "sha256">[];
   submitted?: string; mergeBase?: string; submissionSequence: number;
   targetChangesSinceReview?: ReviewChanges; submissionChangesSinceReview?: ReviewChanges };
-export type ReviewReport = { summary: string; findings: string[]; evidence: (string | null)[]; needsHuman: boolean; verifyRisk?: boolean };
+export type ReviewReport = {
+  summary: string;
+  findings: string[];
+  evidence: (string | null)[];
+  needsHuman: boolean;
+  verifyRisk?: boolean;
+  ownerQuestion?: string | null;
+};
 export type PendingReviewDecision = {
   revision: number;
   targetHead: string | null;
@@ -334,6 +341,8 @@ type ReviewRunner = (settings: BoardAgentSettings | null | undefined, context: s
 function validReviewReport(value: unknown, criteriaCount: number): value is ReviewReport {
   const report = value as Partial<ReviewReport> | null;
   return Boolean(report && typeof report.summary === "string" && report.summary.trim() &&
+    (report.ownerQuestion == null || (typeof report.ownerQuestion === "string" &&
+      report.ownerQuestion.trim().length > 0 && report.ownerQuestion.trim().length <= 4000)) &&
     typeof report.needsHuman === "boolean" && Array.isArray(report.findings) && report.findings.every(entry =>
       typeof entry === "string" && Boolean(entry.trim())) && Array.isArray(report.evidence) &&
     report.evidence.length === criteriaCount && report.evidence.every(entry =>
