@@ -1187,7 +1187,11 @@ function boardCodexBudget(project: string, settings?: BoardSettings) {
 
 function boardBudgetFailure(project: string, settings?: BoardSettings) {
   const budget = boardCodexBudget(project, settings);
-  if (budget?.reason === "exhausted") return cliFailure("BOARD_CODEX_BUDGET", t("limits.board.exhausted"));
+  if (budget?.reason === "exhausted") return dailyBudgetFailure();
+}
+
+function dailyBudgetFailure() {
+  return cliFailure("BOARD_CODEX_BUDGET", t("limits.board.exhausted"));
 }
 
 function saveDailyUsage(project: string, role: CodexBudgetRole, report: TokenUsageReport, task?: string) {
@@ -1545,7 +1549,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       const result = await callCli<Task>(project, ["chat", id], { deferAt: deferredIndex });
       return { saved, result };
     }
-    if (interruptedForLimit(signal)) return { saved, result: quotaFailure() };
+    if (signal.reason === dailyBudgetInterruption) return { saved, result: dailyBudgetFailure() };
+    if (signal.reason === quotaInterruption) return { saved, result: quotaFailure() };
     const message = error instanceof Error ? error.message : String(error);
     discussionFailure = message;
     return { saved, result: cliFailure("CHAT_FAILED", message.slice(0, 1500)) };
@@ -4259,7 +4264,6 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       }));
     await pendingAction;
     signal.throwIfAborted();
-    if (interruptedForLimit(signal)) return quotaFailure();
     if ("interrupted" in response) return { ok: true as const, data: {
       answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: t("ui.reply_stopped_c7fee9e0"), id: threadId,
       keepQueued: Boolean(queuedPath && !acceptedMessage),
@@ -4304,7 +4308,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       const saved = readBoardThread(binding);
       if (saved?.goal?.status === "active") writeJson(binding, { ...saved, budgetDeferred: true });
     }
-    if (interruptedForLimit(operation.controller.signal)) return quotaFailure();
+    if (signal.reason === dailyBudgetInterruption) return dailyBudgetFailure();
+    if (signal.reason === quotaInterruption) return quotaFailure();
     if (cancelledWhileWaiting) return cliFailure("BOARD_WAIT_CANCELLED", "");
     const message = t("ui.could_not_complete_the_board_request_91ea559c") + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500);
     if (goalSet || changes.length || acceptedMessage) {
