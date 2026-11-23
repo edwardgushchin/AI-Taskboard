@@ -286,7 +286,7 @@ async function runCheck() {
         subscribe() {}, onChatUpdate() {}, onTheme() {},
         bootstrap: () => new Promise(() => {}),
         chatModels: async () => ({ ok: true, data: [] }),
-        reviewerChat: async () => ({ ok: true, data: structuredClone(reviewers) }),
+        reviewerChat: async () => ({ ok: true, data: { attempts: structuredClone(reviewers), boundaries: reviewers } }),
         command: async action => ({
           ok: true,
           data: action === "show" ? structuredClone(fixture) : [{ id: "frontend-developer", name: "Фронтенд-разработчик" }],
@@ -482,10 +482,10 @@ async function runCheck() {
     await verify(`stageAt(4).open && ordered(stageAt(4).textContent, ["Передача ревьюеру", "git diff --check",
       "Проверен журнал этапа исполнения.", "Ревью этапа завершено."])`,
       "После повторного открытия карточки восстановлены координация, действия специалиста и итог ревью.");
-    await evaluate('byId("task-review-history").open = true; void 0');
-    await verify(`visible(byId("task-review-history").querySelector(".task-review-attempt")) &&
-      byId("task-review-history").textContent.includes("Ведущий открыл материалы ревью.") &&
-      !/ЧУЖОЙ РЕВЬЮЕР|Проверен журнал этапа исполнения|git diff --check/.test(byId("task-review-history").textContent)`,
+    await evaluate('document.querySelector("[aria-controls=task-chat-work]").click()');
+    await verify(`visible(byId("task-chat-work").querySelector(".chat-run[data-actor=reviewer]")) &&
+      byId("task-chat-work").querySelector(".chat-run[data-actor=reviewer]").textContent.includes("Ведущий открыл материалы ревью.") &&
+      !/ЧУЖОЙ РЕВЬЮЕР|Проверен журнал этапа исполнения|git diff --check/.test(byId("task-chat-work").querySelector(".chat-run[data-actor=reviewer]").textContent)`,
       "Полный журнал ревью показывает ведущего. Команда и пояснение дочернего потока остаются в журнале этапа.");
     await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click(); void 0`);
     await verify(`visible(byId("task-chat-work")) && byId("task-chat-work").textContent.includes("ПОДГОТОВКА СЕАНСА") &&

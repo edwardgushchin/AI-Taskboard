@@ -63,7 +63,7 @@ import { linkedDraftManagerReply, matchesDraftDependency, needsManagerAttention 
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
 import { routingRetryDelayMs } from "./codex-routing-timeout.ts";
 import { reviewDecisionSequence } from "../cli/expert-team.ts";
-import { readReviewerChat, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
+import { readReviewerChatPage, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
 import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { backgroundGoalHistory } from "./goal-history-background.ts";
@@ -2586,11 +2586,12 @@ ipcMain.handle("board:stageRunHistory", (event, id: unknown) => {
   }
 });
 
-ipcMain.handle("board:reviewerChat", (event, id: unknown) => {
+ipcMain.handle("board:reviewerChat", (event, id: unknown, before: unknown) => {
   const { project } = stateOf(event);
   if (!project || typeof id !== "string" || !taskIdPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
   try {
-    return { ok: true, data: readReviewerChat(project, id) };
+    if (before !== undefined && typeof before !== "string") return cliFailure("INVALID_INPUT", t("errors.f6cce3ef8b13aaf9"));
+    return { ok: true, data: readReviewerChatPage(project, id, before) };
   } catch (error) {
     return cliFailure("REVIEWER_CHAT_FAILED", (error as Error).message);
   }
@@ -4436,7 +4437,16 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
             catch (error) { console.warn("Could not remove the completed reviewer checkpoint.", error); }
           }
         }
-      }, () => signal.reason === quotaInterruption);
+      }, () => signal.reason === quotaInterruption, submissionSequence, result => {
+        const report = result as Partial<ReviewReport> | null;
+        if (typeof report?.summary !== "string" || typeof report.needsHuman !== "boolean" ||
+            !Array.isArray(report.findings) || !report.findings.every(finding => typeof finding === "string") ||
+            !Array.isArray(report.evidence) || !report.evidence.every(entry => entry === null || typeof entry === "string")) {
+          return undefined;
+        }
+        const { summary, findings, evidence, needsHuman } = report;
+        return { summary, findings, evidence, needsHuman };
+      }, startedAtMs);
     }, reports);
   const notify = (error: string) => {
     if (!signal.aborted && !quotaWait) broadcastBoardChat(project, "orchestrator-review-error", { id, error: id + " · " + error });

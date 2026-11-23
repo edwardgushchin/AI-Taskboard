@@ -8,6 +8,10 @@ export type ReviewerAttempt = {
   at: string;
   items: RunActivity[];
   durationMs?: number;
+  finishedAt?: string;
+  submissionSequence?: number;
+  report?: { summary: string; findings: string[]; evidence: (string | null)[]; needsHuman: boolean };
+  interrupted?: true;
   error?: string;
 };
 
@@ -43,35 +47,53 @@ export function readReviewerChat(project: string, id: string) {
   return [...current.history, current.attempt];
 }
 
+export function readReviewerChatPage(project: string, id: string, before?: string) {
+  const history = readReviewerChat(project, id);
+  const end = before === undefined ? history.length : history.findIndex(attempt => attempt.id === before);
+  if (end < 0) throw new Error("Reviewer history cursor is unavailable.");
+  const start = Math.max(0, end - 10);
+  return {
+    attempts: history.slice(start, end),
+    boundaries: history.map(({ id, at, submissionSequence }) => ({ id, at, submissionSequence })),
+    ...(start > 0 ? { before: history[start].id } : {}),
+  };
+}
+
 export async function withReviewerChat<T>(project: string, id: string, notify: () => void,
-  run: (onActivity: (items: RunActivity[]) => void) => Promise<T>, interrupted?: () => boolean): Promise<T> {
+  run: (onActivity: (items: RunActivity[]) => void) => Promise<T>, interrupted?: () => boolean,
+  submissionSequence?: number, report?: (result: T) => ReviewerAttempt["report"], startedAtMs = Date.now()): Promise<T> {
   const path = historyPath(project, id);
   const started = performance.now();
-  const attempt: ReviewerAttempt = { id: randomUUID(), at: new Date().toISOString(), items: [] };
+  const attempt: ReviewerAttempt = { id: randomUUID(), at: new Date(startedAtMs).toISOString(), items: [], submissionSequence };
   const current: { attempt: ReviewerAttempt; history?: ReviewerAttempt[] } = { attempt };
   active.set(path, current);
   let notifyTimer: NodeJS.Timeout | undefined;
   notify();
   try {
-    return await run(items => {
+    const result = await run(items => {
       attempt.items = items;
       notifyTimer ??= setTimeout(() => {
         notifyTimer = undefined;
         notify();
       }, 100);
     });
+    attempt.report = report?.(result);
+    return result;
   } catch (error) {
-    if (!interrupted?.()) {
+    if (interrupted?.()) {
+      attempt.interrupted = true;
+    } else {
       attempt.error = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
     }
     throw error;
   } finally {
     clearTimeout(notifyTimer);
+    attempt.finishedAt = new Date().toISOString();
     attempt.durationMs = Math.round(performance.now() - started);
     try {
       directory(dirname(dirname(path)));
       directory(dirname(path), true);
-      writeJson(path, [...(current.history ?? savedAttempts(path)), attempt].slice(-10));
+      writeJson(path, [...(current.history ?? savedAttempts(path)), attempt]);
     } catch (error) {
       console.warn("Could not save the reviewer chat.", (error as Error).message);
     } finally {

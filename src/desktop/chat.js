@@ -14,6 +14,7 @@ function appendChatTime(entry, at) {
 }
 
 const chatDrafts = new Map();
+let lastTaskReview;
 let chatCatalog;
 const chatPreviews = new IntersectionObserver(entries => {
   for (const { isIntersecting, target } of entries) {
@@ -216,6 +217,32 @@ function goalTimeline(turns, live, pending = []) {
   });
 }
 
+function viewedRunImages(items) {
+  const images = new Map();
+  for (const item of items) {
+    const image = runImageFile(item);
+    if (image) images.set(item, image);
+  }
+  return images;
+}
+
+function finalRunMessages(items) {
+  const finalItems = new Set();
+  const boundary = items.findLastIndex(item => item.userMessage);
+  const finalSegment = boundary === -1 ? items : items.slice(boundary + 1);
+  const finalTurnId = finalSegment.at(-1)?.providerTurnId;
+  const finalTurn = finalSegment.filter(item => item.providerTurnId === finalTurnId);
+  for (const item of finalTurn) {
+    if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) finalItems.add(item);
+  }
+  // Older logs have no phase. Their last completed message is the final reply.
+  if (!finalItems.size && !finalTurn.some(item => item.type === "agentMessage" && item.phase)) {
+    const last = finalTurn.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
+    if (last) finalItems.add(last);
+  }
+  return finalItems;
+}
+
 function renderRunActivity(container, items, completed = false, durationMs, taskId, context) {
   const messageContext = { ...(context ?? { taskId: taskId ?? taskInSheet?.id }), agent: true };
   const previous = new Map([...container.querySelectorAll("details")].map(entry => [entry.dataset.item, entry.open]));
@@ -244,13 +271,9 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   const seen = new Set(context?.seenMessages);
   const nodeActivities = new Map();
   const taskEventRows = new Set();
-  const viewedImages = new Map();
-  if (taskId || context?.dialogue || context?.managerWork) {
-    for (const item of items) {
-      const image = runImageFile(item);
-      if (image) viewedImages.set(item, image);
-    }
-  }
+  const viewedImages = context?.taskRunImages ?? viewedRunImages(
+    taskId || context?.dialogue || context?.managerWork ? items : [],
+  );
   const images = [...viewedImages.values()];
   const managerImages = new Map();
   const managerImageTiles = new Map([...container.querySelectorAll("[data-manager-image]")].map(tile =>
@@ -317,20 +340,11 @@ function renderRunActivity(container, items, completed = false, durationMs, task
       entry.dataset.generatedAnswer = item.id;
     }
   }
-  const finalItems = new Set();
+  let finalItems = new Set();
   if (completed && !context?.managerWork) {
-    const boundary = items.findLastIndex(item => item.userMessage);
-    const finalSegment = boundary === -1 ? items : items.slice(boundary + 1);
-    const finalTurnId = finalSegment.at(-1)?.providerTurnId;
-    const finalTurn = finalSegment.filter(item => item.providerTurnId === finalTurnId);
-    for (const item of finalTurn) {
-      if (item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) finalItems.add(item);
-    }
-    // Older logs have no phase. Their last completed message is the final reply.
-    if (!finalItems.size && !finalTurn.some(item => item.type === "agentMessage" && item.phase)) {
-      const last = finalTurn.findLast(item => item.type === "agentMessage" && item.status === "completed" && item.text.trim());
-      if (last) finalItems.add(last);
-    }
+    finalItems = context?.taskRunFinalItems
+      ? new Set(items.filter(item => context.taskRunFinalItems.has(item)))
+      : finalRunMessages(items);
   }
   let operations = [];
   function operation(item) {
@@ -537,7 +551,10 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     const work = element("details", undefined, "chat-work");
     const first = batch.find(node => node.dataset.item)?.dataset.item;
     if (context?.managerWork && first) key = "work:" + activityRowKey(first);
-    if (context?.taskRunSequence !== undefined) key = key + ":run:" + context.taskRunSequence;
+    if (context?.taskRunSequence !== undefined) {
+      key += ":run:" + context.taskRunSequence;
+      if (context.taskRunSegment) key += ":" + context.taskRunSegment;
+    }
     work.dataset.item = key;
     if (first) work.dataset.chatAnchor = "work:" + first;
     work.open = previous.get(key) ?? (context?.taskRunSequence !== undefined);
@@ -555,7 +572,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
   if (completed && nodes.length) {
     let label = () => {
-      if (context?.managerWork) return t("ui.work_details_e9890a2e");
+      if (context?.managerWork || context?.taskRunSegment) return t("ui.work_details_e9890a2e");
       if (!Number.isSafeInteger(durationMs) || durationMs < 0) return t("ui.completed_a863c619");
       const seconds = Math.floor(durationMs / 1000), minutes = Math.floor(seconds / 60);
       const unit = (value, name) => new Intl.NumberFormat(localization.locale, {style:"unit",unit:name,unitDisplay:"short"}).format(value);
@@ -659,7 +676,7 @@ function updateChat({ project, id, type, text, items, savedRevision, savedRun, r
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
-    if (open) byId("task-review-history")?.refreshReview?.();
+    if (open) byId("task-side").firstElementChild?.refreshReview();
     return;
   }
   if (type === "discussion" && frame.project === project) {
@@ -752,98 +769,34 @@ function isTaskChatReplacement(event, task) {
   return task.codexServiceThreads?.some(id => id !== task.codexThreadId && event.text?.endsWith("`" + id + "`"));
 }
 
-function reviewerHistory(task, journal, decisions, onActivity) {
-  const project = frame.project;
-  const status = element("li", undefined, "muted");
-  status.setAttribute("role", "status");
-  status.hidden = true;
-  journal.append(status);
-  const nodes = new Map();
-  let timer;
-  let generation = 0;
-  return () => {
-    if (timer !== undefined) return;
-    timer = setTimeout(() => {
-      timer = undefined;
-      if (journal.isConnected && (onActivity || journal.closest("details")?.open)) void load();
-    }, 200);
-  };
-
-  async function load() {
-    const request = ++generation;
+function reviewerItems(attempt) {
+  const seen = new Set();
+  return attempt.items.flatMap(item => {
+    if (item.stageChild || collaborationItem(item)) return [];
+    const id = JSON.stringify([item.threadId, item.id]);
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const entry = { ...item, id: attempt.id + ":" + encodeURIComponent(item.threadId ?? "") + ":" + item.id };
+    if (item.type !== "agentMessage" || item.phase === "commentary") return [entry];
+    if (item.status !== "completed") return [];
     try {
-      const result = await api.reviewerChat(task.id);
-      if (!journal.isConnected || project !== frame.project || request !== generation) return;
-      if (!result.ok) throw new Error(boardError(result.error));
-      const attempts = result.data;
-      onActivity?.(attempts.flatMap(attempt => attempt.items));
-      if (!journal.closest("details")?.open) return;
-      const ids = new Set(attempts.map(attempt => attempt.id));
-      for (const [id, node] of nodes) {
-        if (ids.has(id)) continue;
-        node.entry.remove();
-        nodes.delete(id);
-      }
-      const history = decisions.map(({ entry }) => entry);
-      for (const [index, attempt] of attempts.entries()) {
-        let node = nodes.get(attempt.id);
-        if (!node) {
-          const entry = element("li", undefined, "chat-entry task-review-attempt");
-          entry.dataset.actor = "reviewer";
-          const label = element("span", undefined, "chat-coordination-header");
-          const activity = element("div", undefined, "chat-run");
-          const error = element("p", undefined, "chat-run-error");
-          entry.append(label, activity, error);
-          journal.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
-          node = { entry, label, activity, error };
-          nodes.set(attempt.id, node);
-        }
-        if (node.finished && node.index === index) continue;
-        node.index = index;
-        node.finished = attempt.durationMs !== undefined;
-        bindLocalized(node.label, "textContent", () => t("ui.reviewer_50c42665") + " #" + (index + 1) +
-          " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
-        node.error.textContent = attempt.error ?? "";
-        node.error.hidden = !attempt.error;
-        node.report = undefined;
-        const items = attempt.items.flatMap(item => {
-          if (item.stageChild || collaborationItem(item)) return [];
-          if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
-          if (item.status !== "completed") return [];
-          node.report = undefined;
-          try {
-            const { summary, findings, evidence } = JSON.parse(item.text);
-            if (typeof summary !== "string") return [item];
-            const reportFindings = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
-            node.report = { summary: summary.trim(), reason: reportFindings.join("\n\n").trim() };
-            const notes = reportFindings.map(text => "- " + text).join("\n");
-            const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
-              typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
-            return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
-          } catch { return [item]; }
-        });
-        renderRunActivity(node.activity, items, false, undefined, task.id, { reviewer: true });
-      }
-      const matched = new Set();
-      for (const { entry, event, submittedAt } of decisions) {
-        const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
-        const node = attempt && nodes.get(attempt.id);
-        // Keep the card's decision event and hide only the text also shown in its attempt.
-        const reportText = event.action === "request-changes" ? node?.report?.reason : node?.report?.summary;
-        entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
-          reportText === event.text.trim());
-        if (entry.hidden) matched.add(attempt.id);
-      }
-      status.hidden = attempts.length > 0 || decisions.length > 0;
-      if (!status.hidden) {
-        bindLocalized(status, "textContent", () => t("ui.no_reviewer_messages_yet_25b5caaf"));
-      }
-    } catch (error) {
-      if (!journal.isConnected || project !== frame.project || request !== generation) return;
-      status.hidden = false;
-      bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
+      const { summary, findings, evidence } = JSON.parse(item.text);
+      if (typeof summary !== "string") return [entry];
+      const notes = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
+      const checks = Array.isArray(evidence) ? evidence : [];
+      return [{ ...entry, text: reviewReportText({ summary, findings: notes, evidence: checks }) }];
+    } catch {
+      return [entry];
     }
-  }
+  });
+}
+
+function reviewReportText(report) {
+  const notes = report.findings.map(text => "- " + text).join("\n");
+  // Markdown ordered lists renumber entries. Keep the criterion numbers as text.
+  const checks = report.evidence.flatMap((text, index) =>
+    typeof text === "string" ? [(index + 1) + "\\. " + text] : []).join("\n\n");
+  return [report.summary, notes, checks].filter(Boolean).join("\n\n");
 }
 
 function collaborationData(item) {
@@ -999,7 +952,7 @@ function stageWork(task, panels) {
   };
 }
 
-function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
+function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasReviewStages) {
   const project = frame.project;
   const key = project + "\0" + task.id;
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
@@ -1024,6 +977,36 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
   const workViewport = chatViewport(work);
+  const hasReviewHistory = task.status === "review" ||
+    task.history.some(event => ["submit", "request-changes"].includes(event.action) || event.actor === "reviewer");
+  // Preserve loaded pages on refresh and immediate reopen without retaining every card's transcript.
+  if (lastTaskReview?.key !== key) {
+    lastTaskReview = { key, attempts: new Map() };
+  }
+  const review = lastTaskReview;
+  const workRows = new Map();
+  const workLogs = new Map();
+  const rank = (at, ...order) => [Date.parse(at) || 0, ...order];
+  function compareRank(left, right) {
+    for (let index = 0; index < Math.max(left.length, right.length); index++) {
+      const difference = (left[index] ?? 0) - (right[index] ?? 0);
+      if (difference) return difference;
+    }
+    return 0;
+  }
+  function placeWork(row, key, order) {
+    row.dataset.chatAnchor = key;
+    workRows.set(row, order);
+  }
+  function marker(key, order, at, actor, label, text, body = chatText) {
+    const row = element("li", undefined, "chat-entry chat-event");
+    row.dataset.actor = actor;
+    row.append(element("span", label, "chat-action"));
+    if (text) row.append(body(text, { taskId: task.id, reviewer: actor === "reviewer" }));
+    appendChatTime(row, at);
+    placeWork(row, key, order);
+    return row;
+  }
   let workHistory = draft.workHistory;
   if (!workHistory || workHistory.threadId !== task.codexThreadId) {
     workHistory = { threadId: task.codexThreadId, restoredRuns: new Map() };
@@ -1042,9 +1025,90 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
       ? document.activeElement.parentElement.dataset.item
       : undefined,
   });
-  const renderWork = (log, items, durationMs, sequence) =>
-    renderRunActivity(log, items, sequence !== undefined, durationMs, task.id,
-      { taskId: task.id, taskRunSequence: sequence });
+  function registerWorkLog(log, key, items, order, render) {
+    const state = workLogs.get(log) ?? { segments: [] };
+    Object.assign(state, { log, key, items, order, render });
+    workLogs.set(log, state);
+  }
+
+  function layoutWork() {
+    const entries = [...workRows].map(([row, order]) => ({ row, order }));
+    for (const state of workLogs.values()) {
+      state.segmentCount = 0;
+      state.items.forEach((item, index) => {
+        entries.push({ item, state, order: state.order(item, index) });
+      });
+    }
+    entries.sort((left, right) => compareRank(left.order, right.order));
+    const rows = [];
+    for (let index = 0; index < entries.length;) {
+      const previous = entries[index - 1];
+      const entry = entries[index++];
+      if (entry.row) {
+        rows.push(entry.row);
+        continue;
+      }
+      const { state } = entry;
+      const items = [entry.item];
+      while (entries[index]?.state === state) {
+        items.push(entries[index++].item);
+      }
+      const number = state.segmentCount++;
+      let segment = state.segments[number];
+      if (!segment) {
+        const row = number === 0 ? state.log : element("li", undefined, state.log.className);
+        row.dataset.actor = state.log.dataset.actor ?? "agent";
+        segment = { row };
+        state.segments[number] = segment;
+      }
+      // Use the separator so an earlier item added to this segment keeps its fold key.
+      let boundary;
+      if (number > 0) {
+        boundary = previous.row
+          ? JSON.stringify(["marker", previous.row.dataset.chatAnchor])
+          : JSON.stringify(["activity", previous.state.key, previous.item.id]);
+      }
+      segment.row.dataset.chatAnchor = boundary ? state.key + ":" + boundary : state.key;
+      if (segment.render !== state.render || segment.boundary !== boundary ||
+          segment.items.length !== items.length || items.some((item, position) => item !== segment.items[position])) {
+        state.render(segment.row, items, boundary);
+        segment.items = items;
+        segment.render = state.render;
+        segment.boundary = boundary;
+      }
+      rows.push(segment.row);
+    }
+    for (const state of workLogs.values()) {
+      for (const segment of state.segments.splice(state.segmentCount)) {
+        segment.row.remove();
+      }
+      if (!state.segmentCount && state.log === liveRun) {
+        state.log.replaceChildren();
+        state.log.hidden = true;
+        rows.push(state.log);
+      }
+    }
+    let next = emptyWork;
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index];
+      if (row.parentElement !== work || row.nextSibling !== next) {
+        work.insertBefore(row, next);
+      }
+      next = row;
+    }
+    emptyWork.hidden = rows.some(row => !row.hidden);
+  }
+
+  function registerExecutorLog(log, key, items, at, sequence, durationMs) {
+    const order = (item, index) => rank(item.at ?? at, sequence ?? task.history.length + 1, 0, index);
+    registerWorkLog(log, key, items, order, (row, group, boundary) => {
+      renderRunActivity(row, group, sequence !== undefined, boundary ? undefined : durationMs, task.id, {
+        taskId: task.id,
+        taskRunSequence: sequence,
+        taskRunSegment: boundary,
+      });
+    });
+  }
   const savedWork = [];
   const savedStageItems = new Map();
   const files = new Map(task.attachments.map(file => [file.file, file]));
@@ -1056,12 +1120,22 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   const sessionStart = task.history.findLastIndex(event => isTaskChatReplacement(event, task));
+  const historyKey = index => String(index + 1).padStart(12, "0");
+  const itemKey = (item, threadId) => JSON.stringify([item.threadId ?? threadId, item.id]);
   const savedItems = new Set();
-  const addSavedItems = items => items.filter(item => {
+  const stageStarts = new Map();
+  const latestPlan = Object.fromEntries(["work", "review"].map(phase => [phase,
+    task.history.findLastIndex(event => event.action === "expert-plan" && (!event.expertPhase || event.expertPhase === phase)),
+  ]));
+  const reviewDecisions = [];
+  const submissions = [];
+  let submissionSequence = 0;
+  const addSavedItems = (items, threadId) => items.filter(item => {
     if (!taskWorkItem(item)) return false;
     if (item.type === "truncated") return true;
-    if (savedItems.has(item.id)) return false;
-    savedItems.add(item.id);
+    const key = itemKey(item, threadId);
+    if (savedItems.has(key)) return false;
+    savedItems.add(key);
     return true;
   });
   let day;
@@ -1076,19 +1150,65 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     if (event.expertMessage && !ownerQuestion) continue;
 
     if (renderStageWork && event.action === "run-log" && event.run?.length) savedStageItems.set(index, event.run);
+    const eventKey = historyKey(index);
+    if (["request-changes", "return-to-draft", "expert-plan", "start", "submit"].includes(event.action)) {
+      stageStarts.clear();
+    }
+    const stage = event.expertStageRun;
+    if (stage) {
+      const address = stage.phase + ":" + stage.key;
+      // A confirmed session survives a provider thread rebind.
+      const binding = JSON.stringify([stage.sessionId ?? stage.threadId, stage.targetHead]);
+      const plan = index > latestPlan[stage.phase] ? task.expertTeam?.[stage.phase] : undefined;
+      const definition = plan?.stages.find(candidate => candidate.key === stage.key);
+      const lead = stage.sessionId && definition && definition.expertId === plan.lead;
+      if (stage.state !== "running") {
+        stageStarts.delete(address);
+      } else if (event.expertStageStart || ((stage.agentId || lead) && stageStarts.get(address) !== binding)) {
+        stageStarts.set(address, binding);
+        const start = event.expertStageStart;
+        const label = () => [
+          t("work.expert_started"),
+          start?.expertName ?? definition?.expertId,
+          start?.stageTitle ?? definition?.title,
+        ].filter(Boolean).join(" · ");
+        savedWork.push(() => marker("stage:" + eventKey, rank(event.at, index + 1, 0), event.at, event.actor, label));
+      }
+    }
+    if (event.action === "submit") {
+      submissionSequence = index + 1;
+      submissions.push({ sequence: submissionSequence, at: event.at });
+    }
+    if (event.action === "request-changes" ||
+        (event.actor === "reviewer" && ["review-approve", "review-note"].includes(event.action))) {
+      const decision = { event, submissionSequence };
+      if (event.actor === "reviewer") reviewDecisions.push(decision);
+      savedWork.push(() => {
+        const authorKey = {
+          manager: "ui.project_manager_48697fa0",
+          reviewer: "ui.reviewer_50c42665",
+          user: "work.owner",
+          agent: "ui.agent_262834de",
+        }[event.actor];
+        const label = () => [t("work." + event.action), authorKey && t(authorKey)].filter(Boolean).join(" · ");
+        const row = marker("review-decision:" + eventKey, rank(event.at, index + 1, 1), event.at,
+          event.actor, label, event.text, text => reviewerFindings(text, task.id));
+        decision.body = event.text ? row.children[1] : undefined;
+      });
+    }
     const executorEvent = event.action === "run-log" && event.actor === "agent" && index > sessionStart &&
       (!event.runThreadId || event.runThreadId === task.codexThreadId);
     if (executorEvent) {
       const log = element("li", undefined, "chat-run");
       log.hidden = true;
       if (event.run?.length) {
-        const items = addSavedItems(event.run);
+        const items = addSavedItems(event.run, event.runThreadId ?? task.codexThreadId);
         if (items.length) {
-          work.append(log);
-          savedWork.push(() => renderWork(log, items, event.durationMs, index + 1));
+          savedWork.push(() => registerExecutorLog(
+            log, "run:" + eventKey, items, event.at, index + 1, event.durationMs,
+          ));
         }
       } else if (task.codexThreadId && event.durationMs !== undefined) {
-        work.append(log);
         missingRuns.set(index, { log, at: event.at, durationMs: event.durationMs });
       }
     }
@@ -1156,10 +1276,10 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     for (const [index, { log, at, durationMs }] of missingRuns) {
       const restoredItems = itemsAt(index) ?? [];
       if (renderStageWork && restoredItems.length) savedStageItems.set(index, restoredItems);
-      const items = addSavedItems(restoredItems);
+      const items = addSavedItems(restoredItems, task.codexThreadId);
       if (!items.length) continue;
       restoredRuns.set(index, { at, durationMs, items: restoredItems });
-      renderWork(log, items, durationMs, index + 1);
+      registerExecutorLog(log, "run:" + historyKey(index), items, at, index + 1, durationMs);
       restored++;
       lastRestored = log;
     }
@@ -1185,8 +1305,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
         let lastRestored;
         workViewport.update(() => {
           ({ restored, lastRestored } = renderRestoredRuns(index => result.data[index]));
+          layoutWork();
           if (restored) load.remove();
-        });
+        }, true);
         renderLiveStageWork();
         renderLiveWork();
         bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
@@ -1205,6 +1326,151 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   const liveRun = element("li", undefined, "chat-run chat-run-live");
   const emptyWork = element("li", () => t("ui.no_task_work"), "muted");
   work.append(liveRun, emptyWork);
+  const reviewControls = element("li", undefined, "task-work-controls");
+  const reviewStatus = element("span", undefined, "muted");
+  reviewStatus.setAttribute("role", "status");
+  const olderReviews = button(() => t("work.load_older_reviews"), () => refreshReview(review.before), "quiet");
+  olderReviews.hidden = !review.before;
+  reviewControls.append(olderReviews, reviewStatus);
+  reviewControls.hidden = true;
+  work.prepend(reviewControls);
+  const reviewNodes = new Map();
+  const olderBoundaries = new Map();
+  let reviewRequest;
+  let reviewDirty = false;
+
+  function renderReviews() {
+    for (const attempt of review.attempts.values()) {
+      const key = attempt.id;
+      const order = review.boundaries.findIndex(boundary => boundary.id === key) + 1;
+      const rowKey = "review:" + historyKey(order - 1) + ":";
+      const sequence = attempt.submissionSequence ?? submissions.findLast(entry => entry.at <= attempt.at)?.sequence ?? 0;
+      const reviewRank = (at, position, sourceTime = 0, index = 0) =>
+        rank(at, sequence, 2, order, position, sourceTime, index);
+      let node = reviewNodes.get(key);
+      if (!node) {
+        marker(rowKey + "0:" + key, reviewRank(attempt.at, 0), attempt.at,
+          "reviewer", () => t("work.review_started"));
+        const log = element("li", undefined, "chat-run");
+        log.dataset.actor = "reviewer";
+        node = { log };
+        reviewNodes.set(key, node);
+      }
+      if (node.attempt === attempt) continue;
+      node.attempt = attempt;
+      const items = reviewerItems(attempt);
+      node.report = attempt.report;
+      if (!node.report) {
+        const answer = attempt.items.findLast(item => item.type === "agentMessage" &&
+          item.phase !== "commentary" && item.status === "completed");
+        try {
+          const parsed = JSON.parse(answer?.text ?? "null");
+          if (typeof parsed?.summary === "string") node.report = parsed;
+        } catch {
+          // Older provider replies may be plain text.
+        }
+      }
+      const report = attempt.report && reviewReportText(attempt.report);
+      const reported = report && items.some(item => item.type === "agentMessage" &&
+        item.phase !== "commentary" && item.text === report);
+      // Keep early provider timestamps inside the attempt, with source order as the tie-breaker.
+      const taskRunImages = viewedRunImages(items);
+      const itemRank = (item, index) => {
+        const at = item.at > attempt.at ? item.at : attempt.at;
+        return reviewRank(at, 1, Date.parse(item.at ?? attempt.at) || 0, index);
+      };
+      registerWorkLog(node.log, rowKey + "1:" + key, items, itemRank, (row, group) => {
+        renderRunActivity(row, group, false, undefined, task.id, { taskId: task.id, reviewer: true, taskRunImages });
+      });
+
+      if (attempt.durationMs === undefined || node.finish) continue;
+      const finishedAt = attempt.finishedAt ?? new Date(Date.parse(attempt.at) + attempt.durationMs).toISOString();
+      const outcome = attempt.error ? "review_failed" : attempt.interrupted ? "review_interrupted" :
+        attempt.report?.needsHuman ? "review_needs_human" : attempt.report?.findings.length ? "review_findings" : "review_finished";
+      node.finish = marker(rowKey + "2:" + key, reviewRank(finishedAt, 2), finishedAt, "reviewer",
+        () => t("work." + outcome), attempt.error ?? (reported ? undefined : report));
+    }
+
+    const usedReports = new Set();
+    for (const { event, submissionSequence, body } of reviewDecisions) {
+      if (!body) continue;
+      const submittedAt = task.history[submissionSequence - 1]?.at ?? "";
+      const boundary = review.boundaries?.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at &&
+        (attempt.submissionSequence === undefined || attempt.submissionSequence === submissionSequence));
+      const node = boundary && reviewNodes.get(boundary.id);
+      const report = node?.finish && !node.attempt.error && node.report;
+      const duplicate = report && (event.action === "request-changes" && Array.isArray(report.findings)
+        ? report.findings.join("\n\n").trim() : report.summary.trim()) === event.text.trim();
+      body.hidden = Boolean(duplicate && !usedReports.has(node));
+      if (body.hidden) usedReports.add(node);
+    }
+
+    for (const { reviewTiming: timing } of task.tokenUsage?.reports ?? []) {
+      if (!timing) continue;
+      const { startedAtMs, durationMs, submissionSequence } = timing;
+      const key = "legacy-review:" + submissionSequence + ":" + startedAtMs;
+      const logged = review.boundaries?.some(attempt => (attempt.submissionSequence === undefined ||
+        attempt.submissionSequence === submissionSequence) &&
+        Math.abs(Date.parse(attempt.at) - startedAtMs) < (attempt.submissionSequence === undefined ? 10 : 1));
+      if (logged) {
+        for (const row of olderBoundaries.get(key) ?? []) {
+          row.remove();
+          workRows.delete(row);
+        }
+        olderBoundaries.delete(key);
+      } else if (!olderBoundaries.has(key) && review.boundaries) {
+        const startedAt = new Date(startedAtMs).toISOString();
+        const endedAt = new Date(startedAtMs + durationMs).toISOString();
+        olderBoundaries.set(key, [
+          marker(key + ":0", rank(startedAt, submissionSequence, 2, 0, 0), startedAt,
+            "reviewer", () => t("work.review_started")),
+          marker(key + ":1", rank(endedAt, submissionSequence, 2, 0, 1), endedAt,
+            "reviewer", () => t("work.review_finished")),
+        ]);
+      }
+    }
+    olderReviews.hidden = !review.before;
+    reviewControls.hidden = olderReviews.hidden && !reviewStatus.textContent;
+    layoutWork();
+  }
+
+  async function refreshReview(before) {
+    if (!hasReviewHistory || !api.reviewerChat || (work.hidden && !hasReviewStages)) return;
+    if (reviewRequest) {
+      reviewDirty = true;
+      return;
+    }
+    olderReviews.disabled = true;
+    reviewRequest = api.reviewerChat(task.id, before);
+    try {
+      const result = await reviewRequest;
+      if (!area.isConnected || frame.project !== project) return;
+      if (!result.ok) throw new Error(boardError(result.error));
+      const overlaps = result.data.attempts.some(attempt => review.attempts.has(attempt.id));
+      for (const attempt of result.data.attempts) {
+        const cached = review.attempts.get(attempt.id);
+        if (!cached || cached.durationMs === undefined) review.attempts.set(attempt.id, attempt);
+      }
+      review.boundaries = result.data.boundaries;
+      if (before !== undefined || !overlaps) review.before = result.data.before;
+      reviewStatus.textContent = "";
+      if (hasReviewStages) renderStageWork("review", [...review.attempts.values()]
+        .sort((left, right) => left.at.localeCompare(right.at)).flatMap(attempt => attempt.items));
+      if (!work.hidden) workViewport.update(renderReviews, true);
+    } catch (error) {
+      if (!area.isConnected || frame.project !== project) return;
+      bindLocalized(reviewStatus, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
+      reviewControls.hidden = false;
+    } finally {
+      reviewRequest = undefined;
+      olderReviews.disabled = false;
+      if (reviewDirty && area.isConnected && frame.project === project) {
+        reviewDirty = false;
+        void refreshReview();
+      }
+    }
+  }
+  area.refreshReview = () => void refreshReview();
   list.append(element("li", undefined, "chat-turn"));
   area.append(list, work);
 
@@ -1225,14 +1491,16 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     const executor = saved?.items ?? (threadId && threadId === task.codexThreadId ? liveItems : []);
     const seen = new Set();
     const items = executor.filter(item => {
-      if (!taskWorkItem(item) || savedItems.has(item.id) || seen.has(item.id)) return false;
-      seen.add(item.id);
+      const key = itemKey(item, saved?.threadId ?? threadId);
+      if (!taskWorkItem(item) || savedItems.has(key) || seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
     workViewport.update(() => {
-      renderWork(liveRun, items, saved?.durationMs, saved?.sequence);
-      emptyWork.hidden = [...work.children].some(row => row !== emptyWork && row !== workControls && !row.hidden);
-    });
+      const key = saved ? "run:" + historyKey(saved.sequence - 1) : "run:live";
+      registerExecutorLog(liveRun, key, items, new Date().toISOString(), saved?.sequence, saved?.durationMs);
+      layoutWork();
+    }, true);
   }
   area.updateRun = (items = []) => {
     liveItems = items;
@@ -1347,7 +1615,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     }
     if (name === "work") {
       for (const render of savedWork.splice(0)) render();
+      renderReviews();
       renderLiveWork();
+      void refreshReview();
       requestAnimationFrame(() => {
         if (work.hidden || !work.isConnected) return;
         if (pendingViewport) {
@@ -1365,6 +1635,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
       if (!list.hidden) list.scrollTop = draft.scroll ?? list.scrollHeight;
     });
   }
+  if (hasReviewStages) queueMicrotask(() => {
+    if (area.isConnected && !reviewRequest) void refreshReview();
+  });
   area.openDialogue = () => {
     selectView("dialogue");
     if (latestOwnerQuestion) {

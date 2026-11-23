@@ -91,30 +91,25 @@ async function run() {
   const evaluate = code => window.webContents.executeJavaScript(code);
   await evaluate(`showTask(${JSON.stringify(id)})`);
   await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
-  const work = await evaluate(`document.querySelector('#task-chat-work').innerText`);
-  assert.match(work, /Executor response saved during review/);
-  assert.doesNotMatch(work, /Provider summary|task_review_diff|Submission before review|Review approved|Fix the finding/);
-  await evaluate(`document.querySelector('#task-review-history > summary').click()`);
   const rows = await waitFor(() => evaluate(`(() => {
-    const feed = document.querySelector('#task-review-history');
-    const attempts = [...feed.querySelectorAll('.task-review-attempt')];
-    if (attempts.length !== 3) return null;
+    const feed = document.querySelector('#task-chat-work');
+    const starts = [...feed.querySelectorAll('[data-chat-anchor^="review:"][data-chat-anchor*=":0:"]')];
+    if (starts.length !== 3) return null;
+    const attempts = [...feed.querySelectorAll('.chat-run[data-actor="reviewer"]')];
     return {
       text: feed.innerText,
-      attempts: attempts.map(row => ({
-        label: row.firstElementChild.innerText,
-        events: [...row.querySelector('.chat-run').children].map(node => node.dataset.item),
-        summaryVisible: row.querySelector('[data-item="item:summary-1"] pre')?.checkVisibility() ?? false
-      }))
+      starts: starts.map(row => row.querySelector('time').dateTime),
+      attempts: attempts.map(row => [...row.children].map(node => node.dataset.item?.split(':').at(-1))),
+      summaryVisible: feed.querySelector('[data-item$=":summary-1"] pre')?.checkVisibility() ?? false
     };
   })()`));
-  assert.match(rows.attempts[0].label, /Ревьюер #1/);
-  assert.match(rows.attempts[1].label, /Ревьюер #2/);
-  assert.match(rows.attempts[2].label, /Ревьюер #3/);
-  assert.deepEqual(rows.attempts.map(row => row.events), [
-    ["item:summary-1", "item:tool-1", "message:result-1"], ["item:tool-2", "message:result-2"], ["message:result-3"],
+  assert.deepEqual(rows.starts, [...rows.starts].sort());
+  assert.equal(rows.summaryVisible, true);
+  assert.deepEqual(rows.attempts, [
+    ["summary-1", "tool-1", "result-1"], ["tool-2", "result-2"], ["result-3"],
   ]);
-  assert.deepEqual(rows.attempts.map(row => row.summaryVisible), [true, false, false]);
+  assert.match(rows.text, /Executor response saved during review/);
+  assert.equal(await evaluate("Boolean(document.querySelector('#task-review-history'))"), false);
   for (const text of ["Provider summary for attempt one.", "task_review_diff 1", "task_review_diff 2",
     "Need a human decision.", "Review approved.", "Evidence for attempt 1", "Evidence for attempt 2",
     "Fix the finding from the saved report."]) {
@@ -126,15 +121,15 @@ async function run() {
     writeFileSync(join(artifacts, "review-after-restart.png"), (await window.webContents.capturePage()).toPNG());
   }
   await evaluate(`sheet.close(); showTask("T-0002")`);
-  await evaluate(`document.querySelector("#task-review-history > summary").click()`);
-  assert.deepEqual(await evaluate(`api.reviewerChat("T-0002")`), { ok: true, data: [] });
-  assert.match(await evaluate(`document.querySelector('#task-review-history').innerText`), /Decision from the card history/);
+  await evaluate(`document.querySelector("[aria-controls=task-chat-work]").click()`);
+  assert.deepEqual(await evaluate(`api.reviewerChat("T-0002")`), { ok: true, data: { attempts: [], boundaries: [] } });
+  assert.match(await evaluate(`document.querySelector('#task-chat-work').innerText`), /Decision from the card history/);
   await evaluate(`sheet.close(); showTask("T-0003")`);
-  assert.deepEqual(await evaluate(`api.reviewerChat("T-0003")`), { ok: true, data: [] });
+  assert.deepEqual(await evaluate(`api.reviewerChat("T-0003")`), { ok: true, data: { attempts: [], boundaries: [] } });
   assert.match(await evaluate(`document.querySelector('#task-chat-dialogue').innerText`), /Repair the missing evaluation/);
-  await evaluate(`document.querySelector("#task-review-history > summary").click()`);
-  const fallbackReason = await evaluate(`document.querySelector('#task-review-history').innerText`);
-  assert.match(fallbackReason, /Ревьюер/);
+  await evaluate(`document.querySelector("[aria-controls=task-chat-work]").click()`);
+  const fallbackReason = await evaluate(`document.querySelector('#task-chat-work').innerText`);
+  assert.match(fallbackReason, /Возврат на доработку/);
   assert.equal(fallbackReason.split("Repair the missing evaluation.").length - 1, 1);
   if (!writing && keepArtifacts) {
     await window.webContents.capturePage();
@@ -144,4 +139,4 @@ async function run() {
   console.log(`PASS Electron ${process.versions.electron}, ${process.platform}, PID ${process.pid} (${writing ? "initial process" : "restarted process"}): three ordered attempts, one copy per decision, note and return available without a journal`);
 }
 
-run().then(() => app.quit(), error => { console.error(error); app.exit(1); });
+run().then(() => app.exit(0), error => { console.error(error); app.exit(1); });

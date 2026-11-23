@@ -1382,15 +1382,15 @@ app.whenReady().then(async () => {
       window.taskboard.chatModels = async () => ({ ok: true, data: [] });
       window.taskboard.reviewerChat = async () => {
         reviewerReads++;
-        return { ok: true, data: [] };
+        return { ok: true, data: { attempts: [], boundaries: [] } };
       };
       push();
       showTask(reviewed.id);
       waitFor(() => byId('task-chat-work'));
     `);
     await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click(); settle();`);
-    await check(`reviewerReads === 0 && !byId('task-chat-work').textContent.includes('Сохранённое согласование.')`,
-      "the task work feed does not load reviewer attempts or display board decisions");
+    await check(`reviewerReads > 0 && byId('task-chat-work').textContent.includes('Сохранённое согласование.')`,
+      "the task work feed loads reviewer attempts and displays board decisions");
     console.log("Reviewer chat Chromium checks passed: " + checks);
     return;
   }

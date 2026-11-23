@@ -335,6 +335,10 @@ export function updateExpertStage(store: BoardStore, id: string, phase: Phase, i
   } else if (!sameResult || (state === "running" && recordedThread !== run.threadId)) {
     if (state === "done" && stage.state !== "running") throw new TaskboardError("EXPERT_STAGE_NOT_RUNNING", "Start the stage before recording its result.");
     const event: TaskEvent = { at: new Date().toISOString(), action: "expert-stage", actor: phase === "review" ? "reviewer" : "agent", expertStageRun: run };
+    const ownRole = stage.expertId === task.expertTeam?.[phase]?.lead;
+    if (state === "running" && (ownRole || run.agentId) && (!active || (!ownRole && !active.agentId))) {
+      event.expertStageStart = { expertName: role.name, stageTitle: stage.title };
+    }
     store.save({ ...task, history: [...task.history, event] });
   }
   return { ...stage, state, run, package: role, dependencies };
