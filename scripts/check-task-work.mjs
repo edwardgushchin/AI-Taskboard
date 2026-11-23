@@ -325,9 +325,11 @@ app.whenReady().then(async () => {
           runThreadId: ${JSON.stringify(thread)}, durationMs: 1_000,
         });
         card.history.push(...${JSON.stringify(later)});
-        api.taskRunHistory = async () => ({
-          ok: true, data: { [index]: ${JSON.stringify([tool, restoredCommand, restored])} },
-        });
+        var historyLoads = 0;
+        api.taskRunHistory = async () => {
+          historyLoads++;
+          return { ok: true, data: { [index]: ${JSON.stringify([tool, restoredCommand, restored])} } };
+        };
         showTask(card.id);
       `);
       await settle();
@@ -399,6 +401,40 @@ app.whenReady().then(async () => {
         }
       }
       record("При повторном открытии свёрнутый вручную запуск снова раскрыт. Журнал сохраняет якорь ранней записи или конец, если пользователь читал внизу. Закрытие отсоединяет наблюдатель до удаления журнала.");
+      assert.deepEqual(await providerItems(), fullOrder, "reopening retains the restored run alongside saved runs");
+      await evaluate(`
+        var restoredReadingRow = () => workLog().querySelector("[data-item='item:restored-command'] > summary");
+        var restoredReadingOffset = () => restoredReadingRow().getBoundingClientRect().top - workLog().getBoundingClientRect().top;
+        workLog().scrollTop += restoredReadingOffset() - 25;
+      `);
+      await settle();
+      const restoredOffset = await evaluate("restoredReadingOffset()");
+      assert.ok(restoredOffset >= 0 && restoredOffset < height / 2, restoredOffset);
+      await evaluate("window.previousWorkList = workLog(); sheet.close(); void 0");
+      await settle();
+      await evaluate("showTask(card.id)");
+      await settle();
+      await assertReplacedWorkList();
+      assert.deepEqual(await providerItems(), fullOrder);
+      assert.equal(await evaluate("restoredReadingRow().closest('.chat-work').open"), true);
+      assert.equal(await evaluate("workLog().clientHeight"), height);
+      assert.equal(await evaluate("historyLoads"), 1);
+      const reopenedRestoredOffset = await evaluate("restoredReadingOffset()");
+      assert.ok(Math.abs(reopenedRestoredOffset - restoredOffset) <= 1,
+        `reopening restores the loaded row at ${restoredOffset}px, got ${reopenedRestoredOffset}px`);
+      record("Повторное открытие возвращает к команде внутри подгруженного запуска. Запуск раскрыт, порядок, высота панели и положение строки сохранены без нового запроса истории.");
+      await evaluate(`
+        const replacementThread = "00000000-0000-4000-8000-000000000003";
+        card.codexThreadId = replacementThread;
+        card.history[index].runThreadId = replacementThread;
+        showTask(card.id);
+      `);
+      await settle();
+      assert.ok(!(await providerItems()).includes("restored-command"));
+      assert.ok(!(await providerItems()).includes("restored"));
+      assert.equal(await evaluate('Boolean(workLog().querySelector(".task-work-controls button"))'), true);
+      assert.equal(await evaluate("historyLoads"), 1);
+      record("При смене чата журнал предлагает подгрузку для нового сеанса и не показывает ранний запуск прежнего сеанса.");
       const gitBase = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true });
       assert.equal(gitBase.status, 0, gitBase.stderr);
       const sha256 = data => createHash("sha256").update(data).digest("hex");

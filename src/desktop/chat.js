@@ -1024,22 +1024,20 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
   const workViewport = chatViewport(work);
-  const savedPosition = draft.workPosition;
-  let pendingViewport = previousWork?.viewport;
-  if (!pendingViewport && savedPosition && savedPosition.threadId === task.codexThreadId) {
-    pendingViewport = { position: savedPosition.position };
+  let workHistory = draft.workHistory;
+  if (!workHistory || workHistory.threadId !== task.codexThreadId) {
+    workHistory = { threadId: task.codexThreadId, restoredRuns: new Map() };
+    draft.workHistory = workHistory;
   }
+  const { restoredRuns } = workHistory;
+  let pendingViewport = previousWork?.viewport;
+  if (!pendingViewport && workHistory.position) pendingViewport = { position: workHistory.position };
   area.disposeWork = () => {
-    draft.workPosition = {
-      threadId: task.codexThreadId,
-      position: pendingViewport?.position ?? workViewport.snapshotPosition(),
-    };
+    workHistory.position = pendingViewport?.position ?? workViewport.snapshotPosition();
     workViewport.dispose();
   };
-  const restoredRuns = previousWork?.restoredRuns ?? new Map();
   area.snapshotWork = () => ({
     viewport: pendingViewport ?? workViewport.snapshot(),
-    restoredRuns,
     focusedFold: work.contains(document.activeElement) && document.activeElement.matches("summary")
       ? document.activeElement.parentElement.dataset.item
       : undefined,
@@ -1091,7 +1089,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
         }
       } else if (task.codexThreadId && event.durationMs !== undefined) {
         work.append(log);
-        missingRuns.set(index, { log, durationMs: event.durationMs });
+        missingRuns.set(index, { log, at: event.at, durationMs: event.durationMs });
       }
     }
     if (!conversation) continue;
@@ -1155,19 +1153,23 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   function renderRestoredRuns(itemsAt) {
     let restored = 0;
     let lastRestored;
-    for (const [index, { log, durationMs }] of missingRuns) {
+    for (const [index, { log, at, durationMs }] of missingRuns) {
       const restoredItems = itemsAt(index) ?? [];
       if (renderStageWork && restoredItems.length) savedStageItems.set(index, restoredItems);
       const items = addSavedItems(restoredItems);
       if (!items.length) continue;
-      restoredRuns.set(index, restoredItems);
+      restoredRuns.set(index, { at, durationMs, items: restoredItems });
       renderWork(log, items, durationMs, index + 1);
       restored++;
       lastRestored = log;
     }
     return { restored, lastRestored };
   }
-  if (restoredRuns.size) savedWork.push(() => renderRestoredRuns(index => restoredRuns.get(index)));
+  for (const [index, entry] of restoredRuns) {
+    const run = missingRuns.get(index);
+    if (!run || run.at !== entry.at || run.durationMs !== entry.durationMs) restoredRuns.delete(index);
+  }
+  if (restoredRuns.size) savedWork.push(() => renderRestoredRuns(index => restoredRuns.get(index)?.items));
   const workControls = element("li", undefined, "task-work-controls");
   if ([...missingRuns.keys()].some(index => !restoredRuns.has(index))) {
     const status = element("span", undefined, "muted");
