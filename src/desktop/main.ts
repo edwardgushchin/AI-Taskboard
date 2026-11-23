@@ -11,8 +11,9 @@ import { codexDailyBudget, type CodexBudgetRole } from "./codex-daily-budget.ts"
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
-import { exhaustExecutorRoutingRetry, forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueExecutorRoutingRetry, queueWriteProbeRetry, recordQueuedTurn,
-  recordWriteProbeRetryFailure, registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
+import { exhaustExecutorRoutingRetry, forgetExecutor, isRuntimeRecord, matchesQueuedExecutor, prepareQueuedTurn,
+  queueExecutorRoutingRetry, queueWriteProbeRetry, recordQueuedTurn, recordWriteProbeRetryFailure,
+  registerRuntime, rememberExecutor, runtimeLocation, runtimeTransaction } from "./board-runtime.ts";
 import type { RuntimeEntry } from "./board-runtime.ts";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, protocol, session, shell } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
@@ -695,7 +696,7 @@ function updateBusy() {
         }
       }
     }
-    return entries.some(entry => !["defaults", "queue"].includes(entry.kind) && !own.has(entry.id));
+    return entries.some(entry => !isRuntimeRecord(entry) && !own.has(entry.id));
   });
 }
 
@@ -6160,6 +6161,10 @@ else {
         return;
       }
       if (applicationUpdates.prepared) {
+        if (updateBusy()) {
+          await applicationUpdates.cancel();
+          return;
+        }
         try {
           await applicationUpdates.prepared.start();
         } catch (error) {

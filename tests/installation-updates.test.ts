@@ -5,7 +5,7 @@ import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import type { RuntimeEntry } from "../src/desktop/board-runtime.ts";
+import { isRuntimeRecord, type RuntimeEntry } from "../src/desktop/board-runtime.ts";
 import { ApplicationUpdates, manifestChecksum, prepareWindowsUpdate } from "../src/desktop/installation-updates.ts";
 import { releasesUrl } from "../src/desktop/updates.ts";
 
@@ -382,7 +382,7 @@ test("cancellation after preparation removes the package and permits a fresh att
   assert.equal(cancelled, 2);
 });
 
-test("the actual shutdown busy check excludes only the current manager's context and descendant leases", () => {
+test("shutdown ignores passive records and only the installing manager's own leases", () => {
   const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
   const start = source.indexOf("function updateBusy()");
   const end = source.indexOf("\nconst applicationUpdates", start);
@@ -394,11 +394,18 @@ test("the actual shutdown busy check excludes only the current manager's context
     { id: "turn", owner: process.pid, kind: "turn", parent: "provider", role: "manager" },
     { id: "defaults", owner: 0, kind: "defaults" },
     { id: "queue", owner: 0, kind: "queue", task: "T-0001" },
+    { id: "release", owner: 0, kind: "executor-release", releasedAt: Date.now() },
+    { id: "retry", owner: 0, kind: "review-retry", task: "T-0002" },
   ];
   const operations = new Set([operation]);
   const sandbox = {
-    process, projectOperations: new Map([["board", operations]]), updateOwner: operation as object | undefined, updateProject: "board",
-    subscriptions: new Map([["board", {}]]), agentSlots: { entries: () => entries },
+    process,
+    projectOperations: new Map([["board", operations]]),
+    updateOwner: operation as object | undefined,
+    updateProject: "board",
+    subscriptions: new Map([["board", {}]]),
+    agentSlots: { entries: () => entries },
+    isRuntimeRecord,
   };
   const busy: () => boolean = runInNewContext(source.slice(start, end) + "\nupdateBusy", sandbox);
   assert.equal(busy(), false);
@@ -408,9 +415,17 @@ test("the actual shutdown busy check excludes only the current manager's context
   operations.add({});
   assert.equal(busy(), true);
   operations.clear();
-  entries.push({ id: "executor", owner: process.pid, kind: "slot", task: "T-0001", role: "executor" });
-  assert.equal(busy(), true);
-  entries.pop();
+  const activeEntries: RuntimeEntry[] = [
+    { id: "executor", owner: process.pid, kind: "slot", task: "T-0001", role: "executor" },
+    { id: "reviewer", owner: process.pid, kind: "slot", task: "review:T-0002", role: "reviewer" },
+    { id: "writer", owner: process.pid, kind: "task", task: "T-0003" },
+  ];
+  for (const entry of activeEntries) {
+    entries.push(entry);
+    assert.equal(busy(), true, entry.id);
+    entries.pop();
+    assert.equal(busy(), false, entry.id);
+  }
   entries.push({ id: "foreign", owner: -1, kind: "provider", parent: "context" });
   assert.equal(busy(), true);
   entries.pop();
@@ -419,6 +434,8 @@ test("the actual shutdown busy check excludes only the current manager's context
   entries.pop();
   sandbox.updateOwner = undefined;
   assert.equal(busy(), true);
+  entries.splice(0, 3);
+  assert.equal(busy(), false);
 });
 
 test("unsupported installations return the official manual path without downloading", async () => {
@@ -442,7 +459,11 @@ test("quit can retry a locked package and handles vetoes of a confirmed installa
   assert.ok(start >= 0 && end > start);
 
   context.mock.method(globalThis, "fetch", async () => Response.json([{ tag_name: candidate.tag }]));
-  for (const scenario of ["locked installer", "window closing", "confirmation declined", "busy", "session failed", "launch failed", "success"]) {
+  const scenarios = [
+    "locked installer", "window closing", "confirmation declined", "busy", "busy after close confirmation",
+    "session failed", "launch failed", "success",
+  ];
+  for (const scenario of scenarios) {
     let cleaned = 0;
     let launched = 0;
     let quits = 0;
@@ -487,7 +508,7 @@ test("quit can retry a locked package and handles vetoes of a confirmed installa
       windowStates: new Map([[1, { closing: scenario === "window closing", tabs: [] }]]),
       quitting: false,
       quitPending: false,
-      updateBusy: () => scenario === "busy",
+      updateBusy: () => scenario === "busy" || (scenario === "busy after close confirmation" && confirmCalls > 0),
       confirmProjectClose: async () => {
         confirmCalls++;
         return scenario !== "confirmation declined";
