@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { directory, exists, readJson, withLock, writeJson } from "../cli/storage.ts";
 import type { TaskUsageRole, TokenUsageReport } from "../cli/token-usage.ts";
+import { uncachedTokens } from "./codex-token-usage.ts";
 
 export type CodexBudgetRole = TaskUsageRole | "manager" | "background" | "draft";
 type Charge = {
@@ -10,6 +11,7 @@ type Charge = {
   task?: string;
   completedAt: number;
   tokens: number | null;
+  excludesCache?: true;
 };
 
 function dayPath(project: string, at: number) {
@@ -31,10 +33,18 @@ export function recordCodexDailyUsage(project: string, role: CodexBudgetRole, re
     entries.set(path, charges);
     const key = JSON.stringify([record.threadId, record.turnId]);
     const previous = charges.get(key);
-    const tokens = previous?.tokens === null || record.dailyTokens === null
+    // Older queued reports produced a gross total. Only a complete legacy
+    // breakdown can establish that no cache delta was lost.
+    const amount = record.dailyTokensExcludeCache ? record.dailyTokens :
+      !record.incomplete && record.dailyTokens !== null && record.dailyTokens === record.totalTokens
+        ? uncachedTokens(record) : null;
+    const tokens = previous?.tokens === null || amount === null
       ? null
-      : (previous?.tokens ?? 0) + record.dailyTokens;
-    charges.set(key, { reportId: report.id, sequence: report.sequence, role, task, completedAt: record.completedAt, tokens });
+      : (previous?.tokens ?? 0) + amount;
+    charges.set(key, {
+      reportId: report.id, sequence: report.sequence, role, task, completedAt: record.completedAt,
+      tokens, excludesCache: true,
+    });
   }
   if (!entries.size) return false;
   const folder = join(project, ".tasks", "codex-daily-usage");
@@ -46,8 +56,13 @@ export function recordCodexDailyUsage(project: string, role: CodexBudgetRole, re
       let dirty = false;
       for (const [key, charge] of updates) {
         const previous = charges[key];
-        if (previous?.reportId === charge.reportId && previous.sequence >= charge.sequence) continue;
-        if (previous && previous.reportId !== charge.reportId && previous.tokens !== null) continue;
+        if (previous) {
+          const sameReport = previous.reportId === charge.reportId;
+          const upgradesLegacy = !previous.excludesCache && charge.tokens !== null;
+          if (sameReport && previous.sequence > charge.sequence) continue;
+          if (sameReport && previous.sequence === charge.sequence && !upgradesLegacy) continue;
+          if (previous.tokens !== null && !upgradesLegacy && (!sameReport || !previous.excludesCache)) continue;
+        }
         charges[key] = charge;
         dirty = true;
       }

@@ -10,9 +10,22 @@ type ThreadUsage = {
   finished: boolean;
   completedAt?: number;
   totalUncertain?: boolean;
+  cacheUncertain?: boolean;
+  cacheGap?: { entry: TokenUsageRecord; before: number | null | undefined };
 };
 
 type TurnUsageStatus = { id: string; status?: string; completedAt?: number | null };
+
+export function uncachedTokens({ totalTokens, cachedInputTokens }: TokenCounts): number | null {
+  if (totalTokens === null || cachedInputTokens === null || cachedInputTokens > totalTokens) return null;
+  return totalTokens - cachedInputTokens;
+}
+
+function usageDelta(current: number | null, before: number | null | undefined, last: number | null): number | null {
+  if (current === null) return null;
+  const baseline = before === undefined ? last : before === null ? null : current - before;
+  return baseline !== null && baseline >= 0 && baseline <= current ? baseline : null;
+}
 
 function counts(value: unknown): TokenCounts {
   const data = value as Partial<TokenCounts> | undefined;
@@ -101,6 +114,8 @@ export class CodexTokenUsage {
     thread.finished = false;
     thread.completedAt = undefined;
     thread.totalUncertain = false;
+    thread.cacheUncertain = false;
+    thread.cacheGap = undefined;
     this.entry(threadId, thread);
     return this.snapshot();
   }
@@ -137,7 +152,9 @@ export class CodexTokenUsage {
     for (const entry of this.records.values()) {
       if (entry.threadId !== threadId || entry.turnId !== thread.turnId) continue;
       entry.completedAt ??= at;
-      entry.dailyTokens = thread.totalUncertain ? null : entry.totalTokens;
+      entry.dailyTokens = thread.totalUncertain || thread.cacheUncertain || thread.cacheGap
+        ? null : uncachedTokens(entry);
+      entry.dailyTokensExcludeCache = true;
     }
   }
 
@@ -192,15 +209,26 @@ export class CodexTokenUsage {
     const total = counts(data.tokenUsage?.total);
     const last = counts(data.tokenUsage?.last);
     const entry = this.entry(threadId, thread);
-    if (thread.previous && tokenFields.every(key => total[key] === thread.previous![key])) return;
+    const gap = thread.cacheGap;
+    const previous = thread.previous;
+    // A retransmitted snapshot can fill in the last missing cache delta.
+    // A later sample with additional spend cannot establish a missing baseline.
+    const repairsCache = gap?.entry === entry && previous && total.totalTokens !== null &&
+      previous.totalTokens === total.totalTokens &&
+      usageDelta(total.cachedInputTokens, gap.before, last.cachedInputTokens) !== null &&
+      tokenFields.every(key => key === "cachedInputTokens" || previous[key] === null || total[key] === previous[key]);
+    if (!repairsCache && previous && tokenFields.every(key => total[key] === previous[key])) return;
+    if (gap && !repairsCache) thread.cacheUncertain = true;
+    thread.cacheGap = undefined;
     for (const key of tokenFields) {
+      if (repairsCache && key !== "cachedInputTokens") continue;
       const current = total[key];
-      const before = thread.previous?.[key];
-      const delta = !thread.previous ? last[key] !== null && current !== null && last[key] <= current ? last[key] : null :
-        current !== null && before !== null && before !== undefined && current >= before ? current - before : null;
-      if (delta === null || current === null || !Number.isSafeInteger((entry[key] ?? 0) + delta)) {
+      const before = repairsCache ? gap.before : thread.previous?.[key];
+      const delta = usageDelta(current, before, last[key]);
+      if (delta === null || !Number.isSafeInteger((entry[key] ?? 0) + delta)) {
         thread.incomplete = true;
         if (key === "totalTokens") thread.totalUncertain = true;
+        if (key === "cachedInputTokens") thread.cacheGap = { entry, before };
       } else {
         entry[key] = (entry[key] ?? 0) + delta;
       }
