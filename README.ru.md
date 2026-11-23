@@ -13,6 +13,7 @@
 </p>
 <p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Скачать alpha-сборку</strong></a> ·
+  <a href="release-notes/v0.1.4-alpha.md">Примечания к 0.1.4-alpha (англ.)</a> ·
   <a href="#quick-start">Быстрый старт</a> ·
   <a href="#features">Возможности</a> ·
   <a href="#workflow">Рабочий процесс</a> ·
