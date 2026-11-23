@@ -542,6 +542,7 @@ type BoardMessage = { at?: string; id: string; sequence: number; actor: "manager
   kind?: "request-changes" };
 export type BoardActivity = RunActivity & { taskChanges?: BoardChange[]; messages?: BoardMessage[]; messagesOnly?: boolean;
   completedAt?: string; statusTransition?: { task: string; status: string };
+  reviewModeCardQuestion?: true;
   generatedImage?: { file?: string };
   providerTurnId?: string;
   userMessage?: ReturnType<typeof boardMessage> & { at?: string } };

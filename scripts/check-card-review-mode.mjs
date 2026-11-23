@@ -1,12 +1,14 @@
 import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
+import { locateBoard, onBoard } from "../src/cli/storage.ts";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "card-review-mode", 240_000,
   [["auto-on"], ["auto-off"], ["restart"]]);
@@ -62,7 +64,31 @@ async function waitFor(probe, label) {
 }
 
 async function run() {
-  if (autoMode) writeFileSync(reportFile, "Command: node scripts/check-card-review-mode.mjs --artifacts .tasks/qa\n");
+  if (autoMode) {
+    const paths = [
+      "scripts/check-card-review-mode.mjs",
+      "src/desktop/chat-actions.ts",
+      "src/desktop/codex-chat.ts",
+      "src/desktop/locales/en.json",
+      "src/desktop/locales/ru.json",
+      "src/desktop/main.ts",
+    ];
+    const hashes = paths.map(path => {
+      const source = readFileSync(new URL("../" + path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
+      return createHash("sha256").update(source).digest("hex") + "  " + path;
+    });
+    const base = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", windowsHide: true,
+    });
+    assert.equal(base.status, 0, base.stderr);
+    writeFileSync(reportFile, [
+      "Command: node scripts/check-card-review-mode.mjs --artifacts .tasks/qa",
+      "Tested worktree HEAD: " + base.stdout.trim(),
+      "SHA-256 (UTF-8 with LF line endings):",
+      ...hashes,
+      "",
+    ].join("\n"));
+  }
   log(`${phase}: Electron ${process.versions.electron}, Node ${process.versions.node}, ${process.platform}`);
   if (phase !== "restart") {
     mkdirSync(project);
@@ -72,10 +98,15 @@ async function run() {
     git("commit", "--allow-empty", "-m", "Initial state");
     cli(["init"]);
     cli(["settings"], { reviewMode: "reviewer", autoMode });
+    onBoard(locateBoard(project), store => {
+      store.index.nextId = 319;
+      store.saveIndex();
+    });
   }
   const create = title => cli(["create"], plannedDraft({ title, criteria: evidence })).id;
-  const hybrid = phase === "restart" ? "T-0001" : create("Personal acceptance");
-  const normal = phase === "restart" ? "T-0002" : create("Inherited review");
+  const hybrid = phase === "restart" ? "T-0319" : create("Personal acceptance");
+  const normal = phase === "restart" ? "T-0320" : create("Inherited review");
+  assert.equal(hybrid, "T-0319");
   if (phase !== "restart") {
     for (const id of [hybrid, normal]) {
       confirmFixtureDraft(project, id);
@@ -120,10 +151,10 @@ async function run() {
   globalThis.fixtureReview = async () => ({ summary: "Fixture reviewer approved.", needsHuman: false, findings: [], evidence });
   globalThis.fixtureManager = async (_profile, _project, prompt, _images, call, _tools, _instructions, _signal, session) => {
     let text = prompt;
-    if (session.separateTurn) {
+    const approvalNotice = prompt.startsWith("Process the recorded reviewer approvals for the assigned cards");
+    if (session.separateTurn || approvalNotice) {
       assert.ok(!session.mcpTools.some(tool => tool.name === action));
-      // During the toggle test only the automatic queue may accept the inherited card.
-      if (!autoMode && prompt.includes(normal)) {
+      if (!autoMode && approvalNotice && prompt.includes(normal)) {
         const id = normal;
         const snapshot = await call("task_review", { id });
         assert.ok(snapshot.ok, JSON.stringify(snapshot));
@@ -135,9 +166,13 @@ async function run() {
     } else {
       assert.ok(session.mcpTools.some(tool => tool.name === action));
       const input = replies.get(prompt);
-      const receipt = await call(action, input);
-      receipts.push(receipt);
-      text = JSON.stringify(receipt);
+      if (typeof input === "string") {
+        text = input;
+      } else {
+        const receipt = await call(action, input);
+        receipts.push(receipt);
+        text = JSON.stringify(receipt);
+      }
     }
     return { text };
   };
@@ -158,7 +193,7 @@ async function run() {
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
   const source = readFileSync(sourceUrl, "utf8")
     .replace("replyToBoard, replyToTask, reviewWithCodex,", "")
-    .replace("import { callCli, cliChild, cliFailure }", "import { callCli as realCallCli, cliChild, cliFailure }")
+    .replace("import { callCli,", "import { callCli as realCallCli,")
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const entry = join(scratch, "main-under-test-" + phase + ".mjs");
@@ -212,6 +247,38 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
     assert.equal((await discussion(prompt, { mode })).error.code, "USER_DIRECTION_REQUIRED");
   }
   assert.equal((await discussion("Установи режим «Ревью + человек» для этой карточки", { mode: "reviewer-human" })).data.inherited, false);
+  const original = "поставь карточке 319 только ревью, без человеческой приемки";
+  const managerInput = (authorization, mode, revision = show(hybrid).revision) => ({ id: hybrid, mode, revision, authorization });
+  assert.equal((await manager(original, managerInput(original, "reviewer"))).data.reviewMode, "reviewer");
+  const mixed = "Назначь T-0319 режим «Ревью + человек»";
+  assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
+  const scoped = "Поставь только ревью, без человеческой приёмки";
+  assert.equal((await discussion(scoped, { mode: "reviewer-human" })).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal((await discussion(scoped, { mode: "reviewer" })).data.reviewMode, "reviewer");
+  const askForCard = async () => {
+    const result = await evaluate(window, "boardRequest", [scoped, [], project, false, false]);
+    assert.ok(result.ok, JSON.stringify(result));
+    assert.match(result.data.answer, /^(Какой карточке|Which card)\?$/);
+    assert.equal(result.data.items.filter(item => item.type === "agentMessage").length, 1);
+  };
+  assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
+  await askForCard();
+  assert.equal((await manager("319", managerInput("319", "reviewer", show(hybrid).revision - 1))).error.code, "REVISION_CONFLICT");
+  assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer-human");
+  await askForCard();
+  assert.equal((await manager("319x", managerInput("319x", "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal((await manager("319", managerInput("319", "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
+  await askForCard();
+  const receipt = await manager("319", managerInput("319", "reviewer"));
+  assert.equal(receipt.data.reviewMode, "reviewer");
+  assert.equal(receipt.data.revision, show(hybrid).revision);
+  await manager("Покажи карточку 319", "Какой карточке?");
+  assert.equal((await manager("319", managerInput("319", "human"))).error.code, "USER_DIRECTION_REQUIRED");
+  for (const invalid of ["Поставь карточке 319x только ревью", "«" + original + "»", "Поставь карточке 3e2 только ревью"]) {
+    assert.equal((await manager(invalid, managerInput(invalid, "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
+  }
+  assert.equal((await manager(original, managerInput(mixed, "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
+  log("PASS: the original 319 request, accented negation, full ID, current card and adjacent card-number clarification saved the exact review mode. Wrong mode, stale revision, invalid number, quote, forged question and authorization mismatch were rejected.");
   assert.equal((await discussion("Верни наследование режима доски", { mode: null })).data.inherited, true);
   const ambiguous = "Use reviewer-human for " + hybrid + " or " + normal;
   assert.equal((await manager(ambiguous, { id: hybrid, mode: "reviewer-human", revision: show(hybrid).revision, authorization: ambiguous })).error.code,

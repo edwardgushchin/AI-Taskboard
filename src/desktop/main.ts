@@ -32,7 +32,7 @@ import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
 import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
-import { boardReviewModeTool, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
+import { boardReviewModeTool, needsReviewModeCard, reviewModeCardReply, reviewModeReceipt, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
 import { autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, boardActions, boardInstructions, boardMcpTools, boardTools, manualReviewInstructions, reviewerTools } from "./board-actions.ts";
 import { phaseStageReporter } from "./expert-tools.ts";
 import type { BoardChange, PendingReviewDecision, ReviewedSubmission, ReviewReport } from "./board-actions.ts";
@@ -3079,6 +3079,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let requestText = queued?.draft.trim() ?? request.trim();
   if (draftNotice) requestText = "AI Taskboard queue: answer these draft questions through team_message. " + JSON.stringify(draftQuestions);
   let ownerReviewRequest = !background && !goal ? requestText : "";
+  let previousReviewRequest: string | undefined;
   let pendingAction: Promise<unknown> = Promise.resolve();
   const iterationReceipt = pendingIteration;
   let iterationDispatched = false;
@@ -3359,10 +3360,28 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         clientId: typeof messageId === "string" ? messageId : undefined,
       };
     }
+    if (allowReviewModeChange && historyMessage && needsReviewModeCard(ownerReviewRequest)) {
+      const answer = t("review_mode.card_question");
+      items = [{
+        id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "",
+        phase: "final_answer", text: answer, status: "completed", reviewModeCardQuestion: true,
+      }];
+      historyAccepted = true;
+      saveHistory();
+      delivered();
+      return { ok: true as const, data: { answer, items, changes, id: threadId } };
+    }
+    const previousChat = allowReviewModeChange || (lane === "chat" && !threadId)
+      ? readManagerHistory(project, null, "chat")?.turns : undefined;
+    const previousTurn = previousChat?.at(-1);
+    if (allowReviewModeChange && previousTurn?.items.at(-1)?.reviewModeCardQuestion && previousTurn.messages.length === 1) {
+      previousReviewRequest = previousTurn.messages[0]?.text;
+    }
+    const clarifiedReview = previousReviewRequest && reviewModeCardReply(ownerReviewRequest, previousReviewRequest);
     let imageIndex = 0;
     const unread = draftNotice ? draftQuestions : cleanupJob || reviewIds || approvalNotices || (!goal && boardWorkRequests.get(projectKey)?.goalRunning) ? [] :
       (subscriptions.get(project)?.board ?? board).managerInbox ?? [];
-    const priorChat = lane === "chat" && !threadId ? readManagerHistory(project, null, "chat")?.turns.slice(-8)
+    const priorChat = lane === "chat" && !threadId ? previousChat?.slice(-8)
       .flatMap(turn => turn.lane === "notice" ? [] : [{
         user: turn.messages.map(message => message.text).join("\n").slice(-1200),
         manager: turn.items.findLast(item => item.type === "agentMessage" && item.phase !== "commentary")?.text.slice(-1200),
@@ -3406,7 +3425,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         if (name === boardReviewModeTool.name) {
           if (!allowReviewModeChange) return cliFailure("USER_DIRECTION_REQUIRED", "Use the owner's manager chat to change review mode.");
           signal.throwIfAborted();
-          const result = setReviewModeFromChat(board.project, ownerReviewRequest, args);
+          const result = setReviewModeFromChat(board.project, ownerReviewRequest, args, undefined, previousReviewRequest);
           if (!result.ok) return result;
           const { id, status, title, revision } = result.data;
           changes.push({ id, status, title, revision, action: "set_review_mode" });
@@ -3746,7 +3765,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           });
         };
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
-      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") + "\n" + initialSettings.text + (iteration ?
+      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
+        (clarifiedReview ? "\nThe application verified the owner's answer to its card question: " + JSON.stringify(clarifiedReview) +
+          ". Use the latest owner message as authorization." : "") + "\n" + initialSettings.text + (iteration ?
         "\nThis is a single planning turn. Handle the specified goal questions and owner instructions. Only acknowledge the specified questions. " +
         "When ready work is below target, prepare approved work to reach the ready target after free executor slots fill. " +
         "Leave dispatch and routine review to the board. Put the iteration result and the next concrete step or waiting condition in the final answer. " +
@@ -3963,12 +3984,15 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               attachments.push(...prepared);
               const receipt = messageId ? Promise.withResolvers<boolean>() : undefined;
               if (messageId && receipt) steering.set(messageId, receipt);
-              const previousReviewRequest = ownerReviewRequest;
+              const previousOwnerRequest = ownerReviewRequest;
+              const previousClarification = previousReviewRequest;
               ownerReviewRequest = text.trim();
+              previousReviewRequest = undefined;
               try {
                 await control.steer(prompt, prepared.flatMap(file => file.image ? [file.image] : []), messageId);
               } catch (error) {
-                ownerReviewRequest = previousReviewRequest;
+                ownerReviewRequest = previousOwnerRequest;
+                previousReviewRequest = previousClarification;
                 attachments.length = firstAttachment;
                 throw error;
               }

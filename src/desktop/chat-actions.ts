@@ -34,11 +34,11 @@ const returnTool = {
   description: "Return this review card for correction. Include all user feedback and confirmed defects in reason. The executor waits for this discussion to finish and for an available slot. Confirm only the operation result; do not claim it has started.",
   inputSchema: { type: "object", properties: returnProperties, required: ["reason"], additionalProperties: false },
 };
-export const reviewModeInstruction = "Use task_set_review_mode only when the latest owner message is an unambiguous standalone command. Examples: 'Set T-0194 to reviewer-human', 'Назначь T-0194 режим «Ревью + человек»', 'Верни наследование для T-0194'. The card chat may omit the ID. Pass the whole owner message unchanged as authorization. If the request cannot be verified, ask the owner for one clear command. Confirm the effective mode and inheritance using the tool result.";
+export const reviewModeInstruction = "Use task_set_review_mode for direct, unambiguous owner requests. Examples: 'поставь карточке 319 только ревью, без человеческой приемки' means T-0319 in reviewer mode, 'Назначь T-0319 режим «Ревью + человек»' means reviewer-human, and 'Верни наследование для T-0319' restores inheritance. The card chat may omit the ID. Pass the complete latest owner message unchanged as authorization. If the card or mode is unclear, ask one short question about the missing information. Confirm the effective mode and inheritance from the successful tool result.";
 
 const reviewModeProperties = {
   mode: { type: ["string", "null"], enum: [...reviewModes, null], description: "Existing review mode. Null restores inheritance from the board." },
-  authorization: { ...string, description: "The complete latest owner message with the explicit command." },
+  authorization: { ...string, description: "The complete latest owner message, including when it supplies just the requested card number." },
 };
 const reviewModeTool = {
   type: "function", name: "task_set_review_mode", description: reviewModeInstruction,
@@ -46,7 +46,7 @@ const reviewModeTool = {
 };
 export const boardReviewModeTool = {
   ...reviewModeTool,
-  description: reviewModeInstruction + " The latest owner message must name the exact card ID. Read task_show for its current revision.",
+  description: reviewModeInstruction + " In the manager chat accept a card number or full ID. If the application has verified an answer to its card question, pass that answer as authorization. Read task_show for the exact ID and current revision.",
   inputSchema: { ...reviewModeTool.inputSchema, properties: { ...reviewModeProperties, id: string, revision: { type: "integer" } },
     required: [...reviewModeTool.inputSchema.required, "id", "revision"] },
 };
@@ -57,26 +57,60 @@ const reviewModeNames = new Map<string, ReviewMode>([
   ["project manager", "manager"], ["review", "reviewer"], ["review + human", "reviewer-human"],
   ["человек", "human"], ["менеджер", "manager"], ["менеджер проекта", "manager"], ["ревью", "reviewer"],
   ["ревьюер", "reviewer"], ["ревью + человек", "reviewer-human"],
+  ["только ревью", "reviewer"], ["ревью без человеческой приемки", "reviewer"],
+  ["только ревью без человеческой приемки", "reviewer"],
+  ["ревью, без человеческой приемки", "reviewer"], ["только ревью, без человеческой приемки", "reviewer"],
 ]);
 
-function requestedReviewMode(message: string, id: string, scoped: boolean): ReviewMode | null | undefined {
-  const command = message.trim().toLowerCase().replace(/\s+/g, " ").replace(/[.!]$/, "");
-  const match = /^(?:(?:пожалуйста|please),? )?(?:(?:для|for) (t-\d+)[,]? )?(назначь(?:те)?|установи(?:те)?|поставь(?:те)?|set|use|верни(?:те)?|восстанови(?:те)?|restore|reset) (?:(?:(?:для|for) )?(t-\d+) )?(.+?)(?: (?:для|for) (t-\d+|этой карточки|this card))?$/u.exec(command);
+const target = "(?:t-[0-9]{4,}|[0-9]+)";
+const reviewModeCommand = new RegExp(
+  `^(?:(?:пожалуйста|please),? )?(?:(?:для (?:карточки )?|for (?:card )?)(${target}),? )?` +
+  "(назначь(?:те)?|установи(?:те)?|поставь(?:те)?|set|use|верни(?:те)?|восстанови(?:те)?|restore|reset) " +
+  `(?:(?:карточке |для карточки |для |for card |for |card )?(${target}) )?(.+?)` +
+  `(?: (?:для (?:карточки )?|for (?:card )?)(${target}|этой карточки|this card))?$`, "u",
+);
+
+function reviewTarget(value: string): string | undefined {
+  const id = value.toUpperCase();
+  if (taskIdPattern.test(id)) return id;
+  if (/^[0-9]+$/.test(value)) return "T-" + value.replace(/^0+(?=[0-9])/, "").padStart(4, "0");
+}
+
+function requestedReviewMode(message: string): { target?: string; mode: ReviewMode | null } | undefined {
+  if (/[\r\n]/.test(message.trim())) return;
+  const command = message.trim().toLowerCase().replaceAll("ё", "е").replace(/\s+/g, " ").replace(/[.!]$/, "");
+  const match = reviewModeCommand.exec(command);
   if (!match) return;
   const [, before, verb, after, value, trailing] = match;
   const targets = [before, after, trailing].filter(Boolean);
-  if (targets.length > 1 || (!scoped && !targets.length) ||
-      targets.some(target => target.toUpperCase() !== id && !(scoped && ["этой карточки", "this card"].includes(target)))) return;
+  if (targets.length > 1) return;
+  const target = targets[0] && (reviewTarget(targets[0]) ?? targets[0]);
 
   if (/^(?:верни|восстанови|restore|reset)/u.test(verb)) {
-    return /^(?:наследование(?: (?:режима )?доски)?|(?:board )?inheritance|to board default)$/u.test(value) ? null : undefined;
+    if (/^(?:наследование(?: (?:режима )?доски)?|(?:board )?inheritance|to board default)$/u.test(value)) {
+      return { target, mode: null };
+    }
+    return;
   }
   const name = value.replace(/^(?:to |режим(?: ревью)? |review mode )/u, "");
   const quoted = /^(?:"([^"]+)"|«([^»]+)»|„([^“]+)“|“([^”]+)”|`([^`]+)`)$/u.exec(name);
-  return reviewModeNames.get((quoted?.slice(1).find(Boolean) ?? name).replace(/\s*\+\s*/g, " + "));
+  const mode = reviewModeNames.get((quoted?.slice(1).find(Boolean) ?? name).replace(/\s*\+\s*/g, " + "));
+  if (mode) return { target, mode };
 }
 
-export function setReviewModeFromChat(project: string, userText: string, args: unknown, current?: Task): CliReply<Task & { effectiveReviewMode: ReviewMode }> {
+export function needsReviewModeCard(message: string): boolean {
+  const request = requestedReviewMode(message);
+  return !!request && !request.target;
+}
+
+export function reviewModeCardReply(message: string, previousRequest: string) {
+  const target = reviewTarget(message.trim());
+  const original = requestedReviewMode(previousRequest);
+  if (target && original && !original.target) return { target, mode: original.mode };
+}
+
+export function setReviewModeFromChat(project: string, userText: string, args: unknown, current?: Task,
+  previousRequest?: string): CliReply<Task & { effectiveReviewMode: ReviewMode }> {
   const fields = current ? reviewModeProperties : boardReviewModeTool.inputSchema.properties;
   if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !Object.hasOwn(fields, key))) {
     return cliFailure("INVALID_INPUT", "Use the parameters defined for this task action.");
@@ -89,8 +123,12 @@ export function setReviewModeFromChat(project: string, userText: string, args: u
   }
   try {
     const selection = input.mode === null ? null : member(input.mode, reviewModes, "review mode");
-    if (requestedReviewMode(userText, id, Boolean(current)) !== selection) {
-      return cliFailure("USER_DIRECTION_REQUIRED", "Ask the owner for one explicit command naming this card and the requested mode or inheritance.");
+    const request = requestedReviewMode(userText) ??
+      (!current && previousRequest ? reviewModeCardReply(userText, previousRequest) : undefined);
+    const target = request?.target;
+    const matchesCard = target === id || (current && (!target || ["этой карточки", "this card"].includes(target)));
+    if (!matchesCard || request?.mode !== selection) {
+      return cliFailure("USER_DIRECTION_REQUIRED", "Ask one short question about the unclear card or mode. Use the owner's complete latest message as authorization.");
     }
     const mode = selection ?? undefined;
     const data = onBoard(locateBoard(project), store => {

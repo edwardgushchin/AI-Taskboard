@@ -1,4 +1,5 @@
 {
+  "review_mode.card_question": "Which card?",
   "ui.acceptance_wait_local_changes": "Acceptance is waiting for conflicting local changes to be resolved",
   "ui.acceptance_wait_local_changes_help": "Commit the conflicting changes separately or set them aside with Git stash. The board will check the submission again when the target worktree changes.",
   "ui.acceptance_wait_diagnostics": "Acceptance diagnostics",
