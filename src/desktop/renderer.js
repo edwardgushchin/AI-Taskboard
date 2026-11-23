@@ -2452,8 +2452,6 @@ function draftComposer() {
   }
   function readVisibleMessages() {
     clearTimeout(readRetry);
-    clearTimeout(queueRetry);
-    clearTimeout(workBudgetRetry);
     if (!canBrowseHistory() || !api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
@@ -3354,6 +3352,8 @@ function draftComposer() {
     disposed = true;
     quoteDraft.close();
     clearTimeout(readRetry);
+    clearTimeout(queueRetry);
+    clearTimeout(workBudgetRetry);
     cancelAnimationFrame(readFrame);
     readObserver.disconnect();
     dialogueViewport.dispose();
