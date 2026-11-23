@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import type { Task } from "../src/cli/model.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { grantTaskTool, requestTaskTool } from "../src/cli/task-tools.ts";
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { executorToolConfig, providerActions, providerTools, verifyExecutorTools } from "../src/desktop/provider-tools.ts";
 import type { ProviderRequest } from "../src/desktop/provider-tools.ts";
 import { computerUseServer } from "../src/desktop/computer-use.ts";
+import { callCli } from "../src/desktop/cli.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 
 test("tool requests reach the manager and grants are task-scoped, revisioned and restart-only", () => {
   const first = { ...createTask("T-0001", { title: "First" }), status: "in_progress" as const };
@@ -98,4 +104,73 @@ test("the Taskboard browser only accepts grants for an app-owned connection", as
   await assert.rejects(executorToolConfig(request, ".", [grant]), /local Windows desktop app/);
   assert.deepEqual((await executorToolConfig(request, ".", [grant], true)).mcp_servers[computerUseServer].enabled_tools, ["browser_use"]);
   assert.equal((await executorToolConfig(request, ".", [])).mcp_servers[computerUseServer].enabled, false);
+});
+
+test("Windows discovery and grant report a missing Chrome surface and keep the demo available", {
+  skip: process.platform !== "win32",
+}, async t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-chrome-discovery-"));
+  t.after(() => rmSync(root, { recursive: true, maxRetries: 5 }));
+  const paths = ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "HOMEDRIVE"];
+  for (const key of paths) {
+    const previous = process.env[key];
+    t.after(() => {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    });
+    process.env[key] = root;
+  }
+
+  const request: ProviderRequest = async <T>(method: string) => {
+    if (method === "config/read") {
+      return { config: { mcp_servers: { [computerUseServer]: { url: "http://browser" } } } } as T;
+    }
+    if (method === "app/list") return { data: [] } as T;
+    return { data: [{ name: computerUseServer, tools: { computer_use: {}, browser_use: {} } }] } as T;
+  };
+  const actions = providerActions(root, request, "thread", true);
+  const catalog = async () => {
+    const result = await providerTools(request, "thread", root, true);
+    const row = result.tools.find(tool => tool.tool === "computer_use");
+    assert.ok(row?.assignable);
+    return row;
+  };
+  const missing = await catalog();
+  assert.deepEqual(missing.surfaces, ["app://computer-use/demo"]);
+  assert.deepEqual(missing.unavailableSurfaces?.map(surface => [surface.url, surface.code]), [
+    ["app://computer-use/chrome", "CHROME_NOT_INSTALLED"],
+  ]);
+
+  assert.ok((await callCli(root, ["init"], { git: true })).ok);
+  const draft = await callCli<Task>(root, ["create"], plannedDraft({
+    title: "Assign Computer Use",
+    criteria: ["Demo remains available"],
+    workingDirectory: root,
+  }));
+  assert.ok(draft.ok);
+  confirmFixtureDraft(root, draft.data.id);
+  const ready = await callCli<Task>(root, ["approve", draft.data.id], { revision: draft.data.revision });
+  assert.ok(ready.ok);
+  const granted = await actions("task_tool_grant", {
+    id: ready.data.id,
+    revision: ready.data.revision,
+    server: computerUseServer,
+    tool: "computer_use",
+  });
+  assert.ok(granted.ok);
+  assert.match(JSON.stringify(granted.data), /CHROME_NOT_INSTALLED/);
+  assert.match(JSON.stringify(granted.data), /"restartRequired":true/);
+  const saved = await callCli<Task>(root, ["show", ready.data.id]);
+  assert.ok(saved.ok);
+  assert.deepEqual(saved.data.toolGrants, [{ server: computerUseServer, tool: "computer_use" }]);
+
+  const installation = join(root, "Google", "Chrome", "Application");
+  mkdirSync(installation, { recursive: true });
+  writeFileSync(join(installation, "chrome.exe"), "");
+  const available = await catalog();
+  assert.ok(available.surfaces?.includes("app://computer-use/chrome"));
+  assert.equal(available.unavailableSurfaces, undefined);
 });
