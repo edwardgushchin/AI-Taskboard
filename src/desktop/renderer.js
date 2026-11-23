@@ -2421,6 +2421,12 @@ function draftComposer() {
     if (!first) unreadDivider.remove();
     return first;
   }
+  function managerMessageInView(bubble, viewport) {
+    if (!bubble.checkVisibility({ visibilityProperty: true })) return false;
+    const bounds = bubble.getBoundingClientRect();
+    return bounds.height > 0 && bounds.top >= viewport.top - 1 &&
+      bounds.top + Math.min(bounds.height, 28) <= viewport.bottom;
+  }
   function readVisibleMessages() {
     clearTimeout(readRetry);
     clearTimeout(queueRetry);
@@ -2431,11 +2437,8 @@ function draftComposer() {
           !document.hasFocus() || document.querySelector("dialog:modal") || !editor.matches("[data-open], [data-pinned]") ||
           !log.checkVisibility({ visibilityProperty: true }) || !log.clientHeight) return;
       const viewport = log.getBoundingClientRect();
-      const ids = [...log.querySelectorAll('.board-manager-message[data-message-id]')].filter(bubble => {
-        if (!bubble.checkVisibility({ visibilityProperty: true })) return false;
-        const bounds = bubble.getBoundingClientRect();
-        return bounds.height > 0 && bounds.top >= viewport.top - 1 && bounds.top + Math.min(bounds.height, 28) <= viewport.bottom;
-      }).slice(0, 200).map(bubble => bubble.dataset.messageId);
+      const ids = [...log.querySelectorAll('.board-manager-message[data-message-id]')]
+        .filter(bubble => managerMessageInView(bubble, viewport)).slice(0, 200).map(bubble => bubble.dataset.messageId);
       if (!ids.length) return;
       const snapshot = new Set(unread);
       readingMessages = true;
@@ -4161,8 +4164,9 @@ function draftComposer() {
     const submitted = [...files];
     const replies = log.querySelectorAll(".board-manager-message[data-message-id]");
     const lastReply = replies[replies.length - 1];
-    const reviewModeQuestionId = canBrowseHistory() && lastReply?.checkVisibility({ visibilityProperty: true })
-      ? lastReply.dataset.reviewModeCardQuestion : undefined;
+    const questionId = lastReply?.dataset.reviewModeCardQuestion;
+    const reviewModeQuestionId = questionId && canBrowseHistory() && managerMessageInView(lastReply, log.getBoundingClientRect())
+      ? questionId : undefined;
     let id;
     savingQueuedMessage = true;
     quoteDraft.sync();

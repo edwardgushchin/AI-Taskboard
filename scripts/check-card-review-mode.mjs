@@ -318,6 +318,23 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
       .filter(node => node.checkVisibility({ visibilityProperty: true }) && node.firstElementChild.textContent.trim() === "Какой карточке?")
       .at(-1)?.dataset.messageId
   `);
+  const questionGeometry = (id, scrollTo) => window.webContents.executeJavaScript(`
+    (() => {
+      const log = document.querySelector(".board-chat-log:not(.board-work)");
+      const question = Array.from(log.querySelectorAll(".chat-run-final"))
+        .find(node => node.dataset.messageId === ${JSON.stringify(id)});
+      if (!question) return null;
+      if (${JSON.stringify(scrollTo)} === "start") log.scrollTo({ top: 0, behavior: "instant" });
+      if (${JSON.stringify(scrollTo)} === "end") log.scrollTo({ top: log.scrollHeight, behavior: "instant" });
+      const viewport = log.getBoundingClientRect();
+      const bounds = question.getBoundingClientRect();
+      return {
+        displayed: question.checkVisibility({ visibilityProperty: true }),
+        below: bounds.top >= viewport.bottom,
+        fullyInside: bounds.height > 0 && bounds.top >= viewport.top && bounds.bottom <= viewport.bottom,
+      };
+    })()
+  `);
   const askForCard = async () => {
     const previous = await visibleQuestion();
     const result = await managerRequest(scoped);
@@ -395,8 +412,23 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
   assert.equal(receipts.at(-1).error.code, "USER_DIRECTION_REQUIRED");
   assert.equal(show(hybrid).revision, beforePremature);
   assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer-human");
+  const clippedQuestion = await askForCard();
+  const clipped = await questionGeometry(clippedQuestion, "start");
+  assert.deepEqual(clipped, { displayed: true, below: true, fullyInside: false });
+  const beforeClipped = show(hybrid).revision;
+  const clippedOffset = queueAdds.length;
+  replies.set("319", managerInput("319", "reviewer", beforeClipped));
+  await submitForm("319");
+  const clippedAnswer = await waitForAdd(clippedOffset);
+  await waitForQueue();
+  assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer-human");
+  assert.equal(show(hybrid).revision, beforeClipped);
+  assert.equal(clippedAnswer.questionId, undefined);
+  assert.equal(receipts.at(-1).error?.code, "USER_DIRECTION_REQUIRED");
   const sendNumber = async input => {
     const question = await askForCard();
+    await waitFor(async () => (await questionGeometry(question, "end"))?.fullyInside,
+      "the complete question inside the chat viewport");
     const offset = queueAdds.length;
     replies.set("319", input);
     await submitForm("319");
@@ -410,6 +442,7 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
   assert.deepEqual((await queuedTurn(afterQuestion)).items.filter(item => item.type === "agentMessage").map(item => item.text),
     ["Для T-0319 сохранён режим «Ревьюер»."]);
   assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer");
+  log("PASS: a question below the scroll viewport was present in the DOM but supplied no authorization. The early reply left the revision and reviewer-human mode unchanged. A fresh reply after scrolling to the question set reviewer mode.");
   assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
   await sendNumber(managerInput("319", "reviewer", show(hybrid).revision - 1));
   assert.equal(receipts.at(-1).error.code, "REVISION_CONFLICT");
