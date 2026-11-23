@@ -61,11 +61,11 @@ test("executor configuration limits external tools, preserves board and policy, 
   const roundtrip = await executorToolConfig(nullable, ".", [{ server: "docs", tool: "read" }]);
   assert.equal(Object.hasOwn(roundtrip.mcp_servers.docs, "tool_timeout_sec"), false);
   assert.equal(Object.hasOwn(roundtrip.mcp_servers.docs, "env"), false);
-  await assert.rejects(executorToolConfig(request, ".", [{ server: "missing", tool: "read" }]), /unavailable/);
+  await assert.rejects(executorToolConfig(request, ".", [{ server: "missing", tool: "read" }]), /MCP transport is missing/);
   const policy: ProviderRequest = async <T>() => ({ config: { mcp_servers: { ...source, docs: { ...source.docs, disabled_tools: ["read"] } } } }) as T;
-  await assert.rejects(executorToolConfig(policy, ".", [{ server: "docs", tool: "read" }]), /unavailable/);
+  await assert.rejects(executorToolConfig(policy, ".", [{ server: "docs", tool: "read" }]), /Provider configuration does not allow docs\/read/);
   const failed: ProviderRequest = async <T>() => ({ data: [{ name: "ai_taskboard", tools: { worklog_record: {} } }, { name: "docs", tools: {}, toolsError: "secret" }] }) as T;
-  await assert.rejects(verifyExecutorTools(failed, "thread", [{ server: "docs", tool: "read" }]), /authorization/);
+  await assert.rejects(verifyExecutorTools(failed, "thread", [{ server: "docs", tool: "read" }]), /Provider discovery did not confirm docs\/read/);
   const rejected: ProviderRequest = async () => { throw new Error("https://host/?token=SECRET"); };
   await assert.rejects(executorToolConfig(rejected, ".", []), error =>
     error instanceof Error && !error.message.includes("SECRET") && /configuration could not be read/.test(error.message));
@@ -89,7 +89,9 @@ test("the Taskboard browser only accepts grants for an app-owned connection", as
     ? { config: { mcp_servers: { ai_taskboard: { url: "http://board" }, [computerUseServer]: { url: "http://browser" } } } }
     : method === "app/list" ? { data: [] }
     : { data: [{ name: computerUseServer, tools: { computer_use: {}, browser_use: {} } }] }) as T;
-  assert.deepEqual((await providerTools(request, "thread", ".")).tools, []);
+  const unavailable = (await providerTools(request, "thread", ".")).tools;
+  assert.equal(unavailable.length, 2);
+  assert.ok(unavailable.every(tool => !tool.available && !tool.assignable && tool.reason?.includes("Windows")));
   assert.ok((await providerTools(request, "thread", ".", true)).tools.every(tool => tool.assignable));
   const reply = await providerActions(".", request, "thread")("task_tool_grant", { id: "T-0001", revision: 1, ...grant });
   assert.ok(!reply.ok && reply.error.code === "TOOL_UNAVAILABLE" && reply.error.message.includes("Windows"));

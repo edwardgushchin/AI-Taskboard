@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { BrowserWindow } from "electron";
+import type { Browser, Page } from "playwright-core";
 import type { Task } from "../cli/model.ts";
 import { openBoardMcp } from "./board-mcp.ts";
 import { cliFailure } from "./cli.ts";
@@ -10,6 +13,12 @@ export const computerUseUnavailable = "Taskboard Computer Use and Browser Use re
 export const computerUseSupported = () => process.platform === "win32" && Boolean(process.versions.electron);
 
 const demo = "app://computer-use/demo";
+const site = "app://computer-use/test-site";
+const chrome = "app://computer-use/chrome";
+export const computerUseSurfaces: Record<string, string[]> = {
+  computer_use: [demo, chrome],
+  browser_use: [demo, site],
+};
 const width = 1280;
 const height = 800;
 const html = `<!doctype html><html lang="en"><meta charset="utf-8">
@@ -27,17 +36,48 @@ const html = `<!doctype html><html lang="en"><meta charset="utf-8">
 <main><h1>AI Taskboard browser demo</h1><label><input id="confirmation" type="checkbox" aria-label="Confirm completion">
 <span class="pending">Pending</span><span class="complete">Confirmed</span></label></main></html>`;
 const page = "data:text/html;charset=utf-8," + encodeURIComponent(html);
+const testHtml = html.replaceAll("AI Taskboard browser demo", "AI Taskboard test site");
 
-const urlProperty = { type: "string", description: `Required for open. Pass ${demo}.` };
+async function openTestSite() {
+  const path = "/" + randomUUID();
+  const server = createServer((request, response) => {
+    if (request.method !== "GET" || request.url !== path) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; form-action 'none'",
+    }).end(testHtml);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return {
+    url: origin + path,
+    close: () => new Promise<void>(resolve => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    }),
+  };
+}
+
+const openUrl = (name: string) => ({
+  type: "string",
+  description: "Required for open. Choose " + computerUseSurfaces[name].join(" or ") + ".",
+});
 const tools = [
-  { name: "computer_use", description: `Open ${demo}, capture a 1280×800 PNG, or click viewport coordinates in the isolated demo.`,
+  { name: "computer_use", description: `Open the isolated Google Chrome test window (${chrome}) or ${demo}, capture a 1280×800 PNG, or click viewport coordinates.`,
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["open", "screenshot", "click"] }, url: urlProperty,
+      action: { type: "string", enum: ["open", "screenshot", "click"] }, url: openUrl("computer_use"),
       x: { type: "integer", description: "Required for click." }, y: { type: "integer", description: "Required for click." },
     }, required: ["action"], additionalProperties: false } },
-  { name: "browser_use", description: `Open ${demo}, read its title and checkbox state, or click the confirmation checkbox by its label.`,
+  { name: "browser_use", description: `Open the isolated HTTP test site (${site}) or ${demo}, read the title and checkbox state, or click the confirmation checkbox.`,
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["open", "read", "click_confirmation"] }, url: urlProperty,
+      action: { type: "string", enum: ["open", "read", "click_confirmation"] }, url: openUrl("browser_use"),
     }, required: ["action"], additionalProperties: false } },
 ];
 
@@ -49,16 +89,20 @@ export async function openComputerUse(
   const exposed = grants ? tools.filter(tool => grants.some(grant => grant.server === computerUseServer && grant.tool === tool.name)) : tools;
   if (!enabled || !computerUseSupported() || !exposed.length) return;
   let window: BrowserWindow | undefined;
+  let testSite: Awaited<ReturnType<typeof openTestSite>> | undefined;
+  let chromeBrowser: Browser | undefined;
+  let chromePage: Page | undefined;
+  let electronUrl: string | undefined;
+  let releasePartition: (() => void) | undefined;
+  const targets = new Map<string, string>();
   let closed = false;
-  let busy = false;
-  const closeWindow = () => {
-    closed = true;
-    if (window && !window.isDestroyed()) window.destroy();
-    window = undefined;
-  };
-  const call = async (name: string, args: unknown, requestSignal: AbortSignal): Promise<CliReply> => {
+  let active: Promise<CliReply> | undefined;
+  const perform = async (name: string, args: unknown, requestSignal: AbortSignal): Promise<CliReply> => {
     const input = args as { action?: unknown; url?: unknown; x?: number; y?: number } | null;
-    if (input?.action === "open" && input.url !== demo) return cliFailure("BROWSER_SCOPE", `Only ${demo} is permitted.`);
+    const allowed = computerUseSurfaces[name];
+    if (input?.action === "open" && (typeof input.url !== "string" || !allowed.includes(input.url))) {
+      return cliFailure("BROWSER_SCOPE", "Allowed surfaces: " + allowed.join(", ") + ".");
+    }
     if (typeof input?.action !== "string" ||
         !["open", ...(name === "computer_use" ? ["screenshot", "click"] : ["read", "click_confirmation"])].includes(input.action)) {
       return cliFailure("INVALID_INPUT", "Choose an action supported by this tool.");
@@ -69,16 +113,60 @@ export async function openComputerUse(
       return cliFailure("INVALID_INPUT", "Click coordinates must be inside the 1280×800 viewport.");
     }
     if (closed || requestSignal.aborted) return cliFailure("BROWSER_STOPPED", "The browser session has stopped.");
-    if (busy) return cliFailure("BROWSER_BUSY", "Wait for the current browser action to finish.");
-    busy = true;
+    const target = input.action === "open" ? input.url as string : targets.get(name);
     try {
+      if (target === chrome) {
+        if (input.action === "open") {
+          testSite ??= await openTestSite();
+          if (!chromePage || chromePage.isClosed()) {
+            await chromeBrowser?.close();
+            const { chromium } = await import("playwright-core");
+            if (closed || requestSignal.aborted) return cliFailure("BROWSER_STOPPED", "The browser session has stopped.");
+            chromeBrowser = await chromium.launch({
+              channel: "chrome",
+              headless: false,
+              chromiumSandbox: true,
+              proxy: { server: new URL(testSite.url).origin, bypass: "127.0.0.1" },
+              timeout: 10_000,
+            });
+            const context = await chromeBrowser.newContext({
+              viewport: { width, height },
+              serviceWorkers: "block",
+              acceptDownloads: false,
+            });
+            context.setDefaultTimeout(5000);
+            const fixtureUrl = testSite.url;
+            await context.route("**/*", route => route.request().url() === fixtureUrl ? route.continue() : route.abort());
+            chromePage = await context.newPage();
+            context.on("page", opened => { if (opened !== chromePage) void opened.close().catch(() => {}); });
+          }
+          await chromePage.goto(testSite.url, { waitUntil: "domcontentloaded", timeout: 5000 });
+          targets.set(name, chrome);
+          return { ok: true, data: { url: chrome, browser: "Google Chrome", width, height } };
+        }
+        if (!chromePage || chromePage.isClosed() || chromePage.url() !== testSite?.url) {
+          return cliFailure("BROWSER_NOT_OPEN", `Open ${chrome} first.`);
+        }
+        if (input.action === "screenshot") {
+          const image = await chromePage.screenshot({ scale: "css", timeout: 5000 });
+          if (chromePage.url() !== testSite?.url) {
+            return cliFailure("BROWSER_SCOPE", "The Chrome tab left the test site.");
+          }
+          return { ok: true, data: { url: chrome, width, height, pngBase64: image.toString("base64") } };
+        }
+        await chromePage.mouse.click(x!, y!);
+        return { ok: true, data: { url: chrome, clicked: true } };
+      }
       if (input.action === "open") {
+        if (target === site) testSite ??= await openTestSite();
+        const address = target === site ? testSite!.url : page;
         if (!window || window.isDestroyed()) {
           const electron = await import("electron");
           if (closed || requestSignal.aborted) return cliFailure("BROWSER_STOPPED", "The browser session has stopped.");
-          const partition = electron.session.fromPartition("taskboard-browser-" + randomUUID());
+          releasePartition?.();
+          const partition = electron.session.fromPartition("taskboard-browser-" + randomUUID(), { cache: false });
           partition.webRequest.onBeforeRequest((details, callback) => {
-            callback({ cancel: details.resourceType !== "mainFrame" || details.url !== page });
+            callback({ cancel: details.resourceType !== "mainFrame" || details.url !== electronUrl });
           });
           partition.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
           partition.setPermissionCheckHandler(() => false);
@@ -90,13 +178,25 @@ export async function openComputerUse(
           contents.on("will-navigate", event => event.preventDefault());
           contents.on("will-redirect", event => event.preventDefault());
           contents.on("will-attach-webview", event => event.preventDefault());
-          partition.on("will-download", event => event.preventDefault());
+          const denyDownload = (event: Electron.Event) => event.preventDefault();
+          partition.on("will-download", denyDownload);
+          releasePartition = () => {
+            partition.webRequest.onBeforeRequest(null);
+            partition.setPermissionRequestHandler(null);
+            partition.setPermissionCheckHandler(null);
+            partition.removeListener("will-download", denyDownload);
+          };
         }
-        await window.loadURL(page);
-        return { ok: true, data: { url: demo, width, height } };
+        electronUrl = address;
+        await window.loadURL(address);
+        targets.set(name, target!);
+        return { ok: true, data: { url: target, ...(target === site ? { address } : {}), width, height } };
       }
-      if (!window || window.isDestroyed() || window.webContents.getURL() !== page) {
-        return cliFailure("BROWSER_NOT_OPEN", `Open ${demo} first.`);
+      // The original demo can be opened with one tool and used with the other.
+      const surface = target ?? (electronUrl === page ? demo : undefined);
+      const address = surface === site ? testSite?.url : surface === demo ? page : undefined;
+      if (!address || !window || window.isDestroyed() || window.webContents.getURL() !== address) {
+        return cliFailure("BROWSER_NOT_OPEN", "Open a supported surface first.");
       }
       const contents = window.webContents;
       if (input.action === "screenshot") {
@@ -108,7 +208,7 @@ export async function openComputerUse(
         const state = await contents.executeJavaScript(`({ title: document.title, label: "Confirm completion",
           checked: document.querySelector("#confirmation").checked,
           status: document.querySelector("#confirmation").checked ? "Confirmed" : "Pending" })`);
-        return { ok: true, data: { url: demo, ...state } };
+        return { ok: true, data: { url: surface, ...state } };
       }
       if (input.action === "click_confirmation") {
         await contents.executeJavaScript('document.querySelector("#confirmation").click()');
@@ -117,18 +217,47 @@ export async function openComputerUse(
           contents.sendInputEvent({ type, button: "left", clickCount: 1, x: x!, y: y! });
         }
       }
-      return { ok: true, data: { url: demo, clicked: true } };
-    } catch {
-      return cliFailure("BROWSER_FAILED", "The isolated browser could not complete the action. Open the demo again or restart the session.");
-    } finally {
-      busy = false;
+      return { ok: true, data: { url: surface, clicked: true } };
+    } catch (error) {
+      if (closed || requestSignal.aborted) return cliFailure("BROWSER_STOPPED", "The browser session has stopped.");
+      if (target === chrome) {
+        if (error instanceof Error && /distribution .* is not found/i.test(error.message)) {
+          return cliFailure("CHROME_NOT_INSTALLED", "Google Chrome Stable was not found. Install it or open the embedded demo.");
+        }
+        return cliFailure("CHROME_FAILED", "The isolated Google Chrome window could not complete the action. Check desktop access and Chrome automation policy.");
+      }
+      return cliFailure("BROWSER_FAILED", "The isolated browser could not complete the action. Open the surface again or restart the session.");
     }
   };
-  const connection = await openBoardMcp(exposed, call, 25, computerUseServer);
-  signal?.addEventListener("abort", closeWindow, { once: true });
-  if (signal?.aborted) closeWindow();
-  return { ...connection, close: async () => {
-    signal?.removeEventListener("abort", closeWindow);
-    try { closeWindow(); } finally { await connection.close(); }
-  } };
+  const connection = await openBoardMcp(exposed, async (name, args, requestSignal) => {
+    if (active) return cliFailure("BROWSER_BUSY", "Wait for the current browser action to finish.");
+    active = perform(name, args, requestSignal);
+    try {
+      return await active;
+    } finally {
+      active = undefined;
+    }
+  }, 25, computerUseServer);
+  let cleanup: Promise<void> | undefined;
+  const close = () => cleanup ??= (async () => {
+    closed = true;
+    signal?.removeEventListener("abort", abort);
+    const disconnected = connection.close();
+    if (window && !window.isDestroyed()) window.destroy();
+    try {
+      await active;
+    } finally {
+      releasePartition?.();
+      releasePartition = undefined;
+      await Promise.all([chromeBrowser?.close(), testSite?.close(), disconnected]);
+      chromeBrowser = undefined;
+      chromePage = undefined;
+      testSite = undefined;
+      window = undefined;
+    }
+  })();
+  const abort = () => { void close().catch(() => {}); };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  return { ...connection, close };
 }
