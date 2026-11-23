@@ -211,19 +211,20 @@ export class CodexTokenUsage {
     const entry = this.entry(threadId, thread);
     const gap = thread.cacheGap;
     const previous = thread.previous;
-    // A retransmitted snapshot can fill in the last missing cache delta.
-    // A later sample with additional spend cannot establish a missing baseline.
-    const repairsCache = gap?.entry === entry && previous && total.totalTokens !== null &&
+    const sameSample = previous && total.totalTokens !== null &&
       previous.totalTokens === total.totalTokens &&
-      usageDelta(total.cachedInputTokens, gap.before, last.cachedInputTokens) !== null &&
       tokenFields.every(key => key === "cachedInputTokens" || previous[key] === null || total[key] === previous[key]);
+    // A cumulative cache baseline remains valid across missing samples for the
+    // same model. Without one, only a retransmission can repair the first sample.
+    const continuesGap = gap?.entry === entry && (typeof gap.before === "number" || sameSample);
+    const repairsCache = continuesGap && usageDelta(total.cachedInputTokens, gap.before, last.cachedInputTokens) !== null;
     if (!repairsCache && previous && tokenFields.every(key => total[key] === previous[key])) return;
-    if (gap && !repairsCache) thread.cacheUncertain = true;
+    if (gap && !continuesGap) thread.cacheUncertain = true;
     thread.cacheGap = undefined;
     for (const key of tokenFields) {
-      if (repairsCache && key !== "cachedInputTokens") continue;
+      if (repairsCache && sameSample && key !== "cachedInputTokens") continue;
       const current = total[key];
-      const before = repairsCache ? gap.before : thread.previous?.[key];
+      const before = continuesGap && key === "cachedInputTokens" ? gap.before : previous?.[key];
       const delta = usageDelta(current, before, last[key]);
       if (delta === null || !Number.isSafeInteger((entry[key] ?? 0) + delta)) {
         thread.incomplete = true;

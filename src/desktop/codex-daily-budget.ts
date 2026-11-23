@@ -58,7 +58,7 @@ export function recordCodexDailyUsage(project: string, role: CodexBudgetRole, re
         const previous = charges[key];
         if (previous) {
           const sameReport = previous.reportId === charge.reportId;
-          const upgradesLegacy = !previous.excludesCache && charge.tokens !== null;
+          const upgradesLegacy = sameReport && !previous.excludesCache && charge.tokens !== null;
           if (sameReport && previous.sequence > charge.sequence) continue;
           if (sameReport && previous.sequence === charge.sequence && !upgradesLegacy) continue;
           if (previous.tokens !== null && !upgradesLegacy && (!sameReport || !previous.excludesCache)) continue;
