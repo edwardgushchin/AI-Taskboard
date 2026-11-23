@@ -74,6 +74,11 @@ function readEntries(path: string) {
   return (exists(path) ? readJson(path) : []) as RuntimeEntry[];
 }
 
+export function isRuntimeRecord(entry: RuntimeEntry) {
+  return entry.kind === "defaults" || entry.kind === "queue" ||
+    entry.kind === "executor-release" || entry.kind === "review-retry";
+}
+
 function liveEntries(entries: RuntimeEntry[]) {
   const processes = new Map<number, boolean>();
   const isAlive = (pid: number) => {
@@ -90,10 +95,11 @@ function liveEntries(entries: RuntimeEntry[]) {
       entry = entries.find(candidate => candidate.id === entry!.parent);
     }
   }
-  const live = entries.filter(entry => entry.kind === "defaults" || entry.kind === "queue" || entry.kind === "executor-release" || entry.kind === "review-retry"
-    ? true : entry.kind === "provider"
-    ? providers.has(entry)
-    : isAlive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent)));
+  const live = entries.filter(entry => {
+    if (isRuntimeRecord(entry)) return true;
+    if (entry.kind === "provider") return providers.has(entry);
+    return isAlive(entry.owner) || protectedIds.has(entry.id) || (entry.parent && protectedIds.has(entry.parent));
+  });
   const retained = new Set(live);
   for (const entry of entries) if (!retained.has(entry)) queueRestart(live, entry);
   return live;

@@ -14,6 +14,9 @@ const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL("../", import.meta.url));
 const outputOption = process.argv.indexOf("--artifacts");
 const pollScenario = process.argv.includes("--poll");
+const idleScenario = process.argv.includes("--idle");
+assert.ok(!(pollScenario && idleScenario), "Choose only one install scenario.");
+const reportName = idleScenario ? "idle-update-check.txt" : pollScenario ? "update-poll-report.json" : "update-install-report.json";
 assert.ok(outputOption >= 0, "Supply --artifacts with a review directory.");
 const artifacts = resolve(process.argv[outputOption + 1]);
 mkdirSync(artifacts, { recursive: true });
@@ -38,7 +41,7 @@ if (!process.env.TASKBOARD_UPDATE_QA_SCRATCH) {
             directory], { cwd: tmpdir(), windowsHide: true, stdio: "inherit" });
         assert.equal(cleanup.status, 0, "Temporary QA directory cleanup failed");
         assert.equal(existsSync(directory), false);
-        const path = join(artifacts, pollScenario ? "update-poll-report.json" : "update-install-report.json");
+        const path = join(artifacts, reportName);
         if (existsSync(path)) {
             const report = JSON.parse(readFileSync(path, "utf8"));
             report.cleanupScratchRemoved = true;
@@ -66,6 +69,10 @@ record.seams = ["QA-only bootstrap substitutes release HTTP responses and the mo
     "Unique appId/executableName isolate installed product; NSIS PATH hooks and desktop/start-menu shortcuts are disabled in QA only. Process safety hook is retained.",
     "QA packages omit Huggingface and bundled standalone CLI; board CLI calls use the packaged Electron Node runtime. No code signing or live official release download is verified.",
     "Confirmation responses are deterministic through dialog.showMessageBox; the before/after PNGs show the real manager conversation."];
+if (idleScenario) {
+    record.seams[3] = "Runtime leases are supplied using the production registry. The screenshot is the native About dialog cropped to its content area, with a 1280×900 parent window.";
+    record.command = "node scripts/check-update-install.mjs --idle --artifacts " + process.argv[outputOption + 1];
+}
 if (pollScenario) {
     record.seams[3] = "The initial poll uses its production 5-second delay. QA advances the recurring interval from 60 minutes to 1 second; update UI actions, installation and restart run unchanged.";
     record.command = "node scripts/check-update-install.mjs --poll --artifacts " + process.argv[outputOption + 1];
@@ -799,13 +806,68 @@ async function checkLockedQuit(executable, pid, mode) {
         return update?.candidate?.version === newVersion && update.phase === "ready";
     }, "new package verified before confirmed install");
 }
+
+async function checkIdleUpdate(ask, mode, executable, originalPid) {
+    for (const role of ["executor", "reviewer"]) {
+        const lease = await command({ action: "hold-lease", role });
+        assert.equal(lease.role, role);
+        const blocked = await ask("Установи AI Taskboard " + newVersion);
+        assert.equal(blocked.result.error.code, "UPDATE_APP_BUSY");
+        assert.equal(child.exitCode, null);
+        assert.deepEqual(updateCachesFor(executable), []);
+        await command({ action: "release-lease" });
+        note("Live " + role + " lease blocked the manager update.");
+    }
+
+    const idle = await command({ action: "seed-idle-registry" });
+    assert.deepEqual(idle.map(entry => entry.kind).sort(), ["executor-release", "queue", "review-retry"]);
+    assert.ok(idle.every(entry => entry.owner === 0 && !entry.pid));
+    record.idleRegistry = idle.map(({ kind, owner }) => ({ kind, owner }));
+    mode("normal", undefined, { holdReply: true });
+    await command({ action: "begin-held-install", text: "Установи AI Taskboard " + newVersion });
+    const preparedReply = await until(() => readJson(join(control, "prepared-reply.json")), "idle manager update prepared");
+    assert.equal(preparedReply.result.ok, true);
+    assert.equal(preparedReply.result.data.version, newVersion);
+    assert.equal(readJson(join(control, "tool.json")).duplicate.error.code, "UPDATE_IN_PROGRESS");
+    const preparedCaches = updateCachesFor(executable);
+    assert.equal(preparedCaches.length, 1);
+    const [{ installer }] = preparedCaches.map(path => readJson(join(path, "update.json")));
+    assert.equal(sha(readFileSync(installer)), record.packages[1].sha256);
+    note("The manager and its own turn prepared one verified installer with all three idle records present.");
+
+    await command({ action: "hold-lease", role: "reviewer" });
+    await command({ action: "release-prepared-reply" });
+    await until(() => readJson(join(control, "held-reply-result.json"))?.reply?.ok, "manager reply finished");
+    await until(() => preparedCaches.every(path => !existsSync(path)), "late reviewer veto removes the prepared installer");
+    assert.equal(readJson(join(control, "ready.json")).pid, originalPid);
+    assert.equal(child.exitCode, null);
+    await command({ action: "release-lease" });
+    note("A reviewer lease that appeared after preparation vetoed the restart; the old process stayed alive.");
+
+    const run = code => command({ action: "execute", code });
+    const click = elementId => command({ action: "click", elementId });
+    await until(() => run("!document.getElementById('app-update-badge').hidden"), "update badge after veto");
+    await click("app-settings");
+    await click("settings-menu-update");
+    await until(() => run("document.getElementById('update-dialog').open"), "open update dialog");
+    const before = await command({ action: "network" });
+    mode("normal");
+    await click("update-action");
+    await until(() => run("window.taskboard.updateState().then(state => state.phase === 'ready')"), "window package verified");
+    assert.equal((await command({ action: "network" })).installers, before.installers + 1);
+    assert.equal(updateCachesFor(executable).length, 1);
+    await command({ action: "approve-restart" });
+    note("The update window downloaded one installer and confirmed restart after the reviewer released its lease.");
+}
+
 try {
     mkdirSync(project);
     mkdirSync(profile);
     mkdirSync(control);
     cpSync(join(root, "src"), join(project, "src"), { recursive: true });
     for (const name of [
-        "main.ts", "installation-updates.ts", "update-runner.ps1", "updates.ts", "localization.cjs",
+        "main.ts", "board-runtime.ts", "agent-limits.ts", "about.ts", "about-preload.cjs",
+        "installation-updates.ts", "update-runner.ps1", "updates.ts", "localization.cjs",
         "index.html", "styles.css", "themes.css", "preload.cjs", "renderer.js", "locales/en.json", "locales/ru.json",
         "vendor/codicons/codicon.css",
     ]) {
@@ -869,7 +931,7 @@ import { app, BrowserWindow, dialog } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { trackProvider, trackActiveRun } from './src/desktop/active-runs.ts';
-import { registerRuntime, runtimeEntries } from './src/desktop/board-runtime.ts';
+import { registerRuntime, runtimeEntries, runtimeTransaction } from './src/desktop/board-runtime.ts';
 const control = ${JSON.stringify(control)};
 const artifacts = ${JSON.stringify(artifacts)};
 assert.equal(app.getPath('userData'), ${JSON.stringify(profile)}, 'Profile must be forwarded by the actual launch/restart arguments');
@@ -1025,6 +1087,7 @@ void (async () => {
     let goal;
     let goalProvider;
     let goalTurn;
+    let lease;
     try {
         last = JSON.parse(readFileSync(join(control, 'reply.json'), 'utf8')).id ?? 0;
     }
@@ -1331,6 +1394,56 @@ void (async () => {
                 operation = undefined;
                 result = true;
             }
+            else if (command.action === 'hold-lease') {
+                assert.ok(!lease);
+                const project = ${JSON.stringify(boards[1])};
+                lease = registerRuntime(project, {
+                    kind: 'slot', role: command.role, task: 'qa-' + command.role,
+                });
+                assert.ok(lease);
+                result = runtimeEntries(project).find(entry => entry.task === 'qa-' + command.role);
+                assert.equal(result.owner, process.pid);
+            }
+            else if (command.action === 'release-lease') {
+                assert.ok(lease);
+                lease();
+                lease = undefined;
+                result = true;
+            }
+            else if (command.action === 'seed-idle-registry') {
+                const project = ${JSON.stringify(boards[1])};
+                const executor = registerRuntime(project, { kind: 'slot', role: 'executor' });
+                assert.ok(executor);
+                executor();
+                runtimeTransaction(project, entries => {
+                    entries.push(
+                        { id: 'queue:qa', owner: 0, kind: 'queue', task: 'qa-queued', revision: 1 },
+                        { id: 'review-retry:qa', owner: 0, kind: 'review-retry', task: 'qa-review',
+                            reviewRetry: { binding: 'qa', reason: 'test fixture', notBefore: Date.now() + 86400000 } },
+                    );
+                });
+                result = runtimeEntries(project).filter(entry => entry.kind !== 'defaults');
+            }
+            else if (command.action === 'capture-about') {
+                window.setContentSize(1280, 900);
+                const showing = new Promise(resolve => app.once('browser-window-created', (_event, created) => {
+                    created.once('show', () => resolve(created));
+                }));
+                await evaluate('window.taskboard.menuAction("about")');
+                const about = await showing;
+                assert.equal(about.getParentWindow(), window);
+                const rows = await about.webContents.executeJavaScript(
+                    'Array.from(document.querySelectorAll(".row"), node => [node.children[0].textContent, node.children[1].textContent])'
+                );
+                assert.deepEqual(rows[0], ['Версия', app.getVersion()]);
+                const png = await about.webContents.capturePage();
+                assert.ok(!png.isEmpty());
+                assert.deepEqual(png.getSize(), { width: 520, height: 400 });
+                writeFileSync(join(artifacts, 'idle-update-installed.png'), png.toPNG());
+                result = { version: app.getVersion(), rows, dialogSize: png.getSize(),
+                    parentContentSize: window.getContentSize() };
+                about.close();
+            }
             else if (command.action === 'hold-goal') {
                 goal = registerRuntime(${JSON.stringify(boards[0])}, {
                     kind: 'task', task: 'manager:context', role: 'manager',
@@ -1435,7 +1548,7 @@ void (async () => {
             config: { appId: "org.aitaskboard.updateqa." + productExecutable.slice(-8), productName: "AI Taskboard",
                 executableName: productExecutable, directories: { output }, electronVersion: require("electron/package.json").version,
                 electronDist: dirname(require("electron")), files: ["src/**/*", "qa-main.mjs"], npmRebuild: false,
-                ...(pollScenario ? { compression: "store" } : {}),
+                ...(pollScenario || idleScenario ? { compression: "store" } : {}),
                 win: { signExecutable: false }, nsis: { oneClick: false, perMachine: false, allowElevation: false,
                     createDesktopShortcut: false, createStartMenuShortcut: false, allowToChangeInstallationDirectory: true,
                     include: join(project, "installer.nsh") },
@@ -1471,8 +1584,8 @@ catch (error) {
     record.electron = before.electron;
     record.chromium = before.chromium;
     note("Installed NSIS " + oldVersion + " started with an isolated profile and two boards; paths contain spaces.");
-    const mode = (value, release) => writeJson(join(control, "fixture.json"), {
-        mode: value, release, installer: nextInstaller, digest: record.packages[1].sha256,
+    const mode = (value, release, options) => writeJson(join(control, "fixture.json"), {
+        mode: value, release, installer: nextInstaller, digest: record.packages[1].sha256, ...options,
     });
     const ask = async (text) => {
         const result = await command({ action: "ask", text });
@@ -1516,46 +1629,50 @@ catch (error) {
         }
         mode("normal");
         await ask("Проверь обновления AI Taskboard");
-        writeJson(join(control, "fixture.json"), {
-            mode: "normal", installer: nextInstaller, digest: record.packages[1].sha256,
-            holdReply: true, holdClose: true,
-        });
-        await command({ action: "begin-held-install", text: "Установи AI Taskboard " + newVersion });
-        const preparedReply = await until(() => readJson(join(control, "prepared-reply.json")), "prepared reply held");
-        assert.equal(preparedReply.result.ok, true);
-        assert.equal(preparedReply.result.data.version, newVersion);
-        const preparedCaches = updateCachesFor(executable);
-        assert.equal(preparedCaches.length, 1, "Exactly one verified update cache must exist before closing");
-        await command({ action: "close-window" });
-        const closeWarning = await until(() => readJson(join(control, "close-warning.json")), "close warning held");
-        assert.equal(closeWarning.buttons.length, 2);
-        await command({ action: "release-prepared-reply" });
-        const heldResult = await until(() => readJson(join(control, "held-reply-result.json")), "prepared manager reply completed");
-        assert.ok(!heldResult.error, JSON.stringify(heldResult));
-        assert.equal(heldResult.reply.ok, true, JSON.stringify(heldResult));
-        // The cache removal proves that before-quit vetoed the update while state.closing was still true.
-        await until(() => preparedCaches.every(path => !existsSync(path)), "prepared cache removed while close warning remains open");
-        await command({ action: "cancel-close" });
-        assert.equal(child.exitCode, null, "Cancelled close must leave the old process running");
-        assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
-        mode("normal");
-        const afterCancelledClose = await ask("Проверь обновления AI Taskboard после отмены закрытия");
-        assert.equal(afterCancelledClose.result.ok, true);
-        assert.equal(afterCancelledClose.result.data.currentVersion, oldVersion);
-        record.cancelledClose = {
-            preparedVersion: preparedReply.result.data.version,
-            warning: closeWarning.message,
-            oldProcessId: before.pid,
-            cacheCountBefore: preparedCaches.length,
-            cacheRemoved: true,
-            cacheRemovedWhileWarningOpen: true,
-            newDialogueCurrentVersion: afterCancelledClose.result.data.currentVersion,
-        };
-        note("A close warning held the window while the prepared manager reply finished; before-quit removed its update cache before the warning was cancelled. The old process accepted a new dialogue and then retried installation successfully.");
-        record.captureBefore = await command({ action: "capture", name: "update-before.png" });
-        tool = await ask("Установи AI Taskboard " + newVersion);
-        assert.equal(tool.result.ok, true, JSON.stringify(tool));
-        assert.equal(tool.duplicate.error.code, "UPDATE_IN_PROGRESS");
+        if (idleScenario) {
+            await checkIdleUpdate(ask, mode, executable, before.pid);
+        } else {
+            writeJson(join(control, "fixture.json"), {
+                mode: "normal", installer: nextInstaller, digest: record.packages[1].sha256,
+                holdReply: true, holdClose: true,
+            });
+            await command({ action: "begin-held-install", text: "Установи AI Taskboard " + newVersion });
+            const preparedReply = await until(() => readJson(join(control, "prepared-reply.json")), "prepared reply held");
+            assert.equal(preparedReply.result.ok, true);
+            assert.equal(preparedReply.result.data.version, newVersion);
+            const preparedCaches = updateCachesFor(executable);
+            assert.equal(preparedCaches.length, 1, "Exactly one verified update cache must exist before closing");
+            await command({ action: "close-window" });
+            const closeWarning = await until(() => readJson(join(control, "close-warning.json")), "close warning held");
+            assert.equal(closeWarning.buttons.length, 2);
+            await command({ action: "release-prepared-reply" });
+            const heldResult = await until(() => readJson(join(control, "held-reply-result.json")), "prepared manager reply completed");
+            assert.ok(!heldResult.error, JSON.stringify(heldResult));
+            assert.equal(heldResult.reply.ok, true, JSON.stringify(heldResult));
+            // The cache removal proves that before-quit vetoed the update while state.closing was still true.
+            await until(() => preparedCaches.every(path => !existsSync(path)), "prepared cache removed while close warning remains open");
+            await command({ action: "cancel-close" });
+            assert.equal(child.exitCode, null, "Cancelled close must leave the old process running");
+            assert.equal(readJson(join(control, "ready.json")).pid, before.pid);
+            mode("normal");
+            const afterCancelledClose = await ask("Проверь обновления AI Taskboard после отмены закрытия");
+            assert.equal(afterCancelledClose.result.ok, true);
+            assert.equal(afterCancelledClose.result.data.currentVersion, oldVersion);
+            record.cancelledClose = {
+                preparedVersion: preparedReply.result.data.version,
+                warning: closeWarning.message,
+                oldProcessId: before.pid,
+                cacheCountBefore: preparedCaches.length,
+                cacheRemoved: true,
+                cacheRemovedWhileWarningOpen: true,
+                newDialogueCurrentVersion: afterCancelledClose.result.data.currentVersion,
+            };
+            note("A close warning held the window while the prepared manager reply finished; before-quit removed its update cache before the warning was cancelled. The old process accepted a new dialogue and then retried installation successfully.");
+            record.captureBefore = await command({ action: "capture", name: "update-before.png" });
+            tool = await ask("Установи AI Taskboard " + newVersion);
+            assert.equal(tool.result.ok, true, JSON.stringify(tool));
+            assert.equal(tool.duplicate.error.code, "UPDATE_IN_PROGRESS");
+        }
     }
     const installingSince = Date.now() - 1000;
     const after = await until(() => {
@@ -1581,7 +1698,10 @@ catch (error) {
         assert.equal(selected.project, board);
         assert.equal(selected.board, board);
     }
-    if (!pollScenario) {
+    if (idleScenario) {
+        record.captureAfter = await command({ action: "capture-about" });
+        note("The native About dialog shows " + record.captureAfter.version + " after restart.");
+    } else if (!pollScenario) {
         record.captureAfter = await command({ action: "capture", name: "update-after.png" });
     }
     note("The verified package installed and one NSIS update restarted " + newVersion + ".");
@@ -1648,6 +1768,6 @@ finally {
         process.exitCode = 1;
     }
     record.gitStatusAfter = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
-    writeJson(join(artifacts, pollScenario ? "update-poll-report.json" : "update-install-report.json"), record);
+    writeJson(join(artifacts, reportName), record);
 }
 process.exit(record.result === "passed" && !record.cleanupError ? 0 : 1);
