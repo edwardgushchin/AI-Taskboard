@@ -14,6 +14,7 @@ function appendChatTime(entry, at) {
 }
 
 const chatDrafts = new Map();
+let lastTaskReview;
 let chatCatalog;
 const chatPreviews = new IntersectionObserver(entries => {
   for (const { isIntersecting, target } of entries) {
@@ -659,7 +660,7 @@ function updateChat({ project, id, type, text, items, savedRevision, savedRun, r
   const open = frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === id;
   if (type === "reviewer-chat") {
     if (frame.project === project) byId("board-composer").firstChild?.refreshWork();
-    if (open) byId("task-review-history")?.refreshReview?.();
+    if (open) byId("task-side").firstElementChild?.refreshReview();
     return;
   }
   if (type === "discussion" && frame.project === project) {
@@ -752,98 +753,33 @@ function isTaskChatReplacement(event, task) {
   return task.codexServiceThreads?.some(id => id !== task.codexThreadId && event.text?.endsWith("`" + id + "`"));
 }
 
-function reviewerHistory(task, journal, decisions, onActivity) {
-  const project = frame.project;
-  const status = element("li", undefined, "muted");
-  status.setAttribute("role", "status");
-  status.hidden = true;
-  journal.append(status);
-  const nodes = new Map();
-  let timer;
-  let generation = 0;
-  return () => {
-    if (timer !== undefined) return;
-    timer = setTimeout(() => {
-      timer = undefined;
-      if (journal.isConnected && (onActivity || journal.closest("details")?.open)) void load();
-    }, 200);
-  };
-
-  async function load() {
-    const request = ++generation;
+function reviewerItems(attempt) {
+  const seen = new Set();
+  return attempt.items.flatMap(item => {
+    if (item.stageChild || collaborationItem(item)) return [];
+    const id = JSON.stringify([item.threadId, item.id]);
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const entry = { ...item, id: attempt.id + ":" + encodeURIComponent(item.threadId ?? "") + ":" + item.id };
+    if (item.type !== "agentMessage" || item.phase === "commentary") return [entry];
+    if (item.status !== "completed") return [];
     try {
-      const result = await api.reviewerChat(task.id);
-      if (!journal.isConnected || project !== frame.project || request !== generation) return;
-      if (!result.ok) throw new Error(boardError(result.error));
-      const attempts = result.data;
-      onActivity?.(attempts.flatMap(attempt => attempt.items));
-      if (!journal.closest("details")?.open) return;
-      const ids = new Set(attempts.map(attempt => attempt.id));
-      for (const [id, node] of nodes) {
-        if (ids.has(id)) continue;
-        node.entry.remove();
-        nodes.delete(id);
-      }
-      const history = decisions.map(({ entry }) => entry);
-      for (const [index, attempt] of attempts.entries()) {
-        let node = nodes.get(attempt.id);
-        if (!node) {
-          const entry = element("li", undefined, "chat-entry task-review-attempt");
-          entry.dataset.actor = "reviewer";
-          const label = element("span", undefined, "chat-coordination-header");
-          const activity = element("div", undefined, "chat-run");
-          const error = element("p", undefined, "chat-run-error");
-          entry.append(label, activity, error);
-          journal.insertBefore(entry, history.find(row => row.dataset.historyAt > attempt.at) ?? status);
-          node = { entry, label, activity, error };
-          nodes.set(attempt.id, node);
-        }
-        if (node.finished && node.index === index) continue;
-        node.index = index;
-        node.finished = attempt.durationMs !== undefined;
-        bindLocalized(node.label, "textContent", () => t("ui.reviewer_50c42665") + " #" + (index + 1) +
-          " · " + t(node.finished ? "ui.completed_a863c619" : "ui.in_progress_15929530") + " · " + shortDate(attempt.at));
-        node.error.textContent = attempt.error ?? "";
-        node.error.hidden = !attempt.error;
-        node.report = undefined;
-        const items = attempt.items.flatMap(item => {
-          if (item.stageChild || collaborationItem(item)) return [];
-          if (item.type !== "agentMessage" || item.phase === "commentary") return [item];
-          if (item.status !== "completed") return [];
-          node.report = undefined;
-          try {
-            const { summary, findings, evidence } = JSON.parse(item.text);
-            if (typeof summary !== "string") return [item];
-            const reportFindings = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
-            node.report = { summary: summary.trim(), reason: reportFindings.join("\n\n").trim() };
-            const notes = reportFindings.map(text => "- " + text).join("\n");
-            const checks = Array.isArray(evidence) ? evidence.flatMap((text, index) =>
-              typeof text === "string" ? [(index + 1) + ". " + text] : []).join("\n") : "";
-            return [{ ...item, text: [summary, notes, checks].filter(Boolean).join("\n\n") }];
-          } catch { return [item]; }
-        });
-        renderRunActivity(node.activity, items, false, undefined, task.id, { reviewer: true });
-      }
-      const matched = new Set();
-      for (const { entry, event, submittedAt } of decisions) {
-        const attempt = attempts.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at);
-        const node = attempt && nodes.get(attempt.id);
-        // Keep the card's decision event and hide only the text also shown in its attempt.
-        const reportText = event.action === "request-changes" ? node?.report?.reason : node?.report?.summary;
-        entry.hidden = Boolean(node?.finished && !attempt.error && !matched.has(attempt.id) &&
-          reportText === event.text.trim());
-        if (entry.hidden) matched.add(attempt.id);
-      }
-      status.hidden = attempts.length > 0 || decisions.length > 0;
-      if (!status.hidden) {
-        bindLocalized(status, "textContent", () => t("ui.no_reviewer_messages_yet_25b5caaf"));
-      }
-    } catch (error) {
-      if (!journal.isConnected || project !== frame.project || request !== generation) return;
-      status.hidden = false;
-      bindLocalized(status, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
+      const { summary, findings, evidence } = JSON.parse(item.text);
+      if (typeof summary !== "string") return [entry];
+      const notes = Array.isArray(findings) ? findings.filter(text => typeof text === "string") : [];
+      const checks = Array.isArray(evidence) ? evidence.filter(text => typeof text === "string") : [];
+      return [{ ...entry, text: reviewReportText({ summary, findings: notes, evidence: checks }) }];
+    } catch {
+      return [entry];
     }
-  }
+  });
+}
+
+function reviewReportText(report) {
+  const notes = report.findings.map(text => "- " + text).join("\n");
+  const checks = report.evidence.filter(text => typeof text === "string")
+    .map((text, index) => (index + 1) + ". " + text).join("\n");
+  return [report.summary, notes, checks].filter(Boolean).join("\n\n");
 }
 
 function collaborationData(item) {
@@ -999,7 +935,7 @@ function stageWork(task, panels) {
   };
 }
 
-function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
+function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasReviewStages) {
   const project = frame.project;
   const key = project + "\0" + task.id;
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
@@ -1024,6 +960,37 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
   const workViewport = chatViewport(work);
+  const hasReviewHistory = task.status === "review" ||
+    task.history.some(event => event.action === "submit" || event.actor === "reviewer");
+  // Preserve loaded pages on refresh and immediate reopen without retaining every card's transcript.
+  if (lastTaskReview?.key !== key) {
+    lastTaskReview = { key, attempts: new Map() };
+  }
+  const review = lastTaskReview;
+  const workRows = new Map();
+  function placeWork(row, at, key) {
+    row.dataset.chatAnchor = key;
+    const rank = [Date.parse(at) || 0, key];
+    workRows.set(row, rank);
+    const next = [...work.children].find(other => {
+      const order = workRows.get(other);
+      return other !== row && order &&
+        (order[0] > rank[0] || (order[0] === rank[0] && order[1] > rank[1]));
+    });
+    const successor = next ?? emptyWork;
+    if (row.nextSibling !== successor || row.parentElement !== work) {
+      work.insertBefore(row, successor);
+    }
+  }
+  function marker(key, at, actor, label, text, body = chatText) {
+    const row = element("li", undefined, "chat-entry chat-event");
+    row.dataset.actor = actor;
+    row.append(element("span", label, "chat-action"));
+    if (text) row.append(body(text, { taskId: task.id, reviewer: actor === "reviewer" }));
+    appendChatTime(row, at);
+    placeWork(row, at, key);
+    return row;
+  }
   let workHistory = draft.workHistory;
   if (!workHistory || workHistory.threadId !== task.codexThreadId) {
     workHistory = { threadId: task.codexThreadId, restoredRuns: new Map() };
@@ -1042,8 +1009,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
       ? document.activeElement.parentElement.dataset.item
       : undefined,
   });
+  const compareWorkItems = (left, right) => (left.at ?? "").localeCompare(right.at ?? "");
   const renderWork = (log, items, durationMs, sequence) =>
-    renderRunActivity(log, items, sequence !== undefined, durationMs, task.id,
+    renderRunActivity(log, items.every(item => item.at) ? items.toSorted(compareWorkItems) : items, sequence !== undefined, durationMs, task.id,
       { taskId: task.id, taskRunSequence: sequence });
   const savedWork = [];
   const savedStageItems = new Map();
@@ -1056,12 +1024,23 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   const locale = localization.locale;
   const dayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
   const sessionStart = task.history.findLastIndex(event => isTaskChatReplacement(event, task));
+  const historyKey = index => String(index + 1).padStart(12, "0");
+  const itemKey = (item, threadId) => JSON.stringify([item.threadId ?? threadId, item.id]);
+  const firstTime = (items, fallback) => items.reduce((earliest, item) =>
+    item.at && (!earliest || item.at < earliest) ? item.at : earliest, undefined) ?? fallback;
   const savedItems = new Set();
-  const addSavedItems = items => items.filter(item => {
+  const stageStarts = new Map();
+  const latestPlan = Object.fromEntries(["work", "review"].map(phase => [phase,
+    task.history.findLastIndex(event => event.action === "expert-plan" && (!event.expertPhase || event.expertPhase === phase)),
+  ]));
+  const reviewDecisions = [];
+  let submissionSequence = 0;
+  const addSavedItems = (items, threadId) => items.filter(item => {
     if (!taskWorkItem(item)) return false;
     if (item.type === "truncated") return true;
-    if (savedItems.has(item.id)) return false;
-    savedItems.add(item.id);
+    const key = itemKey(item, threadId);
+    if (savedItems.has(key)) return false;
+    savedItems.add(key);
     return true;
   });
   let day;
@@ -1076,19 +1055,54 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     if (event.expertMessage && !ownerQuestion) continue;
 
     if (renderStageWork && event.action === "run-log" && event.run?.length) savedStageItems.set(index, event.run);
+    const eventKey = historyKey(index);
+    if (["request-changes", "return-to-draft", "expert-plan", "start", "submit"].includes(event.action)) {
+      stageStarts.clear();
+    }
+    const stage = event.expertStageRun;
+    if (stage) {
+      const address = stage.phase + ":" + stage.key;
+      const binding = JSON.stringify([stage.sessionId, stage.threadId, stage.targetHead, stage.agentId]);
+      const plan = index > latestPlan[stage.phase] ? task.expertTeam?.[stage.phase] : undefined;
+      const definition = plan?.stages.find(candidate => candidate.key === stage.key);
+      const lead = stage.sessionId && definition && definition.expertId === plan.lead;
+      if (stage.state !== "running") {
+        stageStarts.delete(address);
+      } else if (event.expertStageStart || ((stage.agentId || lead) && stageStarts.get(address) !== binding)) {
+        stageStarts.set(address, binding);
+        const start = event.expertStageStart;
+        const label = () => [
+          t("work.expert_started"),
+          start?.expertName ?? definition?.expertId,
+          start?.stageTitle ?? definition?.title,
+        ].filter(Boolean).join(" · ");
+        savedWork.push(() => marker("stage:" + eventKey, event.at, event.actor, label));
+      }
+    }
+    if (event.action === "submit") submissionSequence = index + 1;
+    if (event.actor === "reviewer" && ["review-approve", "review-note", "request-changes"].includes(event.action)) {
+      const decision = { event, submissionSequence };
+      reviewDecisions.push(decision);
+      savedWork.push(() => {
+        decision.row = marker("review-decision:" + eventKey, event.at, "reviewer",
+          () => t("work." + event.action), event.text, text => reviewerFindings(text, task.id));
+        decision.body = event.text ? decision.row.children[1] : undefined;
+      });
+    }
     const executorEvent = event.action === "run-log" && event.actor === "agent" && index > sessionStart &&
       (!event.runThreadId || event.runThreadId === task.codexThreadId);
     if (executorEvent) {
       const log = element("li", undefined, "chat-run");
       log.hidden = true;
       if (event.run?.length) {
-        const items = addSavedItems(event.run);
+        const items = addSavedItems(event.run, event.runThreadId ?? task.codexThreadId);
         if (items.length) {
-          work.append(log);
-          savedWork.push(() => renderWork(log, items, event.durationMs, index + 1));
+          savedWork.push(() => {
+            placeWork(log, firstTime(items, event.at), "run:" + eventKey);
+            renderWork(log, items, event.durationMs, index + 1);
+          });
         }
       } else if (task.codexThreadId && event.durationMs !== undefined) {
-        work.append(log);
         missingRuns.set(index, { log, at: event.at, durationMs: event.durationMs });
       }
     }
@@ -1156,9 +1170,10 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     for (const [index, { log, at, durationMs }] of missingRuns) {
       const restoredItems = itemsAt(index) ?? [];
       if (renderStageWork && restoredItems.length) savedStageItems.set(index, restoredItems);
-      const items = addSavedItems(restoredItems);
+      const items = addSavedItems(restoredItems, task.codexThreadId);
       if (!items.length) continue;
       restoredRuns.set(index, { at, durationMs, items: restoredItems });
+      placeWork(log, firstTime(items, at), "run:" + historyKey(index));
       renderWork(log, items, durationMs, index + 1);
       restored++;
       lastRestored = log;
@@ -1205,6 +1220,143 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   const liveRun = element("li", undefined, "chat-run chat-run-live");
   const emptyWork = element("li", () => t("ui.no_task_work"), "muted");
   work.append(liveRun, emptyWork);
+  const reviewControls = element("li", undefined, "task-work-controls");
+  const reviewStatus = element("span", undefined, "muted");
+  reviewStatus.setAttribute("role", "status");
+  const olderReviews = button(() => t("work.load_older_reviews"), () => refreshReview(review.before), "quiet");
+  olderReviews.hidden = !review.before;
+  reviewControls.append(olderReviews, reviewStatus);
+  reviewControls.hidden = true;
+  work.prepend(reviewControls);
+  const reviewNodes = new Map();
+  const olderBoundaries = new Map();
+  let reviewRequest;
+  let reviewDirty = false;
+
+  function updateEmptyWork() {
+    emptyWork.hidden = [...workRows.keys()].some(row => !row.hidden);
+  }
+
+  function renderReviews() {
+    for (const attempt of review.attempts.values()) {
+      const key = attempt.id;
+      const order = historyKey(review.boundaries.findIndex(boundary => boundary.id === key));
+      const rowKey = "review:" + order + ":";
+      let node = reviewNodes.get(key);
+      if (!node) {
+        marker(rowKey + "0:" + key, attempt.at, "reviewer", () => t("work.review_started"));
+        const log = element("li", undefined, "chat-run");
+        log.dataset.actor = "reviewer";
+        node = { log };
+        reviewNodes.set(key, node);
+      }
+      if (node.attempt === attempt) continue;
+      node.attempt = attempt;
+      const entries = reviewerItems(attempt);
+      const items = entries.every(item => item.at) ? entries.toSorted(compareWorkItems) : entries;
+      node.report = attempt.report;
+      if (!node.report) {
+        const answer = attempt.items.findLast(item => item.type === "agentMessage" &&
+          item.phase !== "commentary" && item.status === "completed");
+        try {
+          const parsed = JSON.parse(answer?.text ?? "null");
+          if (typeof parsed?.summary === "string") node.report = parsed;
+        } catch {
+          // Older provider replies may be plain text.
+        }
+      }
+      const report = attempt.report && reviewReportText(attempt.report);
+      const reported = report && items.some(item => item.type === "agentMessage" &&
+        item.phase !== "commentary" && item.text === report);
+      placeWork(node.log, attempt.at, rowKey + "1:" + key);
+      renderRunActivity(node.log, items, false, undefined, task.id, { taskId: task.id, reviewer: true });
+
+      if (attempt.durationMs === undefined || node.finish) continue;
+      const finishedAt = attempt.finishedAt ?? new Date(Date.parse(attempt.at) + attempt.durationMs).toISOString();
+      const outcome = attempt.error ? "review_failed" : attempt.interrupted ? "review_interrupted" :
+        attempt.report?.needsHuman ? "review_needs_human" : attempt.report?.findings.length ? "review_findings" : "review_finished";
+      node.finish = marker(rowKey + "2:" + key, finishedAt, "reviewer",
+        () => t("work." + outcome), attempt.error ?? (reported ? undefined : report));
+    }
+
+    const usedReports = new Set();
+    for (const { event, submissionSequence, body } of reviewDecisions) {
+      if (!body) continue;
+      const submittedAt = task.history[submissionSequence - 1]?.at ?? "";
+      const boundary = review.boundaries?.findLast(attempt => attempt.at >= submittedAt && attempt.at <= event.at &&
+        (attempt.submissionSequence === undefined || attempt.submissionSequence === submissionSequence));
+      const node = boundary && reviewNodes.get(boundary.id);
+      const report = node?.finish && !node.attempt.error && node.report;
+      const duplicate = report && (event.action === "request-changes" && Array.isArray(report.findings)
+        ? report.findings.join("\n\n").trim() : report.summary.trim()) === event.text.trim();
+      body.hidden = Boolean(duplicate && !usedReports.has(node));
+      if (body.hidden) usedReports.add(node);
+    }
+
+    for (const { reviewTiming: timing } of task.tokenUsage?.reports ?? []) {
+      if (!timing) continue;
+      const { startedAtMs, durationMs, submissionSequence } = timing;
+      const key = "legacy-review:" + submissionSequence + ":" + startedAtMs;
+      const logged = review.boundaries?.some(attempt => (attempt.submissionSequence === undefined ||
+        attempt.submissionSequence === submissionSequence) &&
+        Math.abs(Date.parse(attempt.at) - startedAtMs) < (attempt.submissionSequence === undefined ? 10 : 1));
+      if (logged) {
+        for (const row of olderBoundaries.get(key) ?? []) {
+          row.remove();
+          workRows.delete(row);
+        }
+        olderBoundaries.delete(key);
+      } else if (!olderBoundaries.has(key) && review.boundaries) {
+        const startedAt = new Date(startedAtMs).toISOString();
+        const endedAt = new Date(startedAtMs + durationMs).toISOString();
+        olderBoundaries.set(key, [
+          marker(key + ":0", startedAt, "reviewer", () => t("work.review_started")),
+          marker(key + ":1", endedAt, "reviewer", () => t("work.review_finished")),
+        ]);
+      }
+    }
+    olderReviews.hidden = !review.before;
+    reviewControls.hidden = olderReviews.hidden && !reviewStatus.textContent;
+    updateEmptyWork();
+  }
+
+  async function refreshReview(before) {
+    if (!hasReviewHistory || !api.reviewerChat || (work.hidden && !hasReviewStages)) return;
+    if (reviewRequest) {
+      reviewDirty = true;
+      return;
+    }
+    olderReviews.disabled = true;
+    reviewRequest = api.reviewerChat(task.id, before);
+    try {
+      const result = await reviewRequest;
+      if (!area.isConnected || frame.project !== project) return;
+      if (!result.ok) throw new Error(boardError(result.error));
+      const overlaps = result.data.attempts.some(attempt => review.attempts.has(attempt.id));
+      for (const attempt of result.data.attempts) {
+        const cached = review.attempts.get(attempt.id);
+        if (!cached || cached.durationMs === undefined) review.attempts.set(attempt.id, attempt);
+      }
+      review.boundaries = result.data.boundaries;
+      if (before !== undefined || !overlaps) review.before = result.data.before;
+      reviewStatus.textContent = "";
+      if (hasReviewStages) renderStageWork("review", [...review.attempts.values()]
+        .sort((left, right) => left.at.localeCompare(right.at)).flatMap(attempt => attempt.items));
+      if (!work.hidden) workViewport.update(renderReviews);
+    } catch (error) {
+      if (!area.isConnected || frame.project !== project) return;
+      bindLocalized(reviewStatus, "textContent", () => t("ui.could_not_load_reviewer_chat_5c01ba32") + error.message);
+      reviewControls.hidden = false;
+    } finally {
+      reviewRequest = undefined;
+      olderReviews.disabled = false;
+      if (reviewDirty && area.isConnected && frame.project === project) {
+        reviewDirty = false;
+        void refreshReview();
+      }
+    }
+  }
+  area.refreshReview = () => void refreshReview();
   list.append(element("li", undefined, "chat-turn"));
   area.append(list, work);
 
@@ -1225,13 +1377,16 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     const executor = saved?.items ?? (threadId && threadId === task.codexThreadId ? liveItems : []);
     const seen = new Set();
     const items = executor.filter(item => {
-      if (!taskWorkItem(item) || savedItems.has(item.id) || seen.has(item.id)) return false;
-      seen.add(item.id);
+      const key = itemKey(item, saved?.threadId ?? threadId);
+      if (!taskWorkItem(item) || savedItems.has(key) || seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
     workViewport.update(() => {
+      const key = saved ? "run:" + historyKey(saved.sequence - 1) : "run:live";
+      placeWork(liveRun, firstTime(items, new Date().toISOString()), key);
       renderWork(liveRun, items, saved?.durationMs, saved?.sequence);
-      emptyWork.hidden = [...work.children].some(row => row !== emptyWork && row !== workControls && !row.hidden);
+      updateEmptyWork();
     });
   }
   area.updateRun = (items = []) => {
@@ -1347,7 +1502,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
     }
     if (name === "work") {
       for (const render of savedWork.splice(0)) render();
+      renderReviews();
       renderLiveWork();
+      void refreshReview();
       requestAnimationFrame(() => {
         if (work.hidden || !work.isConnected) return;
         if (pendingViewport) {
@@ -1365,6 +1522,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
       if (!list.hidden) list.scrollTop = draft.scroll ?? list.scrollHeight;
     });
   }
+  if (hasReviewStages) queueMicrotask(() => {
+    if (area.isConnected && !reviewRequest) void refreshReview();
+  });
   area.openDialogue = () => {
     selectView("dialogue");
     if (latestOwnerQuestion) {

@@ -3,9 +3,9 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readReviewerChat, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
+import { readReviewerChat, readReviewerChatPage, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 
-test("reviewer chat displays the active attempt and retains recent success and failure after it ends", async t => {
+test("reviewer chat displays the active attempt and retains every success and failure after it ends", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const project = await mkdtemp(join(tmpdir(), "taskboard-reviewer-chat-"));
   t.after(() => rm(project, { recursive: true, force: true }));
@@ -34,7 +34,13 @@ test("reviewer chat displays the active attempt and retains recent success and f
   await assert.rejects(withReviewerChat(project, task, () => {}, async () => { throw new Error("Provider disconnected"); }),
     /Provider disconnected/);
   const history = readReviewerChat(project, task);
-  assert.equal(history.length, 10);
-  assert.deepEqual(history[0]?.items, []);
+  assert.equal(history.length, 11);
+  const latest = readReviewerChatPage(project, task);
+  assert.equal(latest.attempts.length, 10);
+  assert.ok(latest.before);
+  const older = readReviewerChatPage(project, task, latest.before);
+  assert.deepEqual(older.attempts.map(attempt => attempt.items), [[item]]);
+  assert.equal(older.before, undefined);
+  assert.ok(older.attempts[0]?.finishedAt);
   assert.equal(history.at(-1)?.error, "Provider disconnected");
 });

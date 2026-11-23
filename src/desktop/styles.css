@@ -883,8 +883,6 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .task-details-content { margin: 0; padding: 12px 14px 14px; border-top: 1px solid var(--border); }
 .task-details-content h3 { margin: 0 0 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .task-details-content h3:not(:first-child) { margin-top: 12px; }
-.task-review-history { display: grid; gap: 8px; list-style: none; margin: 0; }
-.task-review-history .chat-entry { width: 100%; max-width: none; }
 .task-review-files { list-style: none; margin: 0; padding: 0; }
 .task-review-file.button {
   display: flex; justify-content: space-between; align-items: center; gap: 8px 12px; flex-wrap: wrap;

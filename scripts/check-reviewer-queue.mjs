@@ -686,7 +686,7 @@ globalThis.reviewPendingInWatch = (project, id) =>
   await waitFor(async () => {
     const result = await window.webContents.executeJavaScript(`window.taskboard.reviewerChat(${id})`);
     assert.equal(result.ok, true, JSON.stringify(result));
-    return result.data[0]?.durationMs !== undefined;
+    return result.data.attempts[0]?.durationMs !== undefined;
   }, "the queued reviewer attempt");
   await waitFor(() => cli(["show", task.id]).history.some(event =>
     event.action === "review-note" && event.text === report.summary), "the reviewer decision");

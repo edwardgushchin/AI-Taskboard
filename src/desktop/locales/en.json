@@ -1428,5 +1428,16 @@
   "updates.cleaning": "Removing the downloaded installer…",
   "updates.cleanup_failed": "Could not remove the downloaded installer. Close any program using the file and try again. {reason}",
   "updates.install_button": "Install and restart",
-  "updates.preparing": "An application update is being prepared. Try again after the restart or cancellation."
+  "updates.preparing": "An application update is being prepared. Try again after the restart or cancellation.",
+  "work.expert_started": "Expert started",
+  "work.review_started": "Review started",
+  "work.review_finished": "Review finished",
+  "work.review_failed": "Review failed",
+  "work.review_interrupted": "Review interrupted",
+  "work.review_needs_human": "Review needs a decision",
+  "work.review_findings": "Review finished with findings",
+  "work.review-approve": "Review approved",
+  "work.review-note": "Review note",
+  "work.request-changes": "Changes requested",
+  "work.load_older_reviews": "Load older reviews"
 }
