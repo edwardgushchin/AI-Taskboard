@@ -47,6 +47,70 @@ test("initialization preserves CRLF Markdown and groups nested content with its 
   assert.deepEqual(readBoardProjectRules(root), imported);
 });
 
+test("imports sibling subsections separately under a common heading", t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-import-subsections-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  const file = join(root, "AGENTS.md");
+  const entries = [
+    "# Правила проекта\n\nОбщее пояснение.\n",
+    "## Перед коммитом\n\nПроверьте [ссылки](./guide.md).\n\n### Пример\n\n```sh\nnpm test\n```\n",
+    "## Перед выпуском\n\n- Обновите справку.\n  - Проверьте примеры.\n",
+  ];
+  const original = entries.join("\n");
+  writeFileSync(file, original);
+  const location = locateBoard(root, true, false, true);
+  initializeBoard(location, () => {}, "manual");
+  const imported = readBoardProjectRules(root);
+  assert.deepEqual(imported.rules.map(rule => rule.text), entries);
+  assert.equal(imported.text, original);
+
+  const [preamble, commit, release] = imported.rules;
+  const save = (revision: string, rules: typeof imported.rules) =>
+    withProjectRulesLock(location, () => writeBoardProjectRules(root, { revision, rules }));
+  const disabled = save(imported.revision, [preamble, release, { ...commit, enabled: false }]);
+  assert.equal(disabled.text, entries[0] + "\n" + entries[2]);
+  assert.deepEqual(readBoardProjectRules(root), disabled);
+  const restored = save(disabled.revision, [preamble, commit, release]);
+  assert.equal(restored.text, original);
+  assert.equal(withProjectRulesLock(location, () => migrateBoardProjectRules(root)).changed, false);
+});
+
+test("reordering tight list items after prose preserves their Markdown boundaries", t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-rule-boundaries-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  const file = join(root, "AGENTS.md");
+  const original = "1. Первое правило\n2. Второе правило\n";
+  writeFileSync(file, original);
+  const location = locateBoard(root, true, false, true);
+  initializeBoard(location, () => {}, "manual");
+  const imported = readBoardProjectRules(root);
+  assert.equal(imported.text, original);
+  const [first, second] = imported.rules;
+  const prose = { text: "Отдельное текстовое правило.", enabled: true };
+  const save = (revision: string, rules: typeof imported.rules) =>
+    withProjectRulesLock(location, () => writeBoardProjectRules(root, { revision, rules }));
+
+  const appended = save(imported.revision, [first, second, prose]);
+  assert.equal(appended.text, original + "\n\n" + prose.text);
+  const entries = [prose, second, first];
+  const reordered = save(appended.revision, entries);
+  const expected = prose.text + "\n\n" + second.text + "\n" + first.text;
+  assert.equal(reordered.text, expected);
+  assert.ok(readFileSync(file, "utf8").includes(expected));
+  assert.ok(boardProjectRulesPrompt(root).includes(expected));
+  assert.deepEqual(readBoardProjectRules(root).rules, entries);
+
+  const olderProjection = expected.replace(prose.text + "\n\n", prose.text + "\n");
+  writeFileSync(file, readFileSync(file, "utf8").replace(expected, olderProjection));
+  const reopened = readBoardProjectRules(root);
+  assert.deepEqual(reopened.rules, entries);
+  assert.equal(save(reopened.revision, reopened.rules).text, expected);
+
+  const disabled = save(readBoardProjectRules(root).revision, [prose, { ...second, enabled: false }, first]);
+  assert.doesNotMatch(disabled.text, /Второе правило/);
+  assert.equal(save(disabled.revision, [first, second]).text, original);
+});
+
 test("an unreadable AGENTS.md leaves initialization retryable", t => {
   const root = mkdtempSync(join(tmpdir(), "taskboard-invalid-agents-"));
   t.after(() => rmSync(root, { recursive: true }));

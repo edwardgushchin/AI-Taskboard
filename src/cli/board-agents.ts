@@ -88,8 +88,18 @@ function splitRules(text: string): ProjectRule[] {
     const blocks = tokens.filter(token => token.level === 0 && token.map);
     const first = blocks[0];
     if (first?.type === "heading_open") {
-      for (const heading of blocks.filter(token => token.type === "heading_open" && token.tag === first.tag)) {
-        if (heading.map) starts.add(heading.map[0]);
+      const headings = blocks.filter(token => token.type === "heading_open");
+      const roots = headings.filter(heading => heading.tag === first.tag);
+      let siblings = roots;
+      if (roots.length === 1 && headings.every(heading => heading.tag >= first.tag)) {
+        const children = headings.slice(1);
+        const childLevel = children.map(heading => heading.tag).sort()[0];
+        siblings = children.filter(heading => heading.tag === childLevel);
+      }
+      if (siblings.length > 1) {
+        for (const heading of siblings) {
+          if (heading.map) starts.add(heading.map[0]);
+        }
       }
     } else if (blocks.length === 1 && (first.type === "bullet_list_open" || first.type === "ordered_list_open")) {
       for (const item of tokens.filter(token => token.type === "list_item_open" && token.level === 1)) {
@@ -105,9 +115,26 @@ function splitRules(text: string): ProjectRule[] {
   })).filter(rule => rule.text.trim());
 }
 
-function enabledText(rules: ProjectRule[]) {
-  return rules.filter(rule => rule.enabled).map((rule, index) =>
-    (index ? rule.separator ?? "\n\n" : "") + rule.text).join("");
+function preservesMarkdownBoundary(previous: string, next: string) {
+  const boundary = previous.split("\n").length;
+  const tokens = markdown.parse(previous + "\n" + next, {});
+  const crossing = tokens.find(token => token.level === 0 && token.map &&
+    token.map[0] < boundary && token.map[1] > boundary);
+  if (!crossing) return true;
+
+  // A tight list can span the boundary as long as the next rule starts its own item.
+  return (crossing.type === "bullet_list_open" || crossing.type === "ordered_list_open") &&
+    tokens.some(token => token.type === "list_item_open" && token.level === 1 && token.map?.[0] === boundary);
+}
+
+function enabledText(rules: ProjectRule[], legacy = false) {
+  const enabled = rules.filter(rule => rule.enabled);
+  return enabled.map((rule, index) => {
+    if (index === 0) return rule.text;
+    const compact = rule.separator === "\n" &&
+      (legacy || preservesMarkdownBoundary(enabled[index - 1].text, rule.text));
+    return (compact ? "\n" : "\n\n") + rule.text;
+  }).join("");
 }
 
 function versionOf(source: string) {
@@ -125,7 +152,7 @@ function savedRules(root: string, source: string, text: string) {
   directory(join(root, ".tasks"));
   const rules = (readJson(path) as Record<string, ProjectRule[]>)[version];
   if (!rules) return splitRules(text);
-  if (enabledText(rules) === text) return rules;
+  if (enabledText(rules) === text || enabledText(rules, true) === text) return rules;
   return [...splitRules(text), ...rules.filter(rule => !rule.enabled)];
 }
 

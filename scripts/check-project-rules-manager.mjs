@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,7 +10,7 @@ import { electronCheck } from "./electron-check.mjs";
 import { readBoardProjectRules } from "../src/cli/board-agents.ts";
 
 const live = process.argv.includes("--live");
-const { scratch } = electronCheck(import.meta.url, "project-rules-manager", live ? 300_000 : 90_000);
+const { scratch, artifacts } = electronCheck(import.meta.url, "project-rules-manager", live ? 300_000 : 90_000);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow } = require("electron");
 const { transformSync } = require("esbuild");
@@ -26,6 +26,12 @@ const question = "Как работает перенос инструкций и
 const original = "- Проверяйте [справку](./guide.md).\r\n- Сохраняйте порядок.\r\n";
 const agentsFile = board => join(board, "AGENTS.md");
 const backgroundPrompt = "Inspect pending board activity.";
+const report = join(artifacts, live ? "manager-live.txt" : "manager-fixture.txt");
+
+function log(text) {
+  appendFileSync(report, text + "\n");
+  console.log(text);
+}
 
 process.env.GIT_CEILING_DIRECTORIES = scratch;
 app.setPath("userData", join(scratch, "profile"));
@@ -44,6 +50,14 @@ async function waitFor(probe) {
 }
 
 async function check() {
+  writeFileSync(report, "");
+  log("Command: node scripts/check-project-rules-manager.mjs" + (live ? " --live" : ""));
+  log("Provider: " + (live ? "Codex gpt-6.2-sol (low)" : "deterministic fixture") +
+    " | Electron " + process.versions.electron + " | " + process.platform);
+  for (const path of ["scripts/check-project-rules-manager.mjs", "src/cli/board-agents.ts", "src/desktop/main.ts"]) {
+    const bytes = readFileSync(new URL("../" + path, import.meta.url));
+    log(createHash("sha256").update(bytes).digest("hex") + "  " + path);
+  }
   for (const board of [project, other, isolated]) {
     mkdirSync(board);
     const initialized = execFileSync(process.env.TASKBOARD_CHECK_NODE, [
@@ -81,8 +95,14 @@ async function check() {
     };
   }
   symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"), "junction");
+  const receipts = [];
+  globalThis.recordRulesReceipt = (board, receipt) => receipts.push({ board, receipt });
   const sourceUrl = new URL("../src/desktop/main.ts", import.meta.url);
-  const source = readFileSync(sourceUrl, "utf8")
+  const receiptReturn = "return { ok: true, data: { changed, imported } };";
+  const rawSource = readFileSync(sourceUrl, "utf8");
+  assert.equal(rawSource.split(receiptReturn).length, 2);
+  const source = rawSource
+    .replace(receiptReturn, "globalThis.recordRulesReceipt(board.project, { changed, imported });\n" + receiptReturn)
     .replaceAll("import.meta.url", JSON.stringify(sourceUrl.href))
     .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, sourceUrl).href));
   const manager = live ? source : "const replyToBoard = (...args) => globalThis.fixtureRulesManager(...args);\n" +
@@ -116,26 +136,32 @@ async function check() {
     const background = await globalThis.runRulesBackground(window.webContents, project, backgroundPrompt);
     assert.equal(background.ok, true, JSON.stringify(background));
     assert.equal(readFileSync(agentsFile(project), "utf8"), original);
-    console.log("Background turn cannot call migration and leaves AGENTS.md unchanged.");
+    log("Background turn cannot call migration and leaves AGENTS.md unchanged.");
   }
   const explanation = await ask(window, question);
   assert.equal(readFileSync(agentsFile(project), "utf8"), original);
-  console.log("Question left AGENTS.md unchanged:", explanation);
+  assert.deepEqual(receipts, []);
+  log("Question left AGENTS.md unchanged:\n" + explanation);
   for (const [index, board] of [project, other].entries()) {
     const boardWindow = index === 0 ? window : second;
     const request = requests[index];
     const first = await ask(boardWindow, request);
+    const imported = { changed: true, imported: 2 };
+    assert.deepEqual(receipts.splice(0), [{ board, receipt: imported }]);
     const migrated = readFileSync(agentsFile(board), "utf8");
     assert.match(migrated, /AI Taskboard workflow/);
     assert.ok(migrated.includes(original));
     assert.equal(readBoardProjectRules(board).rules.length, 2);
     const repeat = await ask(boardWindow, request);
+    const unchanged = { changed: false, imported: 0 };
+    assert.deepEqual(receipts.splice(0), [{ board, receipt: unchanged }]);
     assert.equal(readFileSync(agentsFile(board), "utf8"), migrated);
     if (board === project) assert.equal(readFileSync(agentsFile(other), "utf8"), original);
     assert.equal(readFileSync(agentsFile(isolated), "utf8"), original);
-    console.log(request, "-", first, "| Repeat:", repeat);
+    log("\nOwner request on board " + (index + 1) + ": " + request);
+    log("Import receipt: " + JSON.stringify(imported) + "\nManager reply:\n" + first);
+    log("Repeat receipt: " + JSON.stringify(unchanged) + "\nManager reply:\n" + repeat);
   }
-  console.log("Provider:", live ? "live" : "deterministic fixture", "| Electron", process.versions.electron);
   second.destroy();
   window.destroy();
 }
