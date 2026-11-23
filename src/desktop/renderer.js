@@ -2205,6 +2205,7 @@ function draftComposer() {
   let managerRun;
   let managerBusy = false;
   let queueRetry;
+  let workBudgetRetry;
   let managerWork;
   let startingWork = false;
   let disposed = false;
@@ -2452,6 +2453,7 @@ function draftComposer() {
   function readVisibleMessages() {
     clearTimeout(readRetry);
     clearTimeout(queueRetry);
+    clearTimeout(workBudgetRetry);
     if (!canBrowseHistory() || !api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
@@ -3855,6 +3857,7 @@ function draftComposer() {
       status.append(element("span", () => t("ui.sending_15dba7c5")));
       return;
     }
+    if (job.waitForBudget) status.append(element("span", () => t("task_chat.waiting_for_limit")));
     if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
@@ -4049,7 +4052,7 @@ function draftComposer() {
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || refreshingQueue || movingQueue || queueRetry || managerBusy || active || startingWork ||
+    if (disposed || refreshingQueue || movingQueue || queueRetry || workBudgetRetry || managerBusy || active || startingWork ||
         !next || next.failed || next.editing || next.sending || next.inFlight) return;
     startingWork = true;
     syncViews();
@@ -4067,6 +4070,15 @@ function draftComposer() {
       if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
         renderQueuedActions(next);
         retryQueue();
+        return;
+      }
+      if (!result.ok && result.error.code === "BOARD_CODEX_BUDGET") {
+        next.waitForBudget = true;
+        renderQueuedActions(next);
+        workBudgetRetry = setTimeout(() => {
+          workBudgetRetry = undefined;
+          sendWorkNext();
+        }, 1000);
         return;
       }
       if (!result.ok) throw new Error(boardError(result.error));

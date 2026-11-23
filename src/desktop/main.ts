@@ -2817,6 +2817,9 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
     if (saved?.goal && saved.goal.objective === objective && saved.goal.status !== "complete" &&
         settings.autoMode && iterativeEnabled(settings, readIterativeGoal(board.project, saved.goalId ?? saved.id))) {
       if (saved.goal.status === "active") return { ok: true as const, data: null };
+      if (boardBudgetFailure(board.project, settings)) {
+        return resumeBoardGoal(event.sender, board, objective, false, true);
+      }
       return changeBoardGoal(board.project, projectIdentity(board.project), { kind: "resume" });
     }
     return resumeBoardGoal(event.sender, board, objective);
@@ -2827,7 +2830,7 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
   const key = projectIdentity(project);
   const resume = boardGoalResumes.get(key);
-  if (resume && !resume.started && kind === "clear") resume.cancelled = true;
+  if (resume && !resume.started && (kind === "clear" || kind === "pause")) resume.cancelled = true;
   if (kind !== "clear") return changeBoardGoal(project, key, action);
   const pending = boardGoalClears.get(key);
   if (pending) return pending;
@@ -2837,7 +2840,7 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   finally { boardGoalClears.delete(key); }
 });
 
-async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objective: string, deferred = false) {
+async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objective: string, deferred = false, iterative = false) {
   const { project } = board;
   const key = projectIdentity(project);
   if (boardGoalResumes.has(key) || boardGoalClears.has(key) || boardWorkRequests.get(key)?.goalRunning) {
@@ -2869,11 +2872,15 @@ async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objec
         if (agentSlots.entries(project).some(entry => entry.task === "manager:context" && entry.state?.goalRunning)) {
           return { ok: true, data: null } as const;
         }
-        const result = await runBoardRequest(sender, board, "", [], "resume");
+        const budget = boardBudgetFailure(project);
+        const result = budget ?? (iterative
+          ? await changeBoardGoal(project, key, { kind: "resume" })
+          : await runBoardRequest(sender, board, "", [], "resume"));
         if (result.ok) {
-          return result.data?.error ? reject("BOARD_GOAL_FAILED", result.data.error) : { ok: true, data: null } as const;
+          const error = result.data && "error" in result.data && result.data.error;
+          return error ? reject("BOARD_GOAL_FAILED", error) : { ok: true, data: null } as const;
         }
-        if (pending.started || !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY"].includes(result.error.code)) {
+        if (pending.started || !["BOARD_REQUEST_IN_PROGRESS", "BOARD_BUSY", "BOARD_CODEX_BUDGET"].includes(result.error.code)) {
           errorMessage = result.error.message || t("ui.reply_stopped_c7fee9e0");
           return { ...result, error: { ...result.error, message: errorMessage } };
         }
@@ -2881,7 +2888,7 @@ async function resumeBoardGoal(sender: Electron.WebContents, board: Board, objec
           pending.waiting = true;
           broadcastBoardChat(project, "orchestrator-goal", { goalResumeWaiting: true });
         }
-        await wait(100, undefined, { signal });
+        await wait(result.error.code === "BOARD_CODEX_BUDGET" ? 1000 : 100, undefined, { signal });
       }
       return { ok: true, data: null } as const;
     } catch (error) {
