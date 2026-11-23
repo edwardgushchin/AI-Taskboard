@@ -86,7 +86,12 @@ export function codexDailyBudget(project: string, limit: number, now = Date.now(
   return { limit, spent, remaining: Math.max(0, limit - spent), resetsAt: reset.getTime(), reason };
 }
 
-type TurnCharge = Pick<ConfirmedTurnUsage, "tokens" | "counters"> & { completedAt?: number; latestAt?: number };
+type TurnCharge = Pick<ConfirmedTurnUsage, "tokens" | "counters"> & {
+  completedAt?: number;
+  latestAt?: number;
+  recoveryPending?: boolean;
+};
+type RecoveryCharge = { threadId: string; turnId: string; completedAt: number; role?: CodexBudgetRole; task?: string };
 type PendingTurn = TurnCharge & { increments: { at: number; tokens: number }[] };
 type OldJournal = {
   resets: number[];
@@ -139,13 +144,24 @@ export class BoardCodexUsage {
             if (db.prepare("SELECT 1 FROM migration WHERE version = 1").get()) return;
             const journal = readJson(old) as OldJournal;
             const insert = db.prepare("INSERT INTO increments VALUES (?, ?, ?)");
+            const save = db.prepare("INSERT OR IGNORE INTO turns (id, tokens, counters, completed) VALUES (?, ?, ?, ?)");
             for (const [key, turn] of Object.entries(journal.turns)) {
-              this.storeTurn(db, key, turn);
+              save.run(key, turn.tokens, turn.counters ? JSON.stringify(turn.counters) : null, turn.completedAt ?? null);
               for (const [at, amount] of Object.entries(turn.periods)) insert.run(key, Number(at), amount);
             }
             const reset = db.prepare("INSERT OR IGNORE INTO resets VALUES (?)");
             for (const at of journal.resets) reset.run(at);
             db.exec("INSERT INTO migration VALUES (1)");
+          });
+        }
+        if (!db.prepare("SELECT 1 FROM migration WHERE version = 2").get()) {
+          this.transaction(db, () => {
+            if (db.prepare("SELECT 1 FROM migration WHERE version = 2").get()) return;
+            db.exec(`
+              ALTER TABLE turns ADD COLUMN recovery_pending INTEGER NOT NULL DEFAULT 1;
+              CREATE INDEX turns_pending_recovery ON turns(completed) WHERE recovery_pending = 1;
+              INSERT INTO migration VALUES (2);
+            `);
           });
         }
         this.initialized = true;
@@ -168,9 +184,11 @@ export class BoardCodexUsage {
   }
 
   private storeTurn(db: DatabaseSync, key: string, turn: TurnCharge) {
-    db.prepare(`INSERT INTO turns VALUES (?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET tokens = excluded.tokens, counters = excluded.counters, completed = excluded.completed`)
-      .run(key, turn.tokens, turn.counters ? JSON.stringify(turn.counters) : null, turn.completedAt ?? null);
+    db.prepare(`INSERT INTO turns (id, tokens, counters, completed, recovery_pending) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET tokens = excluded.tokens, counters = excluded.counters,
+        completed = excluded.completed, recovery_pending = excluded.recovery_pending`)
+      .run(key, turn.tokens, turn.counters ? JSON.stringify(turn.counters) : null, turn.completedAt ?? null,
+        turn.recoveryPending === false ? 0 : 1);
   }
 
   private readTurn(key: string): TurnCharge | undefined {
@@ -178,7 +196,7 @@ export class BoardCodexUsage {
     if (pending) return pending;
     if (!this.initialized && !exists(this.path) && !exists(join(this.folder, "live.json"))) return;
     return this.database(db => {
-      const row = db.prepare(`SELECT tokens, counters, completed,
+      const row = db.prepare(`SELECT tokens, counters, completed, recovery_pending,
         (SELECT MAX(at) FROM increments WHERE turn = turns.id) AS latest
         FROM turns WHERE id = ?`).get(key);
       if (row) return {
@@ -186,6 +204,7 @@ export class BoardCodexUsage {
         counters: typeof row.counters === "string" ? JSON.parse(row.counters) as ConfirmedTurnUsage["counters"] : undefined,
         completedAt: typeof row.completed === "number" ? row.completed : undefined,
         latestAt: typeof row.latest === "number" ? row.latest : undefined,
+        recoveryPending: row.recovery_pending === 1,
       };
     });
   }
@@ -228,12 +247,28 @@ export class BoardCodexUsage {
   unresolved(now: number) {
     const previous = new Date(now);
     previous.setDate(previous.getDate() - 1);
+    const since = previous.setHours(0, 0, 0, 0);
+    const candidates = new Map<string, RecoveryCharge>();
     const paths = [dayPath(this.project, now), dayPath(this.project, previous.getTime())];
-    return paths.flatMap(path => Object.entries(readCharges(path)).flatMap(([key, charge]) => {
-      if (charge.tokens !== null || this.readTurn(key)?.completedAt !== undefined) return [];
-      const [threadId, turnId] = JSON.parse(key) as [string, string];
-      return [{ ...charge, threadId, turnId }];
-    }));
+    for (const path of paths) {
+      for (const [key, charge] of Object.entries(readCharges(path))) {
+        if (charge.tokens !== null || this.readTurn(key)?.recoveryPending === false) continue;
+        const [threadId, turnId] = JSON.parse(key) as [string, string];
+        candidates.set(key, { ...charge, threadId, turnId });
+      }
+    }
+    if (this.initialized || exists(this.path) || exists(join(this.folder, "live.json"))) {
+      this.database(db => {
+        const rows = db.prepare("SELECT id, completed FROM turns WHERE recovery_pending = 1 AND completed >= ? ORDER BY completed, id");
+        for (const row of rows.iterate(since)) {
+          const key = row.id as string;
+          if (candidates.has(key)) continue;
+          const [threadId, turnId] = JSON.parse(key) as [string, string];
+          candidates.set(key, { threadId, turnId, completedAt: row.completed as number });
+        }
+      });
+    }
+    return [...candidates.values()];
   }
 
   private refineTime(key: string, tokens: number, at: number) {
@@ -299,13 +334,18 @@ export class BoardCodexUsage {
   }
 
   reconcile(report: TokenUsageReport): TokenUsageReport {
-    const completed = new Map<string, { at: number; tokens: number }>();
+    const completed = new Map<string, { at: number; tokens: number; recoveryPending: boolean }>();
     const records = report.records.filter(record => {
       const key = JSON.stringify([record.threadId, record.turnId]);
       if (!this.readTurn(key)) return true;
       if (record.completedAt !== undefined) {
-        const group = completed.get(key) ?? { at: record.completedAt, tokens: 0 };
-        if (record.dailyTokensExcludeCache && record.dailyTokens != null) group.tokens += record.dailyTokens;
+        const group = completed.get(key) ?? { at: record.completedAt, tokens: 0, recoveryPending: false };
+        if (record.dailyTokensExcludeCache && record.dailyTokens != null) {
+          group.tokens += record.dailyTokens;
+        } else {
+          group.recoveryPending = true;
+        }
+        group.recoveryPending ||= record.dailyRecoveryPending === true;
         completed.set(key, group);
       }
       return false;
@@ -313,8 +353,10 @@ export class BoardCodexUsage {
     for (const [key, final] of completed) {
       const old = this.readTurn(key)!;
       const turn = this.pending.get(key) ?? { ...old, increments: [] };
-      if (turn.completedAt === final.at && final.tokens <= turn.tokens) continue;
+      const recoveryPending = final.recoveryPending && !(turn.completedAt !== undefined && turn.recoveryPending === false);
+      if (turn.completedAt === final.at && final.tokens <= turn.tokens && turn.recoveryPending === recoveryPending) continue;
       turn.completedAt = final.at;
+      turn.recoveryPending = recoveryPending;
       turn.counters = undefined;
       if (final.tokens > turn.tokens) {
         turn.increments.push({ at: final.at, tokens: final.tokens - turn.tokens });

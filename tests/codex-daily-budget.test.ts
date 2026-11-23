@@ -466,6 +466,65 @@ test("a saved completed rollout with no terminal event recovers 110355 observed 
   assert.equal(ledger.get(200_000, at + 12_000).spent, 110_355);
 });
 
+for (const legacy of [true, false]) {
+  test(`late rollout data resolves a partial ${legacy ? "legacy" : "live"} turn without double billing`, async t => {
+    const project = mkdtempSync(join(tmpdir(), "codex-budget-retry-"));
+    t.after(() => rmSync(project, { recursive: true, force: true }));
+    mkdirSync(join(project, ".tasks"));
+    const path = join(project, "rollout.jsonl");
+    const at = new Date(2026, 10, 24, 11).getTime();
+    const completedAt = at + 3000;
+    const ledger = new BoardCodexUsage(project);
+    if (legacy) {
+      recordCodexDailyUsage(project, "executor", report("turn", completedAt, null));
+    } else {
+      ledger.observe({ threadId: "thread", turnId: "turn", tokens: 10, observedAt: at });
+      ledger.reconcile(report("turn", completedAt, null));
+    }
+
+    const rollout: object[] = [
+      { type: "session_meta", payload: { id: "thread" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+    ];
+    function sample(time: number, total: number, cached: number) {
+      const counters = { total_tokens: total, cached_input_tokens: cached };
+      rollout.push({ type: "event_msg", timestamp: new Date(time).toISOString(), payload: {
+        type: "token_count", info: { total_token_usage: counters, last_token_usage: counters },
+      } });
+    }
+    async function restore(board: BoardCodexUsage) {
+      writeFileSync(path, rollout.map(event => JSON.stringify(event)).join("\n") + "\n");
+      const usage = new CodexTokenUsage(snapshot => board.observe(snapshot));
+      const [candidate] = board.unresolved(completedAt);
+      assert.equal(candidate?.turnId, "turn");
+      const result = await usage.recoverRollout(path, candidate.threadId, {
+        id: candidate.turnId, status: "completed", completedAt: candidate.completedAt / 1000,
+      });
+      assert.ok(result);
+      assert.equal(board.reconcile(result).records.length, 0);
+      return result;
+    }
+
+    sample(at, 100, 90);
+    const partial = await restore(ledger);
+    assert.equal(partial.records[0].dailyRecoveryPending, true);
+    assert.equal(ledger.get(100, completedAt).spent, 10);
+    const reopened = new BoardCodexUsage(project);
+    sample(at + 2000, 125, 100);
+    await restore(reopened);
+    assert.equal(reopened.get(100, completedAt).spent, 25);
+    assert.equal(reopened.unresolved(completedAt).length, 1);
+    rollout.push({ type: "event_msg", timestamp: new Date(completedAt).toISOString(),
+      payload: { type: "task_complete", turn_id: "turn" } });
+    const final = await restore(reopened);
+    assert.equal(final.records[0].dailyRecoveryPending, undefined);
+    reopened.reconcile(partial);
+    reopened.reconcile(final);
+    assert.equal(reopened.get(100, completedAt).spent, 25);
+    assert.deepEqual(new BoardCodexUsage(project).unresolved(completedAt), []);
+  });
+}
+
 test("completion releases active state and an early flush durably saves the remaining live sample", t => {
   const project = mkdtempSync(join(tmpdir(), "codex-budget-release-"));
   t.after(() => rmSync(project, { recursive: true, force: true }));

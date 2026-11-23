@@ -1227,7 +1227,7 @@ function recoverBoardUsage(watch: BoardWatch) {
       thread: { id: string; path?: string | null };
     }>("thread/read", { threadId: charge.threadId, includeTurns: false }));
     if (thread.id !== charge.threadId || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
-    const write = usageWriter(project, async report => saveDailyUsage(project, charge.role, report, charge.task));
+    const write = usageWriter(project, async report => saveDailyUsage(project, charge.role ?? "manager", report, charge.task));
     const usage = new CodexTokenUsage(sample => {
       if (subscriptions.get(project) === watch && !closingProjects.has(project)) write.observe?.(sample);
     });

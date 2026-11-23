@@ -12,6 +12,7 @@ type ThreadUsage = {
   incomplete: boolean;
   finished: boolean;
   completedAt?: number;
+  dailyRecoveryPending?: boolean;
   totalUncertain?: boolean;
   cacheUncertain?: boolean;
   cacheGap?: { entry: TokenUsageRecord; before: number | null | undefined };
@@ -150,6 +151,7 @@ export class CodexTokenUsage {
     thread.incomplete = false;
     thread.finished = false;
     thread.completedAt = undefined;
+    thread.dailyRecoveryPending = undefined;
     thread.totalUncertain = false;
     thread.cacheUncertain = false;
     thread.cacheGap = undefined;
@@ -186,7 +188,7 @@ export class CodexTokenUsage {
   async recoverRollout(path: string | null | undefined, threadId: string, turn: TurnUsageStatus) {
     if (!path || !isAbsolute(path) || !this.observeConfirmed) return;
     const current = this.threads.get(threadId);
-    if (current?.turnId === turn.id && current.completedAt !== undefined &&
+    if (turn.status === "completed" && current?.turnId === turn.id && current.completedAt !== undefined &&
         !current.totalUncertain && !current.cacheUncertain && !current.cacheGap && current.confirmed?.tokens) return;
     const input = createReadStream(path);
     const lines = createInterface({ input, crlfDelay: Infinity });
@@ -262,7 +264,11 @@ export class CodexTokenUsage {
     }
     if (found) {
       const status = turn.status === "inProgress" && finished ? "completed" : turn.status;
-      return recovered.completeTurn(threadId, { ...turn, status, completedAt }) ?? recovered.finish(true);
+      const report = recovered.completeTurn(threadId, { ...turn, status, completedAt }) ?? recovered.finish(true);
+      if (!finished) {
+        for (const record of report?.records ?? []) record.dailyRecoveryPending = true;
+      }
+      return report;
     }
   }
 
@@ -270,6 +276,7 @@ export class CodexTokenUsage {
     const thread = this.threads.get(threadId);
     if (!thread || thread.turnId !== turn.id || turn.status === "inProgress") return;
     thread.finished = true;
+    thread.dailyRecoveryPending = turn.status !== "completed";
     const ended = turn.completedAt;
     thread.completedAt ??= typeof ended === "number" && ended > 0 && ended < 8.64e12
       ? Math.trunc(ended * 1000) : observedAt;
@@ -291,6 +298,7 @@ export class CodexTokenUsage {
       entry.dailyTokens = thread.totalUncertain || thread.cacheUncertain || thread.cacheGap
         ? null : uncachedTokens(entry);
       entry.dailyTokensExcludeCache = true;
+      entry.dailyRecoveryPending = thread.dailyRecoveryPending ? true : undefined;
     }
   }
 
