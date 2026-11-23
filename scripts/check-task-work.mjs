@@ -610,6 +610,60 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate('Boolean(workLog().querySelector(".task-work-controls button"))'), true);
       assert.equal(await evaluate("historyLoads"), 1);
       record("При смене чата журнал предлагает подгрузку для нового сеанса и не показывает ранний запуск прежнего сеанса.");
+      const splitCard = current();
+      const splitAt = Date.now() + 1000;
+      const at = offset => new Date(splitAt + offset).toISOString();
+      const commandAt = (id, offset) => ({
+        at: at(offset),
+        id,
+        type: "commandExecution",
+        title: "git diff --check",
+        text: "Checked",
+        status: "completed",
+      });
+      const splitRun = {
+        at: at(4),
+        action: "run-log",
+        actor: "agent",
+        durationMs: 4,
+        runThreadId: splitCard.codexThreadId,
+        run: [commandAt("before-expert", 0), commandAt("after-expert", 3)],
+      };
+      splitCard.history.push({
+        at: at(1),
+        action: "expert-stage",
+        actor: "agent",
+        expertStageRun: { phase: "work", key: "verify", state: "running" },
+        expertStageStart: { expertName: "QA инженер desktop приложений", stageTitle: "Между частями запуска" },
+      }, splitRun);
+      await openReviewCard(splitCard);
+      await evaluate(`
+        window.splitFold = id => document.querySelector("[data-item='item:" + id + "']").closest(".chat-work");
+        void 0;
+      `);
+      const splitFolds = () => evaluate(`["before-expert", "after-expert"].map(id => {
+        const fold = splitFold(id);
+        return { key: fold.dataset.item, open: fold.open };
+      })`);
+      const toggleSplitFold = async id => {
+        await evaluate(`splitFold(${JSON.stringify(id)}).querySelector("summary").click()`);
+        await settle();
+      };
+      const initial = await splitFolds();
+      assert.deepEqual(initial.map(fold => fold.open), [true, true]);
+      await toggleSplitFold("before-expert");
+      await openReviewCard(splitCard);
+      assert.deepEqual((await splitFolds()).map(fold => fold.open), [false, true]);
+      assert.notEqual(initial[0].key, initial[1].key);
+      await toggleSplitFold("before-expert");
+      await toggleSplitFold("after-expert");
+      splitRun.run.push(commandAt("late-after-expert", 2));
+      await openReviewCard(splitCard);
+      assert.deepEqual(await splitFolds(), [
+        { key: initial[0].key, open: true },
+        { key: initial[1].key, open: false },
+      ]);
+      record("Две части завершённого запуска сохраняют разные состояния раскрытия в обоих сочетаниях. Поздняя команда после экспертной отметки не меняет ключ второй части.");
       const reviewCard = JSON.parse(readFileSync(reviewCardPath, "utf8"));
       await syncReviewPages();
       await openReviewCard(reviewCard);
@@ -683,7 +737,7 @@ app.whenReady().then(async () => {
       ];
       writeFileSync(join(artifacts, "unified-review-check.txt"), [
         "T-0339. Пройдена проверка Windows Electron и CLI",
-        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0339-return",
+        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0339-folds",
         `Среда: ${process.platform} ${process.arch}; Node ${process.versions.node}; Electron ${process.versions.electron}; Chromium ${process.versions.chrome}.`,
         "Linux и macOS не запускались. Упаковка вне изменений.",
         "Два процесса Electron, штатный рендерер, синтетические уведомления провайдера, реальная CLI и файловое хранилище ревью на временной доске.",

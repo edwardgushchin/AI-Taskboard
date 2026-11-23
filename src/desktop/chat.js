@@ -1042,6 +1042,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     entries.sort((left, right) => compareRank(left.order, right.order));
     const rows = [];
     for (let index = 0; index < entries.length;) {
+      const previous = entries[index - 1];
       const entry = entries[index++];
       if (entry.row) {
         rows.push(entry.row);
@@ -1060,12 +1061,20 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
         segment = { row };
         state.segments[number] = segment;
       }
-      segment.row.dataset.chatAnchor = number === 0 ? state.key : state.key + ":" + items[0].id;
-      if (segment.render !== state.render || segment.items.length !== items.length ||
-          items.some((item, position) => item !== segment.items[position])) {
-        state.render(segment.row, items, number);
+      // Use the separator so an earlier item added to this segment keeps its fold key.
+      let boundary;
+      if (number > 0) {
+        boundary = previous.row
+          ? JSON.stringify(["marker", previous.row.dataset.chatAnchor])
+          : JSON.stringify(["activity", previous.state.key, previous.item.id]);
+      }
+      segment.row.dataset.chatAnchor = boundary ? state.key + ":" + boundary : state.key;
+      if (segment.render !== state.render || segment.boundary !== boundary ||
+          segment.items.length !== items.length || items.some((item, position) => item !== segment.items[position])) {
+        state.render(segment.row, items, boundary);
         segment.items = items;
         segment.render = state.render;
+        segment.boundary = boundary;
       }
       rows.push(segment.row);
     }
@@ -1092,9 +1101,12 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
 
   function registerExecutorLog(log, key, items, at, sequence, durationMs) {
     const order = (item, index) => rank(item.at ?? at, sequence ?? task.history.length + 1, 0, index);
-    registerWorkLog(log, key, items, order, (row, group, number) => {
-      renderRunActivity(row, group, sequence !== undefined, number === 0 ? durationMs : undefined,
-        task.id, { taskId: task.id, taskRunSequence: sequence });
+    registerWorkLog(log, key, items, order, (row, group, boundary) => {
+      renderRunActivity(row, group, sequence !== undefined, boundary ? undefined : durationMs, task.id, {
+        taskId: task.id,
+        taskRunSequence: sequence,
+        taskRunSegment: boundary,
+      });
     });
   }
   const savedWork = [];
