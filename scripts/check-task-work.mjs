@@ -140,6 +140,23 @@ app.whenReady().then(async () => {
       ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
       ${["image-preview.js", "keyboard-focus.js", "source-files.cjs", "markdown.js", "chat.js", "review-diff.js"].map(read).join("\n")}
       ${localizationFixture()}
+      const workDisconnects = new WeakMap();
+      window.ResizeObserver = class extends ResizeObserver {
+        observe(target, options) {
+          super.observe(target, options);
+          if (target.matches(".task-work")) {
+            this.workList = target;
+            workDisconnects.set(target, false);
+          }
+        }
+        disconnect() {
+          super.disconnect();
+          if (this.workList) {
+            workDisconnects.set(this.workList, this.workList.isConnected ? "connected" : "detached");
+            this.workList = undefined;
+          }
+        }
+      };
       ${read("renderer.js")}
       window.card = ${JSON.stringify(current())};
       frame = {
@@ -171,6 +188,31 @@ app.whenReady().then(async () => {
       void 0;
     `);
     const rendered = () => evaluate(`[...document.querySelectorAll("#task-chat-work [data-item]")].map(node => node.dataset.item)`);
+    const fold = "#task-chat-work .chat-work";
+    const foldOpen = () => evaluate(`document.querySelector(${JSON.stringify(fold)}).open`);
+    const pressFold = async key => {
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
+      if (key === "Enter") window.webContents.sendInputEvent({ type: "char", keyCode: key });
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
+      await settle();
+    };
+    const clickFold = async () => {
+      const position = await evaluate(`(() => {
+        const summary = document.querySelector(${JSON.stringify(fold + " > summary")});
+        const bounds = summary.getBoundingClientRect();
+        return { x: Math.round(bounds.left + bounds.width / 2), y: Math.round(bounds.top + bounds.height / 2) };
+      })()`);
+      window.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...position });
+      window.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...position });
+      await settle();
+    };
+    const capture = async name => {
+      const screenshot = await window.webContents.capturePage();
+      assert.deepEqual(screenshot.getSize(), { width: 1280, height: 900 });
+      const png = screenshot.toPNG();
+      writeFileSync(join(artifacts, name), png);
+      return png;
+    };
     const dialogText = () => evaluate('document.querySelector("#task-chat-dialogue").textContent');
     if (!restart) {
       await press("dialogue", "Enter");
@@ -207,6 +249,11 @@ app.whenReady().then(async () => {
       const sequence = current().history.length;
       await publish("run", [], thread, { sequence, threadId: thread, items: mixed, durationMs: 4_000 });
       await verifyWork();
+      assert.equal(await foldOpen(), true);
+      await clickFold();
+      assert.equal(await foldOpen(), false);
+      await publish("run", mixed, thread);
+      assert.equal(await foldOpen(), false);
       cli(["chat", taskId], {
         actor: "user", text: "Проверь отдельный ответ.", revision: current().revision, model: "fixture", effort: "low",
       });
@@ -221,14 +268,40 @@ app.whenReady().then(async () => {
       assert.deepEqual(card.history.at(-1).run.map(item => item.id), discussion.map(item => item.id));
       await publish("discussion", undefined, oldThread);
       await evaluate(`window.card = ${JSON.stringify(card)}; showTask(card.id)`);
+      await settle();
       await verifyWork();
-      record("Квитанция записи и обновление карточки сохраняют исходный порядок без дублей.");
+      assert.equal(await foldOpen(), false);
+      assert.equal(await evaluate('document.activeElement.matches("#task-chat-work .chat-work > summary")'), true);
+      await pressFold("Space");
+      assert.equal(await foldOpen(), true);
+      record("После получения квитанции мышь сворачивает запуск. Повтор живого события и обновление карточки сохраняют свёртку, фокус и порядок без дублей. Space раскрывает запуск.");
       writeFileSync(checksPath, JSON.stringify(checks));
     } else {
       await press("dialogue", "Enter");
       assert.ok((await dialogText()).includes(discussionAnswer.text));
       await press("work", "Space");
       await verifyWork();
+      assert.equal(await foldOpen(), true);
+      assert.deepEqual(await evaluate(`[
+        document.querySelector("#task-chat-work [data-item='message:note']").checkVisibility({ contentVisibilityAuto: true }),
+        document.querySelector("#task-chat-work .chat-run-group > summary").checkVisibility({ contentVisibilityAuto: true }),
+        document.querySelector("#task-chat-work [data-item='item:command']").open,
+        document.querySelector("#task-chat-work [data-item='item:tool']").open,
+      ]`), [true, true, false, false]);
+      const expanded = await capture("task-work-expanded.png");
+      await clickFold();
+      assert.equal(await foldOpen(), false);
+      const collapsed = await capture("task-work-collapsed.png");
+      await pressFold("Enter");
+      assert.equal(await foldOpen(), true);
+      assert.equal(await evaluate(`(() => {
+        const command = document.querySelector("#task-chat-work [data-item='item:command']");
+        const group = command.closest(".chat-run-group");
+        group.querySelector("summary").click();
+        command.querySelector("summary").click();
+        return command.open && command.innerText.includes("M  src/desktop/chat.js");
+      })()`), true);
+      record("Первый показ сохранённого запуска раскрыт. Сообщение и сводка видимы, команда и инструмент свёрнуты. Мышь сворачивает запуск, Enter раскрывает.");
       record("После перезапуска сохранённый ответ отдельного чата остался в «Диалоге». Его журнал без ID сеанса отсутствует в «Ходе работы».");
       assert.equal(await evaluate('document.querySelectorAll(".expert-stage").length'), 2);
       assert.equal(await evaluate(`
@@ -238,32 +311,130 @@ app.whenReady().then(async () => {
       `), true);
       record("После перезапуска отдельного процесса Electron журнал прочитан из карточки. Порядок, уникальность, фильтрация и план подтверждены.");
       record("Вопрос владельцу доступен в раскрываемой переписке команды слева от журнала.");
-      const restored = activity("restored", "agentMessage", "", "Запись из восстановленного журнала.", 5);
+      const restored = activity("restored", "agentMessage", "", "Запись из восстановленного журнала.", 0);
+      const restoredCommand = activity("restored-command", "commandExecution", "git status", "Earlier result", 0);
+      const later = Array.from({ length: 12 }, (_, index) => {
+        const item = activity("later-" + index, "agentMessage", "", "Поздний запуск " + (index + 1), index + 10);
+        const action = activity("later-command-" + index, "commandExecution", "git status", "Later result", index + 10);
+        return { actor: "agent", action: "run-log", at: item.at, runThreadId: thread, durationMs: 1000, run: [action, item] };
+      });
       await evaluate(`
-        const index = card.history.length;
-        card.history.push({
-          actor: "agent", action: "run-log", at: "2026-01-01T00:00:05.000Z",
+        const index = card.history.findIndex(event => event.run?.some(item => item.id === "command"));
+        card.history.splice(index, 0, {
+          actor: "agent", action: "run-log", at: ${JSON.stringify(restored.at)},
           runThreadId: ${JSON.stringify(thread)}, durationMs: 1_000,
         });
-        api.taskRunHistory = async () => ({
-          ok: true, data: { [index]: ${JSON.stringify([tool, restored])} },
-        });
+        card.history.push(...${JSON.stringify(later)});
+        var historyLoads = 0;
+        api.taskRunHistory = async () => {
+          historyLoads++;
+          return { ok: true, data: { [index]: ${JSON.stringify([tool, restoredCommand, restored])} } };
+        };
         showTask(card.id);
       `);
-      await evaluate('document.querySelector(".task-work-controls button").click(); void 0');
       await settle();
-      assert.deepEqual(await providerItems(), [...expected, "restored"]);
-      record("Ручная загрузка удалённого журнала добавила запись текущего сеанса и скрыла повтор инструмента.");
       await evaluate(`
-        for (const detail of document.querySelectorAll("#task-chat-work details")) detail.open = true;
-        document.querySelector("#task-chat-work").scrollTop = 0;
-        void 0;
+        var workLog = () => document.querySelector("#task-chat-work");
+        var anchor = () => workLog().querySelector("[data-item='message:note']");
+        var anchorOffset = () => anchor().getBoundingClientRect().top - workLog().getBoundingClientRect().top;
+        workLog().scrollTop += anchorOffset() - 25;
       `);
       await settle();
-      const screenshot = await window.webContents.capturePage();
-      assert.deepEqual(screenshot.getSize(), { width: 1280, height: 900 });
-      const png = screenshot.toPNG();
-      writeFileSync(join(artifacts, "card-work-activity.png"), png);
+      const offset = await evaluate("anchorOffset()");
+      const height = await evaluate("workLog().clientHeight");
+      assert.ok(offset >= 0 && offset < height / 2, offset);
+      await evaluate('document.querySelector(".task-work-controls button").click(); void 0');
+      await settle();
+      const fullOrder = ["restored-command", "restored", ...expected, ...later.flatMap(event => event.run.map(item => item.id))];
+      assert.deepEqual(await providerItems(), fullOrder);
+      assert.equal(await foldOpen(), true);
+      assert.equal(await evaluate("workLog().clientHeight"), height);
+      assert.ok(Math.abs(await evaluate("anchorOffset()") - offset) <= 1);
+      record("Подгрузка раннего запуска раскрывает его, сохраняет хронологию, якорь и высоту панели, убирает дубль инструмента.");
+      const assertReplacedWorkList = async () => {
+        assert.equal(await evaluate("previousWorkList.isConnected"), false);
+        assert.equal(await evaluate("workDisconnects.get(previousWorkList)"), "connected");
+        assert.equal(await evaluate("workLog().isConnected && workDisconnects.get(workLog()) === false"), true);
+        await evaluate("delete window.previousWorkList; void 0");
+      };
+      for (let cycle = 0; cycle < 2; cycle++) {
+        await evaluate("window.previousWorkList = workLog(); showTask(card.id)");
+        await settle();
+        await assertReplacedWorkList();
+        assert.deepEqual(await providerItems(), fullOrder);
+        assert.ok(Math.abs(await evaluate("anchorOffset()") - offset) <= 1);
+      }
+      record("Два обновления открытой карточки отсоединяют наблюдатель до удаления журнала, сохраняют подгруженный запуск и якорь чтения.");
+      await evaluate(`
+        var savedReadingRow = () => workLog().querySelector("[data-item='item:later-command-3'] > summary");
+        var savedReadingOffset = () => savedReadingRow().getBoundingClientRect().top - workLog().getBoundingClientRect().top;
+        var savedFold = () => workLog().querySelector("[data-item='item:later-command-0']").closest(".chat-work");
+        var collapseSavedFold = () => savedFold().querySelector("summary").click();
+        var distanceFromEnd = () => workLog().scrollHeight - workLog().clientHeight - workLog().scrollTop;
+        collapseSavedFold();
+        workLog().scrollTop += savedReadingOffset() - 25;
+      `);
+      await settle();
+      const savedOffset = await evaluate("savedReadingOffset()");
+      assert.ok(savedOffset >= 0 && savedOffset < height / 2, savedOffset);
+      assert.equal(await evaluate("savedFold().open"), false);
+      assert.ok(await evaluate("distanceFromEnd()") > 1);
+      for (const atEnd of [false, true]) {
+        if (atEnd) {
+          await evaluate("collapseSavedFold(); workLog().scrollTop = workLog().scrollHeight; void 0");
+          await settle();
+          assert.ok(await evaluate("distanceFromEnd()") <= 1);
+          assert.equal(await evaluate("savedFold().open"), false);
+        }
+        await evaluate("window.previousWorkList = workLog(); sheet.close(); void 0");
+        await settle();
+        await evaluate("showTask(card.id)");
+        await settle();
+        await assertReplacedWorkList();
+        assert.equal(await evaluate("savedFold().open"), true);
+        if (atEnd) {
+          assert.ok(await evaluate("distanceFromEnd()") <= 1, "reopening at the bottom follows the end");
+        } else {
+          const reopenedOffset = await evaluate("savedReadingOffset()");
+          assert.ok(Math.abs(reopenedOffset - savedOffset) <= 1,
+            `reopening restores the saved row at ${savedOffset}px, got ${reopenedOffset}px`);
+        }
+      }
+      record("При повторном открытии свёрнутый вручную запуск снова раскрыт. Журнал сохраняет якорь ранней записи или конец, если пользователь читал внизу. Закрытие отсоединяет наблюдатель до удаления журнала.");
+      assert.deepEqual(await providerItems(), fullOrder, "reopening retains the restored run alongside saved runs");
+      await evaluate(`
+        var restoredReadingRow = () => workLog().querySelector("[data-item='item:restored-command'] > summary");
+        var restoredReadingOffset = () => restoredReadingRow().getBoundingClientRect().top - workLog().getBoundingClientRect().top;
+        workLog().scrollTop += restoredReadingOffset() - 25;
+      `);
+      await settle();
+      const restoredOffset = await evaluate("restoredReadingOffset()");
+      assert.ok(restoredOffset >= 0 && restoredOffset < height / 2, restoredOffset);
+      await evaluate("window.previousWorkList = workLog(); sheet.close(); void 0");
+      await settle();
+      await evaluate("showTask(card.id)");
+      await settle();
+      await assertReplacedWorkList();
+      assert.deepEqual(await providerItems(), fullOrder);
+      assert.equal(await evaluate("restoredReadingRow().closest('.chat-work').open"), true);
+      assert.equal(await evaluate("workLog().clientHeight"), height);
+      assert.equal(await evaluate("historyLoads"), 1);
+      const reopenedRestoredOffset = await evaluate("restoredReadingOffset()");
+      assert.ok(Math.abs(reopenedRestoredOffset - restoredOffset) <= 1,
+        `reopening restores the loaded row at ${restoredOffset}px, got ${reopenedRestoredOffset}px`);
+      record("Повторное открытие возвращает к команде внутри подгруженного запуска. Запуск раскрыт, порядок, высота панели и положение строки сохранены без нового запроса истории.");
+      await evaluate(`
+        const replacementThread = "00000000-0000-4000-8000-000000000003";
+        card.codexThreadId = replacementThread;
+        card.history[index].runThreadId = replacementThread;
+        showTask(card.id);
+      `);
+      await settle();
+      assert.ok(!(await providerItems()).includes("restored-command"));
+      assert.ok(!(await providerItems()).includes("restored"));
+      assert.equal(await evaluate('Boolean(workLog().querySelector(".task-work-controls button"))'), true);
+      assert.equal(await evaluate("historyLoads"), 1);
+      record("При смене чата журнал предлагает подгрузку для нового сеанса и не показывает ранний запуск прежнего сеанса.");
       const gitBase = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true });
       assert.equal(gitBase.status, 0, gitBase.stderr);
       const sha256 = data => createHash("sha256").update(data).digest("hex");
@@ -272,9 +443,9 @@ app.whenReady().then(async () => {
         "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/styles.css", "src/cli/tasks.ts",
         "src/cli/model.ts", "src/cli/expert-team.ts", "scripts/check-task-work.mjs", "scripts/electron-check.mjs",
       ];
-      writeFileSync(join(artifacts, "card-team-coordination-check.txt"), [
-        "T-0256. Пройдена проверка Windows Electron и CLI",
-        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0256",
+      writeFileSync(join(artifacts, "task-work-expanded-check.txt"), [
+        "T-0337. Пройдена проверка Windows Electron и CLI",
+        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0337",
         `Среда: ${process.platform} ${process.arch}; Node ${process.versions.node}; Electron ${process.versions.electron}; Chromium ${process.versions.chrome}.`,
         "Linux и macOS не запускались. Упаковка вне изменений.",
         "Два процесса Electron, штатный рендерер с синтетическими уведомлениями провайдера и реальная CLI на временной доске.",
@@ -282,7 +453,8 @@ app.whenReady().then(async () => {
         `База рабочей копии: ${gitBase.stdout.trim()}`,
         "SHA-256 исходников UTF-8, CRLF приведены к LF как при хранении в Git:",
         ...paths.map(path => `${sha256(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n"))}  ${path}`),
-        `${sha256(png)}  card-work-activity.png (PNG, исходные байты)`,
+        `${sha256(expanded)}  task-work-expanded.png (PNG, исходные байты)`,
+        `${sha256(collapsed)}  task-work-collapsed.png (PNG, исходные байты)`,
         "",
       ].join("\n"));
     }

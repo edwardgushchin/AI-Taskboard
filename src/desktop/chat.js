@@ -537,9 +537,10 @@ function renderRunActivity(container, items, completed = false, durationMs, task
     const work = element("details", undefined, "chat-work");
     const first = batch.find(node => node.dataset.item)?.dataset.item;
     if (context?.managerWork && first) key = "work:" + activityRowKey(first);
+    if (context?.taskRunSequence !== undefined) key = key + ":run:" + context.taskRunSequence;
     work.dataset.item = key;
     if (first) work.dataset.chatAnchor = "work:" + first;
-    work.open = previous.get(key) ?? false;
+    work.open = previous.get(key) ?? (context?.taskRunSequence !== undefined);
     if (context?.managerWork && !previous.has(key)) {
       const actions = batch.flatMap(node => nodeActivities.get(node) ?? []);
       const previousState = actions.map(item => previousFolds.get("item:" + item.id)).find(open => open !== undefined);
@@ -998,7 +999,7 @@ function stageWork(task, panels) {
   };
 }
 
-function taskChat(task, renderStageWork, discussionHandoff) {
+function taskChat(task, renderStageWork, discussionHandoff, previousWork) {
   const project = frame.project;
   const key = project + "\0" + task.id;
   const latestReply = task.history.findLast(event => event.chat && event.actor === "agent")?.chat;
@@ -1022,6 +1023,28 @@ function taskChat(task, renderStageWork, discussionHandoff) {
   work.hidden = true;
   bindLocalized(work, "aria-label", () => t("ui.work_activity_e01957b7"), true);
   work.tabIndex = 0;
+  const workViewport = chatViewport(work);
+  let workHistory = draft.workHistory;
+  if (!workHistory || workHistory.threadId !== task.codexThreadId) {
+    workHistory = { threadId: task.codexThreadId, restoredRuns: new Map() };
+    draft.workHistory = workHistory;
+  }
+  const { restoredRuns } = workHistory;
+  let pendingViewport = previousWork?.viewport;
+  if (!pendingViewport && workHistory.position) pendingViewport = { position: workHistory.position };
+  area.disposeWork = () => {
+    workHistory.position = pendingViewport?.position ?? workViewport.snapshotPosition();
+    workViewport.dispose();
+  };
+  area.snapshotWork = () => ({
+    viewport: pendingViewport ?? workViewport.snapshot(),
+    focusedFold: work.contains(document.activeElement) && document.activeElement.matches("summary")
+      ? document.activeElement.parentElement.dataset.item
+      : undefined,
+  });
+  const renderWork = (log, items, durationMs, sequence) =>
+    renderRunActivity(log, items, sequence !== undefined, durationMs, task.id,
+      { taskId: task.id, taskRunSequence: sequence });
   const savedWork = [];
   const savedStageItems = new Map();
   const files = new Map(task.attachments.map(file => [file.file, file]));
@@ -1062,11 +1085,11 @@ function taskChat(task, renderStageWork, discussionHandoff) {
         const items = addSavedItems(event.run);
         if (items.length) {
           work.append(log);
-          savedWork.push(() => renderRunActivity(log, items, true, event.durationMs, task.id));
+          savedWork.push(() => renderWork(log, items, event.durationMs, index + 1));
         }
       } else if (task.codexThreadId && event.durationMs !== undefined) {
         work.append(log);
-        missingRuns.set(index, { log, durationMs: event.durationMs });
+        missingRuns.set(index, { log, at: event.at, durationMs: event.durationMs });
       }
     }
     if (!conversation) continue;
@@ -1127,8 +1150,28 @@ function taskChat(task, renderStageWork, discussionHandoff) {
     list.append(entry);
     if (ownerQuestion) latestOwnerQuestion = entry;
   }
+  function renderRestoredRuns(itemsAt) {
+    let restored = 0;
+    let lastRestored;
+    for (const [index, { log, at, durationMs }] of missingRuns) {
+      const restoredItems = itemsAt(index) ?? [];
+      if (renderStageWork && restoredItems.length) savedStageItems.set(index, restoredItems);
+      const items = addSavedItems(restoredItems);
+      if (!items.length) continue;
+      restoredRuns.set(index, { at, durationMs, items: restoredItems });
+      renderWork(log, items, durationMs, index + 1);
+      restored++;
+      lastRestored = log;
+    }
+    return { restored, lastRestored };
+  }
+  for (const [index, entry] of restoredRuns) {
+    const run = missingRuns.get(index);
+    if (!run || run.at !== entry.at || run.durationMs !== entry.durationMs) restoredRuns.delete(index);
+  }
+  if (restoredRuns.size) savedWork.push(() => renderRestoredRuns(index => restoredRuns.get(index)?.items));
   const workControls = element("li", undefined, "task-work-controls");
-  if (missingRuns.size) {
+  if ([...missingRuns.keys()].some(index => !restoredRuns.has(index))) {
     const status = element("span", undefined, "muted");
     status.setAttribute("role", "status");
     const load = button(() => t("ui.load_codex_activity_4ba86e2d"), async () => {
@@ -1138,27 +1181,18 @@ function taskChat(task, renderStageWork, discussionHandoff) {
         const result = await api.taskRunHistory(task.id);
         if (!area.isConnected || frame.project !== project) return;
         if (!result.ok) throw new Error(boardError(result.error));
-        let restored = 0;
+        let restored;
         let lastRestored;
-        for (const [index, { log, durationMs }] of missingRuns) {
-          const restoredItems = result.data[index] ?? [];
-          if (renderStageWork && restoredItems.length) savedStageItems.set(index, restoredItems);
-          const items = addSavedItems(restoredItems);
-          if (!items.length) continue;
-          renderRunActivity(log, items, true, durationMs, task.id);
-          restored++;
-          lastRestored = log;
-        }
+        workViewport.update(() => {
+          ({ restored, lastRestored } = renderRestoredRuns(index => result.data[index]));
+          if (restored) load.remove();
+        });
         renderLiveStageWork();
         renderLiveWork();
-        if (restored) load.remove();
         bindLocalized(status, "textContent", () => restored === missingRuns.size ? "" : restored
           ? t("ui.some_runs_are_unavailable_in_the_saved_codex_cha_7d8bfad3")
           : t("ui.no_activity_for_these_runs_in_the_saved_codex_ch_261837a1"));
-        if (lastRestored) {
-          lastRestored.querySelector(".chat-work > summary")?.focus({ preventScroll: true });
-          lastRestored.scrollIntoView({ block: "nearest" });
-        }
+        lastRestored?.querySelector(".chat-work > summary")?.focus({ preventScroll: true });
       } catch (error) {
         bindLocalized(status, "textContent", () => t("ui.could_not_load_the_codex_activity_5cf03362") + error.message);
       } finally {
@@ -1183,7 +1217,6 @@ function taskChat(task, renderStageWork, discussionHandoff) {
     renderStageWork("work", [...saved, ...live]);
   }
   function renderLiveWork() {
-    const follow = work.scrollHeight - work.clientHeight - work.scrollTop <= 8;
     // A save receipt can reach the window before its card history is refreshed.
     const saved = draft.savedRun;
     // Steered replies already arrive through the executor's run stream.
@@ -1196,9 +1229,10 @@ function taskChat(task, renderStageWork, discussionHandoff) {
       seen.add(item.id);
       return true;
     });
-    renderRunActivity(liveRun, items, Boolean(saved), saved?.durationMs, task.id);
-    emptyWork.hidden = [...work.children].some(row => row !== emptyWork && row !== workControls && !row.hidden);
-    if (follow) work.scrollTop = work.scrollHeight;
+    workViewport.update(() => {
+      renderWork(liveRun, items, saved?.durationMs, saved?.sequence);
+      emptyWork.hidden = [...work.children].some(row => row !== emptyWork && row !== workControls && !row.hidden);
+    });
   }
   area.updateRun = (items = []) => {
     liveItems = items;
@@ -1296,28 +1330,40 @@ function taskChat(task, renderStageWork, discussionHandoff) {
     const control = button(() => t(label), () => selectView(name), "quiet");
     control.setAttribute("aria-controls", panel.id = "task-chat-" + name);
     tabs.append(control);
-    panel.addEventListener("scroll", () => {
-      if (panel.hidden) return;
-      (draft.viewScroll ??= {})[name] = panel.scrollHeight - panel.clientHeight - panel.scrollTop > 8 ? panel.scrollTop : undefined;
-      if (name === "dialogue") draft.scroll = draft.viewScroll[name];
-    });
     return { name, control, panel };
   });
+  list.addEventListener("scroll", () => {
+    if (list.hidden) return;
+    draft.scroll = list.scrollHeight - list.clientHeight - list.scrollTop > 8 ? list.scrollTop : undefined;
+  });
   function selectView(name) {
+    if (name !== "work" && !work.hidden) workViewport.remember();
     quoteDraft.close();
     draft.view = name;
     composer.hidden = name !== "dialogue";
     for (const view of views) {
       view.panel.hidden = view.name !== name;
       view.control.setAttribute("aria-pressed", String(!view.panel.hidden));
-      if (!view.panel.hidden) requestAnimationFrame(() => {
-        if (!view.panel.hidden) view.panel.scrollTop = draft.viewScroll?.[name] ?? view.panel.scrollHeight;
-      });
     }
     if (name === "work") {
       for (const render of savedWork.splice(0)) render();
       renderLiveWork();
-    }
+      requestAnimationFrame(() => {
+        if (work.hidden || !work.isConnected) return;
+        if (pendingViewport) {
+          workViewport.restoreSnapshot(pendingViewport);
+          pendingViewport = undefined;
+        } else workViewport.restore();
+        if (previousWork?.focusedFold) {
+          const focused = [...work.querySelectorAll("details[data-item]")].find(
+            fold => fold.dataset.item === previousWork.focusedFold);
+          focused?.querySelector("summary")?.focus({ preventScroll: true });
+        }
+        previousWork = undefined;
+      });
+    } else requestAnimationFrame(() => {
+      if (!list.hidden) list.scrollTop = draft.scroll ?? list.scrollHeight;
+    });
   }
   area.openDialogue = () => {
     selectView("dialogue");
