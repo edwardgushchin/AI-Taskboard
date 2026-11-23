@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   readManagerMessages: (project, ids) => ipcRenderer.invoke("board:readManagerMessages", project, ids),
   taskRunHistory: id => ipcRenderer.invoke("board:taskRunHistory", id),
   stageRunHistory: id => ipcRenderer.invoke("board:stageRunHistory", id),
-  reviewerChat: id => ipcRenderer.invoke("board:reviewerChat", id),
+  reviewerChat: (id, before) => ipcRenderer.invoke("board:reviewerChat", id, before),
   boardQueue: (project, action, id, draft, goal, files, reviewModeQuestionId) =>
     ipcRenderer.invoke("board:queue", project, action, id, draft, goal, files, reviewModeQuestionId),
   boardGoal: (kind, objective) => ipcRenderer.invoke("board:goal", kind, objective),

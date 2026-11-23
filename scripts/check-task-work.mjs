@@ -4,9 +4,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readReviewerChatPage, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import { electronCheck, localizationFixture } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "task-work", 90_000, [[], ["--restart"]]);
@@ -20,6 +22,7 @@ const oldThread = "00000000-0000-4000-8000-000000000001";
 const thread = "00000000-0000-4000-8000-000000000002";
 const read = name => readFileSync(join(root, "src", "desktop", name), "utf8");
 const checksPath = join(scratch, "checks.json");
+const reviewCardPath = join(scratch, "review-card.json");
 const checks = restart ? JSON.parse(readFileSync(checksPath, "utf8")) : [];
 const record = label => {
   checks.push(label);
@@ -135,7 +138,7 @@ app.whenReady().then(async () => {
         subscribe() {}, onChatUpdate() {}, onTheme() {}, bootstrap: () => new Promise(() => {}),
         chatModels: async () => ({ ok: true, data: [] }), taskLimits: async () => ({ ok: true, data: {} }),
         command: async (action, id) => action === "show" && id === card.id ? { ok: true, data: card } : { ok: true, data: [] },
-        reviewerChat: async () => { throw new Error("The card must not read the reviewer journal"); },
+        reviewerChat: async () => ({ ok: true, data: { attempts: [], boundaries: [] } }),
       };
       ${readFileSync(require.resolve("markdown-it/browser"), "utf8")}
       ${["image-preview.js", "keyboard-focus.js", "source-files.cjs", "markdown.js", "chat.js", "review-diff.js"].map(read).join("\n")}
@@ -206,20 +209,93 @@ app.whenReady().then(async () => {
       window.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...position });
       await settle();
     };
-    const capture = async name => {
+    const capture = async (name, width = 1280, height = 900) => {
       const screenshot = await window.webContents.capturePage();
-      assert.deepEqual(screenshot.getSize(), { width: 1280, height: 900 });
+      assert.deepEqual(screenshot.getSize(), { width, height });
       const png = screenshot.toPNG();
       writeFileSync(join(artifacts, name), png);
       return png;
     };
     const dialogText = () => evaluate('document.querySelector("#task-chat-dialogue").textContent');
+    const syncReviewPages = async () => {
+      const pages = { latest: readReviewerChatPage(project, taskId) };
+      for (let cursor = pages.latest.before; cursor;) {
+        const page = readReviewerChatPage(project, taskId, cursor);
+        pages[cursor] = page;
+        cursor = page.before;
+      }
+      await evaluate("window.reviewPages = " + JSON.stringify(pages) +
+        '; api.reviewerChat = async (_id, before) => ({ ok: true, data: reviewPages[before ?? "latest"] }); void 0');
+    };
+    const reviewRows = () => evaluate('[...document.querySelector("#task-chat-work").children]' +
+      ".filter(row => row.checkVisibility()).map(row => row.textContent)");
+    const openReviewCard = async card => {
+      await evaluate("window.card = " + JSON.stringify(card) + "; showTask(card.id)");
+      await settle();
+    };
+    const updateReviews = async () => {
+      await syncReviewPages();
+      await evaluate('updateChat({ project: frame.project, id: card.id, type: "reviewer-chat" }); void 0');
+      await settle();
+    };
+    const reviewItems = (index, at = new Date().toISOString()) => {
+      const common = { at, status: "completed" };
+      return [
+        { ...common, id: "review-message", type: "agentMessage", title: "", text: "Сообщение ревью " + index },
+        { ...common, id: "review-command", type: "commandExecution",
+          title: "git diff --check review-" + index, text: "Вывод команды " + index },
+      ];
+    };
+    const report = index => ({
+      summary: "Итог ревью " + index,
+      findings: index === 10 ? ["Исправьте вывод команды."] : [],
+      evidence: [null, "Команды и сообщения сверены.", null, "Итог сверен с журналом."],
+      needsHuman: false,
+    });
+    const recordReview = (submissionSequence, run) => withReviewerChat(project, taskId, () => {}, run,
+      undefined, submissionSequence, result => result);
+    function assertOrder(rows, labels) {
+      let previous = -1;
+      for (const label of labels) {
+        const index = rows.findIndex((row, index) => index > previous && row.includes(label));
+        assert.ok(index > previous, label + " must follow " + rows[previous]);
+        previous = index;
+      }
+    }
+    const verifyReturns = async () => {
+      const returns = await evaluate(`[...document.querySelectorAll("#task-chat-work > [data-chat-anchor^=review-decision]")]
+        .map(row => ({ actor: row.dataset.actor, text: row.innerText }))`);
+      for (const [actor, role, reason] of [
+        ["user", "Владелец", "Уточните итог для владельца."],
+        ["manager", "Менеджер проекта", "Приложите вывод для менеджера."],
+      ]) {
+        const row = returns.find(entry => entry.actor === actor && entry.text.includes(reason));
+        assert.ok(row?.text.includes(role), JSON.stringify(returns));
+      }
+    };
+    function verifyReviewOrder(rows) {
+      assertOrder(rows, [
+        "Итог ревью 10", "Замечания при возврате", "Повторная проверка",
+        "Доработка завершена", "Сообщение ревью 11", "Сверка между действиями", "git diff --check review-11",
+      ]);
+      const finish = rows.findIndex(row => row.includes("Итог ревью 10"));
+      assert.match(rows[finish], /Ревью завершилось с замечаниями/);
+      assert.match(rows[finish + 1], /Замечания при возврате/);
+      assert.equal(rows.filter(row => row.includes("Сверка между действиями")).length, 1);
+      assert.equal(rows.filter(row => row.includes("Повторная проверка")).length, 1);
+    }
+    function verifyEvidence(text) {
+      assert.match(text, /2\. Команды и сообщения сверены\./);
+      assert.match(text, /4\. Итог сверен с журналом\./);
+      assert.doesNotMatch(text, /1\. Команды и сообщения сверены\.|2\. Итог сверен с журналом\./);
+    }
     if (!restart) {
       await press("dialogue", "Enter");
       await press("work", "Space");
-      assert.equal(await evaluate('document.querySelector("#task-chat-work > li.muted").hidden'), false);
+      assert.equal(await evaluate('document.querySelector("#task-chat-work > li.muted").hidden'), true);
+      assert.equal(await evaluate('document.querySelectorAll("#task-chat-work > [data-chat-anchor^=stage]").length'), 2);
       assert.deepEqual(await rendered(), []);
-      record("1280 × 900, две вкладки, после старой вкладки открыт пустой «Ход работы». Enter и Space переключают панели.");
+      record("1280 × 900, две вкладки, после старой вкладки открыт «Ход работы» с двумя отметками этапов. Enter и Space переключают панели.");
       await publish("run", [foreign], oldThread);
       assert.deepEqual(await rendered(), []);
       await publish("run", mixed);
@@ -275,6 +351,107 @@ app.whenReady().then(async () => {
       await pressFold("Space");
       assert.equal(await foldOpen(), true);
       record("После получения квитанции мышь сворачивает запуск. Повтор живого события и обновление карточки сохраняют свёртку, фокус и порядок без дублей. Space раскрывает запуск.");
+      const reviewCard = current();
+      const legacyReview = Date.UTC(2025, 0, 1);
+      reviewCard.history.push({
+        at: new Date(legacyReview - 1000).toISOString(), actor: "agent", action: "submit",
+      });
+      reviewCard.history.push({
+        at: new Date(legacyReview + 600).toISOString(),
+        actor: "user", action: "request-changes", text: "Уточните итог для владельца.",
+      }, {
+        at: new Date(legacyReview + 700).toISOString(),
+        actor: "manager", action: "request-changes", text: "Приложите вывод для менеджера.",
+      });
+      reviewCard.tokenUsage = { reports: [{ reviewTiming: {
+        submissionSequence: reviewCard.history.length - 2, startedAtMs: legacyReview, durationMs: 500,
+      } }] };
+      await syncReviewPages();
+      await openReviewCard(reviewCard);
+      assert.equal(await evaluate('Boolean(document.getElementById("task-review-history"))'), false);
+      assertOrder(await reviewRows(), ["Ревью началось", "Ревью завершилось"]);
+      assert.ok(!(await reviewRows()).some(row => row.includes("Сообщение ревью")));
+      await verifyReturns();
+      record("В карточке с неполным журналом видны возвраты владельца и менеджера с их сохранёнными замечаниями.");
+      record("Карточка с утраченным журналом показывает сохранившееся начало и завершение ревью.");
+      reviewCard.history.push({
+        at: new Date().toISOString(), actor: "agent", action: "submit",
+      });
+      for (let index = 1; index <= 10; index++) {
+        await recordReview(reviewCard.history.length, async publish => {
+          publish(reviewItems(index));
+          await delay(10);
+          return report(index);
+        });
+      }
+      const review10 = readReviewerChatPage(project, taskId).attempts.at(-1);
+      reviewCard.history.push({
+        at: review10.finishedAt,
+        actor: "reviewer", action: "request-changes", text: "Замечания при возврате: исправьте вывод команды.",
+      });
+      const reworkAt = new Date(Date.parse(review10.finishedAt) + 2).toISOString();
+      reviewCard.history.push({
+        at: reworkAt, actor: "agent", action: "expert-stage",
+        expertStageRun: { phase: "work", key: "verify", state: "running", agentId: "fixture-qa",
+          sessionId: "fixture-rework", threadId: oldThread },
+        expertStageStart: { expertName: "QA инженер desktop приложений", stageTitle: "Повторная проверка" },
+      }, {
+        at: reworkAt, actor: "agent", action: "expert-stage",
+        expertStageRun: { phase: "work", key: "verify", state: "running", agentId: "fixture-qa",
+          sessionId: "fixture-rework", threadId: thread },
+      }, {
+        at: new Date(Date.parse(reworkAt) + 1).toISOString(), actor: "agent", action: "run-log",
+        runThreadId: thread, durationMs: 4,
+        run: [{ ...note, id: "rework", text: "Доработка завершена", at: new Date(Date.parse(reworkAt) + 1).toISOString() }],
+      }, {
+        at: new Date(Date.parse(reworkAt) + 2).toISOString(), actor: "agent", action: "submit",
+      });
+      await syncReviewPages();
+      await openReviewCard(reviewCard);
+      await recordReview(reviewCard.history.length, async publish => {
+        const active = readReviewerChatPage(project, taskId).attempts.at(-1);
+        const atOffset = offset => new Date(Date.parse(active.at) + offset).toISOString();
+        const entries = reviewItems(11, active.at);
+        entries[1].at = atOffset(2);
+        publish(entries);
+        // The expert begins while the review is active, between its message and command.
+        reviewCard.history.push({
+          at: atOffset(1), actor: "reviewer", action: "expert-stage",
+          expertStageRun: { phase: "review", key: "verify", state: "running", sessionId: "fixture-review" },
+          expertStageStart: { expertName: "QA инженер desktop приложений", stageTitle: "Сверка между действиями" },
+        });
+        await delay(5);
+        await updateReviews();
+        await openReviewCard(reviewCard);
+        verifyReviewOrder(await reviewRows());
+        publish([...entries, {
+          ...entries[0], id: "late", text: "Позднее событие ревью", at: atOffset(-1),
+        }, {
+          ...entries[0], id: "structured-report", phase: "final_answer", at: atOffset(3),
+          text: JSON.stringify(report(11)),
+        }]);
+        await updateReviews();
+        const rows = await reviewRows();
+        const start = rows.findLastIndex(row => row.includes("Ревью началось"));
+        assert.ok(start >= 0);
+        assertOrder(rows.slice(start), ["Ревью началось", "Позднее событие ревью"]);
+        const row = rows.find(row => row.includes("Сообщение ревью 11"));
+        assert.ok(row.includes("Позднее событие ревью"));
+        assert.ok(row.indexOf("Позднее событие ревью") < row.indexOf("Сообщение ревью 11"));
+        verifyReviewOrder(rows);
+        verifyEvidence(await evaluate('document.querySelector("#task-chat-work").innerText'));
+        return report(11);
+      });
+      await updateReviews();
+      const rows = await reviewRows();
+      assert.equal(rows.filter(row => row.includes("Сообщение ревью 11")).length, 1);
+      assert.equal(rows.filter(row => row.includes("Итог ревью 11")).length, 1);
+      verifyReviewOrder(rows);
+      verifyEvidence(await evaluate('document.querySelector("#task-chat-work").innerText'));
+      record("В живом и сохранённом ревью отметка эксперта разделяет сообщение и команду. Перепривязка threadId в том же сеансе не добавляет отметку. Завершение с тем же временем предшествует возврату, а пропуски в evidence сохраняют номера 2 и 4.");
+      assertOrder(rows, ["Итог ревью 10", "Замечания при возврате", "Доработка завершена", "Сообщение ревью 11", "Итог ревью 11"]);
+      record("Возврат, повторная работа эксперта и ревью следуют по времени. Позднее событие заняло своё место, одинаковое время сохранило исходный порядок. После сохранения попытка видна один раз.");
+      writeFileSync(reviewCardPath, JSON.stringify(reviewCard));
       writeFileSync(checksPath, JSON.stringify(checks));
     } else {
       await press("dialogue", "Enter");
@@ -288,10 +465,8 @@ app.whenReady().then(async () => {
         document.querySelector("#task-chat-work [data-item='item:command']").open,
         document.querySelector("#task-chat-work [data-item='item:tool']").open,
       ]`), [true, true, false, false]);
-      const expanded = await capture("task-work-expanded.png");
       await clickFold();
       assert.equal(await foldOpen(), false);
-      const collapsed = await capture("task-work-collapsed.png");
       await pressFold("Enter");
       assert.equal(await foldOpen(), true);
       assert.equal(await evaluate(`(() => {
@@ -343,7 +518,7 @@ app.whenReady().then(async () => {
       const offset = await evaluate("anchorOffset()");
       const height = await evaluate("workLog().clientHeight");
       assert.ok(offset >= 0 && offset < height / 2, offset);
-      await evaluate('document.querySelector(".task-work-controls button").click(); void 0');
+      await evaluate('[...document.querySelectorAll(".task-work-controls button")].find(button => button.checkVisibility()).click(); void 0');
       await settle();
       const fullOrder = ["restored-command", "restored", ...expected, ...later.flatMap(event => event.run.map(item => item.id))];
       assert.deepEqual(await providerItems(), fullOrder);
@@ -435,26 +610,144 @@ app.whenReady().then(async () => {
       assert.equal(await evaluate('Boolean(workLog().querySelector(".task-work-controls button"))'), true);
       assert.equal(await evaluate("historyLoads"), 1);
       record("При смене чата журнал предлагает подгрузку для нового сеанса и не показывает ранний запуск прежнего сеанса.");
+      const splitCard = current();
+      const splitAt = Date.now() + 1000;
+      const at = offset => new Date(splitAt + offset).toISOString();
+      const commandAt = (id, offset) => ({
+        at: at(offset),
+        id,
+        type: "commandExecution",
+        title: "git diff --check",
+        text: "Checked",
+        status: "completed",
+      });
+      const splitRun = {
+        at: at(4),
+        action: "run-log",
+        actor: "agent",
+        durationMs: 4,
+        runThreadId: splitCard.codexThreadId,
+        run: [commandAt("before-expert", 0), commandAt("after-expert", 3)],
+      };
+      splitCard.history.push({
+        at: at(1),
+        action: "expert-stage",
+        actor: "agent",
+        expertStageRun: { phase: "work", key: "verify", state: "running" },
+        expertStageStart: { expertName: "QA инженер desktop приложений", stageTitle: "Между частями запуска" },
+      }, splitRun);
+      await openReviewCard(splitCard);
+      await evaluate(`
+        window.splitFold = id => document.querySelector("[data-item='item:" + id + "']").closest(".chat-work");
+        void 0;
+      `);
+      const splitFolds = () => evaluate(`["before-expert", "after-expert"].map(id => {
+        const fold = splitFold(id);
+        return { key: fold.dataset.item, open: fold.open };
+      })`);
+      const toggleSplitFold = async id => {
+        await evaluate(`splitFold(${JSON.stringify(id)}).querySelector("summary").click()`);
+        await settle();
+      };
+      const initial = await splitFolds();
+      assert.deepEqual(initial.map(fold => fold.open), [true, true]);
+      await toggleSplitFold("before-expert");
+      await openReviewCard(splitCard);
+      assert.deepEqual((await splitFolds()).map(fold => fold.open), [false, true]);
+      assert.notEqual(initial[0].key, initial[1].key);
+      await toggleSplitFold("before-expert");
+      await toggleSplitFold("after-expert");
+      splitRun.run.push(commandAt("late-after-expert", 2));
+      await openReviewCard(splitCard);
+      assert.deepEqual(await splitFolds(), [
+        { key: initial[0].key, open: true },
+        { key: initial[1].key, open: false },
+      ]);
+      record("Две части завершённого запуска сохраняют разные состояния раскрытия в обоих сочетаниях. Поздняя команда после экспертной отметки не меняет ключ второй части.");
+      const reviewCard = JSON.parse(readFileSync(reviewCardPath, "utf8"));
+      await syncReviewPages();
+      await openReviewCard(reviewCard);
+      const firstReviewCommand = "git diff --check review-1";
+      await evaluate('window.olderReview = () => [...document.querySelectorAll(".task-work-controls button")]' +
+        '.find(button => button.textContent.includes("предыдущие попытки ревью")); void 0');
+      assert.equal(await evaluate("olderReview().checkVisibility()"), true);
+      assert.ok(!(await reviewRows()).some(row => /Сообщение ревью 1(?!\d)/.test(row)));
+      assert.equal((await reviewRows()).filter(row => row.match(/Сообщение ревью \d+/)).length, 10);
+      await evaluate("olderReview().click(); void 0");
+      await settle();
+      assert.equal(await evaluate("olderReview().checkVisibility()"), false);
+      assert.equal((await reviewRows()).filter(row => row.match(/Сообщение ревью \d+/)).length, 11);
+      assertOrder(await reviewRows(), ["Сообщение ревью 1", "Итог ревью 1", "Сообщение ревью 2", "Итог ревью 11"]);
+      verifyReviewOrder(await reviewRows());
+      await verifyReturns();
+      verifyEvidence(await evaluate('document.querySelector("#task-chat-work").innerText'));
+      record("После перезапуска проверены возвраты всех ролей, места экспертных отметок и номера подтверждений с пропусками.");
+
+      await evaluate('window.reviewDetail = title => [...document.querySelectorAll("#task-chat-work .chat-run-item")]' +
+        '.find(detail => detail.querySelector(".chat-run-preview")?.textContent.trim() === title); void 0');
+      const setCommandTitle = title => evaluate("window.commandTitle = " + JSON.stringify(title) + "; void 0");
+      const openCommand = async title => {
+        await setCommandTitle(title);
+        await evaluate(`(() => {
+          const command = reviewDetail(commandTitle);
+          const group = command.closest(".chat-run-group");
+          if (group) group.open = true;
+          command.open = true;
+        })()`);
+        await settle();
+      };
+      const scrollToRow = async label => {
+        await evaluate(`(() => {
+          const label = ${JSON.stringify(label)};
+          const list = document.querySelector("#task-chat-work");
+          const row = [...list.children].find(row => row.textContent.includes(label));
+          row.scrollIntoView({ block: "start" });
+        })()`);
+        await settle();
+      };
+      window.setContentSize(1440, 900);
+      await settle();
+      await scrollToRow("Замечания при возврате");
+      const wide = await capture("unified-review-wide.png", 1440, 900);
+      window.setContentSize(900, 800);
+      await settle();
+      await openCommand(firstReviewCommand);
+      await evaluate(`reviewDetail(commandTitle).closest("li.chat-run")
+        .previousElementSibling.scrollIntoView({ block: "start" }); void 0`);
+      await settle();
+      const oldDetailsOpen = () => evaluate('reviewDetail(commandTitle).open && reviewDetail(commandTitle).innerText.includes("Вывод команды 1")');
+      assert.equal(await oldDetailsOpen(), true);
+      assert.ok(await evaluate('document.querySelector("#task-chat-work").scrollTop > 0'));
+      await evaluate(`window.reviewOffset = () => reviewDetail(commandTitle).getBoundingClientRect().top -
+        document.querySelector("#task-chat-work").getBoundingClientRect().top; void 0`);
+      const oldOffset = await evaluate("reviewOffset()");
+      await openReviewCard(reviewCard);
+      assert.equal(await oldDetailsOpen(), true);
+      assert.ok(Math.abs(await evaluate("reviewOffset()") - oldOffset) <= 1);
+      const narrow = await capture("unified-review-narrow.png", 900, 800);
+      record("После перезапуска из 11 попыток показаны последние десять. Подгрузка раскрыла старейшую с сообщением, командой, выводом и итогом. Обновление открытой карточки в 900 × 800 сохранило положение и раскрытие.");
       const gitBase = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true });
       assert.equal(gitBase.status, 0, gitBase.stderr);
       const sha256 = data => createHash("sha256").update(data).digest("hex");
       const paths = [
         "src/desktop/chat.js", "src/desktop/renderer.js", "src/desktop/main.ts", "src/desktop/codex-chat.ts",
+        "src/desktop/reviewer-chat.ts", "src/desktop/preload.cjs",
         "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/styles.css", "src/cli/tasks.ts",
         "src/cli/model.ts", "src/cli/expert-team.ts", "scripts/check-task-work.mjs", "scripts/electron-check.mjs",
       ];
-      writeFileSync(join(artifacts, "task-work-expanded-check.txt"), [
-        "T-0337. Пройдена проверка Windows Electron и CLI",
-        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0337",
+      writeFileSync(join(artifacts, "unified-review-check.txt"), [
+        "T-0339. Пройдена проверка Windows Electron и CLI",
+        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0339-folds",
         `Среда: ${process.platform} ${process.arch}; Node ${process.versions.node}; Electron ${process.versions.electron}; Chromium ${process.versions.chrome}.`,
         "Linux и macOS не запускались. Упаковка вне изменений.",
-        "Два процесса Electron, штатный рендерер с синтетическими уведомлениями провайдера и реальная CLI на временной доске.",
+        "Два процесса Electron, штатный рендерер, синтетические уведомления провайдера, реальная CLI и файловое хранилище ревью на временной доске.",
+        "Ответы IPC для страниц ревью поданы в тестовый рендерер из readReviewerChatPage.",
         ...checks.map((check, index) => `${index + 1}. ${check}`),
         `База рабочей копии: ${gitBase.stdout.trim()}`,
         "SHA-256 исходников UTF-8, CRLF приведены к LF как при хранении в Git:",
         ...paths.map(path => `${sha256(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n"))}  ${path}`),
-        `${sha256(expanded)}  task-work-expanded.png (PNG, исходные байты)`,
-        `${sha256(collapsed)}  task-work-collapsed.png (PNG, исходные байты)`,
+        `${sha256(wide)}  unified-review-wide.png (PNG, исходные байты)`,
+        `${sha256(narrow)}  unified-review-narrow.png (PNG, исходные байты)`,
         "",
       ].join("\n"));
     }

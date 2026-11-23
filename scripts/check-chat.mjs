@@ -2349,7 +2349,7 @@ app.whenReady().then(async () => {
         id: 'handoff-prep', type: 'agentMessage', phase: 'commentary', title: '',
         text: 'Reviewer preparation', status: 'completed', at: reviewAt,
       }] };
-      api.reviewerChat = async () => ({ ok: true, data: [attempt] });
+      api.reviewerChat = async () => ({ ok: true, data: { attempts: [attempt], boundaries: [attempt] } });
       api.taskRunHistory = async () => ({ ok: true, data: { 1: handoffItems } });
       var historyRead;
       api.command = (action, id, ...args) => action === 'show' && id === handoff.id
@@ -2363,7 +2363,7 @@ app.whenReady().then(async () => {
       var handoffOrder = () => {
         const feed = byId('task-chat-work');
         const rows = [...feed.querySelectorAll('[data-item^="message:handoff-"], [data-item^="final:handoff-"]')];
-        return !feed.querySelector('.chat-event') && !feed.textContent.includes('Reviewer preparation') &&
+        return Boolean(feed.querySelector('.chat-event')) && feed.textContent.includes('Reviewer preparation') &&
           rows.length === handoffItems.length && rows.every((row, index) =>
             row.dataset.item.endsWith(handoffItems[index].id) && row.querySelector('time').dateTime === handoffItems[index].at);
       };

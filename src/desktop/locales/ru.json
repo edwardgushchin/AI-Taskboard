@@ -1457,5 +1457,17 @@
   "updates.cleaning": "Удаление скачанного установщика…",
   "updates.cleanup_failed": "Не удалось удалить скачанный установщик. Закройте программу, которая использует файл, и повторите попытку. {reason}",
   "updates.install_button": "Установить и перезапустить",
-  "updates.preparing": "Готовится обновление приложения. Повторите после перезапуска или отмены."
+  "updates.preparing": "Готовится обновление приложения. Повторите после перезапуска или отмены.",
+  "work.expert_started": "Эксперт начал работу",
+  "work.review_started": "Ревью началось",
+  "work.review_finished": "Ревью завершилось",
+  "work.review_failed": "Ошибка ревью",
+  "work.review_interrupted": "Ревью прервано",
+  "work.review_needs_human": "Ревью ждёт решения",
+  "work.review_findings": "Ревью завершилось с замечаниями",
+  "work.review-approve": "Ревью одобрено",
+  "work.review-note": "Заметка ревьюера",
+  "work.request-changes": "Возврат на доработку",
+  "work.load_older_reviews": "Загрузить предыдущие попытки ревью",
+  "work.owner": "Владелец"
 }
