@@ -1,5 +1,6 @@
 import { activeManagerGoal, managerGoalBinding, managerGoalState } from "../src/cli/manager-goal.ts";
-import { boardReviewModeTool, needsReviewModeCard, reviewModeCardReply, reviewModeReceipt, setReviewModeFromChat } from "../src/desktop/chat-actions.ts";
+import { boardReviewModeTool, reviewModeCardReply, reviewModeConfirmation, reviewModeQuestion, reviewModeReceipt,
+  reviewModeReplyTarget, setReviewModeFromChat } from "../src/desktop/chat-actions.ts";
 import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import { isManual, manualContext } from "../src/cli/manual-board.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../src/cli/attachment-links.ts";
@@ -164,7 +165,8 @@ function fixture(t: TestContext) {
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
     executorFullAccess, managerAccess, setTaskExecutorAccess, phaseStageReporter,
     autoReviewInstructions, autoReviewReadTools, autoReviewTaskTools, manualReviewInstructions, boardReviewMode, taskReviewMode, taskReviewModeVersion,
-    boardReviewModeTool, needsReviewModeCard, reviewModeCardReply, reviewModeReceipt, setReviewModeFromChat,
+    boardReviewModeTool, reviewModeCardReply, reviewModeConfirmation, reviewModeQuestion, reviewModeReceipt,
+    reviewModeReplyTarget, setReviewModeFromChat,
     reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
     backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,

@@ -4,6 +4,7 @@ import { exists, locateBoard, onBoard } from "../cli/storage.ts";
 import { readTask } from "../cli/archive.ts";
 import { member, requireRevision, requireState, record, reviewModes, taskReviewMode, taskIdPattern, TaskboardError, priorities } from "../cli/model.ts";
 import type { ReviewMode, Task } from "../cli/model.ts";
+import localization from "./localization.cjs";
 
 const string = { type: "string" };
 const strings = { type: "array", items: string };
@@ -70,13 +71,14 @@ const reviewModeCommand = new RegExp(
   `(?: (?:для (?:карточки )?|for (?:card )?)(${target}|этой карточки|this card))?$`, "u",
 );
 
-function reviewTarget(value: string): string | undefined {
+export function reviewModeReplyTarget(value: string): string | undefined {
+  value = value.trim();
   const id = value.toUpperCase();
   if (taskIdPattern.test(id)) return id;
   if (/^[0-9]+$/.test(value)) return "T-" + value.replace(/^0+(?=[0-9])/, "").padStart(4, "0");
 }
 
-function requestedReviewMode(message: string): { target?: string; mode: ReviewMode | null } | undefined {
+function requestedReviewMode(message: string): { target?: string; mode: ReviewMode | null | undefined } | undefined {
   if (/[\r\n]/.test(message.trim())) return;
   const command = message.trim().toLowerCase().replaceAll("ё", "е").replace(/\s+/g, " ").replace(/[.!]$/, "");
   const match = reviewModeCommand.exec(command);
@@ -84,7 +86,7 @@ function requestedReviewMode(message: string): { target?: string; mode: ReviewMo
   const [, before, verb, after, value, trailing] = match;
   const targets = [before, after, trailing].filter(Boolean);
   if (targets.length > 1) return;
-  const target = targets[0] && (reviewTarget(targets[0]) ?? targets[0]);
+  const target = targets[0] && (reviewModeReplyTarget(targets[0]) ?? targets[0]);
 
   if (/^(?:верни|восстанови|restore|reset)/u.test(verb)) {
     if (/^(?:наследование(?: (?:режима )?доски)?|(?:board )?inheritance|to board default)$/u.test(value)) {
@@ -95,18 +97,26 @@ function requestedReviewMode(message: string): { target?: string; mode: ReviewMo
   const name = value.replace(/^(?:to |режим(?: ревью)? |review mode )/u, "");
   const quoted = /^(?:"([^"]+)"|«([^»]+)»|„([^“]+)“|“([^”]+)”|`([^`]+)`)$/u.exec(name);
   const mode = reviewModeNames.get((quoted?.slice(1).find(Boolean) ?? name).replace(/\s*\+\s*/g, " + "));
-  if (mode) return { target, mode };
+  if (mode || /^(?:режим|review mode|to)$/.test(value)) return { target, mode };
 }
 
-export function needsReviewModeCard(message: string): boolean {
+export function reviewModeQuestion(message: string, cardId?: string) {
   const request = requestedReviewMode(message);
-  return !!request && !request.target;
+  if (!request) return;
+  if (!cardId && !request.target && request.mode !== undefined) return "card";
+  if (request.mode === undefined && (cardId ? matchesReviewCard(request.target, cardId) : request.target?.startsWith("T-"))) {
+    return "mode";
+  }
+}
+
+function matchesReviewCard(target: string | undefined, id: string) {
+  return !target || target === id || target === "этой карточки" || target === "this card";
 }
 
 export function reviewModeCardReply(message: string, previousRequest: string) {
-  const target = reviewTarget(message.trim());
+  const target = reviewModeReplyTarget(message);
   const original = requestedReviewMode(previousRequest);
-  if (target && original && !original.target) return { target, mode: original.mode };
+  if (target && original && !original.target && original.mode !== undefined) return { target, mode: original.mode };
 }
 
 export function setReviewModeFromChat(project: string, userText: string, args: unknown, current?: Task,
@@ -126,7 +136,7 @@ export function setReviewModeFromChat(project: string, userText: string, args: u
     const request = requestedReviewMode(userText) ??
       (!current && previousRequest ? reviewModeCardReply(userText, previousRequest) : undefined);
     const target = request?.target;
-    const matchesCard = target === id || (current && (!target || ["этой карточки", "this card"].includes(target)));
+    const matchesCard = current ? matchesReviewCard(target, id) : target === id;
     if (!matchesCard || request?.mode !== selection) {
       return cliFailure("USER_DIRECTION_REQUIRED", "Ask one short question about the unclear card or mode. Use the owner's complete latest message as authorization.");
     }
@@ -156,8 +166,22 @@ export function reviewModeReceipt(task: Task & { effectiveReviewMode: ReviewMode
   return { id: task.id, revision: task.revision, reviewMode: task.effectiveReviewMode, inherited: !task.reviewModeOverride };
 }
 
+export function reviewModeConfirmation(receipt: ReturnType<typeof reviewModeReceipt>) {
+  const labels = {
+    human: "ui.human_56f4a79e",
+    manager: "ui.project_manager_48697fa0",
+    reviewer: "ui.reviewer_50c42665",
+    "reviewer-human": "ui.review_then_human",
+  };
+  const { id, inherited, reviewMode } = receipt;
+  return localization.text(inherited ? "review_mode.inherited" : "review_mode.saved", {
+    id, mode: localization.text(labels[reviewMode]),
+  });
+}
+
 export function taskChatActions(project: string, initial: Task, userText: string, onChange: (revision: number) => void,
-  requestChanges?: (task: Task, reason: string) => Promise<CliReply>) {
+  requestChanges?: (task: Task, reason: string) => Promise<CliReply>,
+  onReviewMode?: (receipt: ReturnType<typeof reviewModeReceipt>) => void) {
   let task = initial;
   return async (name: string, args: unknown): Promise<CliReply> => {
     if (name === reviewModeTool.name) {
@@ -165,7 +189,9 @@ export function taskChatActions(project: string, initial: Task, userText: string
       if (!result.ok) return result;
       if (result.data.revision !== task.revision) onChange(result.data.revision);
       task = result.data;
-      return { ok: true, data: reviewModeReceipt(result.data) };
+      const receipt = reviewModeReceipt(result.data);
+      onReviewMode?.(receipt);
+      return { ok: true, data: receipt };
     }
     if (name === returnTool.name) {
       if (!args || typeof args !== "object" || Array.isArray(args) ||

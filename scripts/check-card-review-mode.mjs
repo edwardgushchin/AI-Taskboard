@@ -1,7 +1,7 @@
 import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { electronCheck } from "./electron-check.mjs";
 import { locateBoard, onBoard } from "../src/cli/storage.ts";
+import { registerRuntime } from "../src/desktop/board-runtime.ts";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "card-review-mode", 240_000,
   [["auto-on"], ["auto-off"], ["restart"]]);
@@ -171,7 +172,7 @@ async function run() {
       } else {
         const receipt = await call(action, input);
         receipts.push(receipt);
-        text = JSON.stringify(receipt);
+        text = receipt.ok ? "Provider draft without the saved mode." : JSON.stringify(receipt);
       }
     }
     return { text };
@@ -182,10 +183,13 @@ async function run() {
     const receipt = await call(action, { ...replies.get(authorization), authorization });
     if (!receipt.ok) assert.equal(show(hybrid).revision, before);
     receipts.push(receipt);
-    return { text: JSON.stringify(receipt) };
+    return { text: receipt.ok ? "Provider draft without the saved mode." : JSON.stringify(receipt) };
   };
 
-  app.setPath("userData", join(scratch, "profile-" + phase));
+  const profile = join(scratch, "profile-" + phase);
+  mkdirSync(profile, { recursive: true });
+  writeFileSync(join(profile, "appearance.json"), JSON.stringify({ language: "ru" }));
+  app.setPath("userData", profile);
   app.setPath("appData", join(scratch, "app-data-" + phase));
   app.disableHardwareAcceleration();
   app.requestSingleInstanceLock = () => true;
@@ -221,11 +225,24 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
 
   const evaluate = (win, method, args) => win.webContents.executeJavaScript(
     `window.taskboard[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
-  const manager = async (prompt, input) => {
-    replies.set(prompt, input);
+  const saveToQueue = async prompt => {
+    const queued = await evaluate(window, "boardQueue", [project, "add", randomUUID(), prompt, false, []]);
+    assert.ok(queued.ok, JSON.stringify(queued));
+    return queued.data;
+  };
+  const managerRequest = async prompt => {
     const result = await evaluate(window, "boardRequest", [prompt, [], project, false, false]);
     assert.ok(result.ok && !result.data.error, JSON.stringify(result));
-    return receipts.at(-1);
+    return result.data;
+  };
+  const manager = async (prompt, input) => {
+    replies.set(prompt, input);
+    const previousReceipts = receipts.length;
+    const result = await managerRequest(prompt);
+    if (typeof input !== "string") {
+      assert.equal(receipts.length, previousReceipts + 1, JSON.stringify(result));
+    }
+    return { ...receipts.at(-1), answer: result.answer, items: result.items };
   };
   const discussion = async (text, input) => {
     replies.set(text, input);
@@ -249,18 +266,72 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
   assert.equal((await discussion("Установи режим «Ревью + человек» для этой карточки", { mode: "reviewer-human" })).data.inherited, false);
   const original = "поставь карточке 319 только ревью, без человеческой приемки";
   const managerInput = (authorization, mode, revision = show(hybrid).revision) => ({ id: hybrid, mode, revision, authorization });
-  assert.equal((await manager(original, managerInput(original, "reviewer"))).data.reviewMode, "reviewer");
+  const originalReceipt = await manager(original, managerInput(original, "reviewer"));
+  assert.ok(originalReceipt.ok, JSON.stringify(originalReceipt));
+  assert.equal(originalReceipt.data.reviewMode, "reviewer");
+  assert.equal(originalReceipt.answer, "Для T-0319 сохранён режим «Ревьюер».");
+  assert.equal(originalReceipt.items.filter(item => item.type === "agentMessage").at(-1).text, originalReceipt.answer);
   const mixed = "Назначь T-0319 режим «Ревью + человек»";
   assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
   const scoped = "Поставь только ревью, без человеческой приёмки";
   assert.equal((await discussion(scoped, { mode: "reviewer-human" })).error.code, "USER_DIRECTION_REQUIRED");
   assert.equal((await discussion(scoped, { mode: "reviewer" })).data.reviewMode, "reviewer");
+  assert.equal(show(hybrid).history.filter(event => event.chat).at(-1).text, "Для T-0319 сохранён режим «Ревьюер».");
+  const pendingMode = "Поставь карточке 319 режим";
+  const beforeQuestion = receipts.length;
+  const modeQuestion = await managerRequest(pendingMode);
+  assert.equal(modeQuestion.answer, "Какой режим ревью выбрать?");
+  assert.deepEqual(modeQuestion.items.filter(item => item.type === "agentMessage").map(item => item.text), [modeQuestion.answer]);
+  const questionFromCard = await evaluate(window, "chatSend", [hybrid, {
+    text: "Поставь режим", files: [], model: "fixture", effort: "low",
+  }]);
+  assert.ok(questionFromCard.saved && questionFromCard.result.ok, JSON.stringify(questionFromCard));
+  assert.equal(show(hybrid).history.filter(event => event.chat).at(-1).text, modeQuestion.answer);
+  assert.equal(receipts.length, beforeQuestion);
   const askForCard = async () => {
-    const result = await evaluate(window, "boardRequest", [scoped, [], project, false, false]);
-    assert.ok(result.ok, JSON.stringify(result));
-    assert.match(result.data.answer, /^(Какой карточке|Which card)\?$/);
-    assert.equal(result.data.items.filter(item => item.type === "agentMessage").length, 1);
+    const result = await managerRequest(scoped);
+    assert.equal(result.answer, "Какой карточке?");
+    assert.equal(result.items.filter(item => item.type === "agentMessage").length, 1);
   };
+  assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
+  await waitFor(() => window.webContents.executeJavaScript("Boolean(document.querySelector('#board-draft textarea'))"), "manager composer");
+  const refreshQueue = () => window.webContents.executeJavaScript("document.querySelector('#board-draft').refreshQueue()");
+  const waitForQueue = () => waitFor(async () => {
+    const result = await evaluate(window, "boardQueue", [project, "list"]);
+    assert.ok(result.ok, JSON.stringify(result));
+    return !result.data.length && !(await bootstrap(window)).managerBusy;
+  }, "the ordinary queue to drain");
+  const beforePremature = show(hybrid).revision;
+  const hold = registerRuntime(project, { task: "manager:dialogue", kind: "task" });
+  assert.ok(hold);
+  let queuedQuestion;
+  try {
+    replies.set("319", managerInput("319", "reviewer", beforePremature));
+    queuedQuestion = await saveToQueue(scoped);
+    await saveToQueue("319");
+  } finally {
+    hold();
+  }
+  await refreshQueue();
+  await waitForQueue();
+  const queuedTurn = async clientId => {
+    const result = await evaluate(window, "boardHistory", [project, null, "chat"]);
+    assert.ok(result.ok, JSON.stringify(result));
+    return result.data.turns.find(turn => turn.messages.some(message => message.clientId === clientId));
+  };
+  assert.deepEqual((await queuedTurn(queuedQuestion)).items.filter(item => item.type === "agentMessage").map(item => item.text),
+    ["Какой карточке?"]);
+  assert.equal(receipts.at(-1).error.code, "USER_DIRECTION_REQUIRED");
+  assert.equal(show(hybrid).revision, beforePremature);
+  assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer-human");
+  await askForCard();
+  replies.set("319", managerInput("319", "reviewer"));
+  const afterQuestion = await saveToQueue("319");
+  await refreshQueue();
+  await waitForQueue();
+  assert.deepEqual((await queuedTurn(afterQuestion)).items.filter(item => item.type === "agentMessage").map(item => item.text),
+    ["Для T-0319 сохранён режим «Ревьюер»."]);
+  assert.equal(show(hybrid).reviewModeOverride.mode, "reviewer");
   assert.equal((await manager(mixed, managerInput(mixed, "reviewer-human"))).data.reviewMode, "reviewer-human");
   await askForCard();
   assert.equal((await manager("319", managerInput("319", "reviewer", show(hybrid).revision - 1))).error.code, "REVISION_CONFLICT");
@@ -278,6 +349,7 @@ const callCli = (...args) => globalThis.fixtureCli(realCallCli, ...args);
     assert.equal((await manager(invalid, managerInput(invalid, "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
   }
   assert.equal((await manager(original, managerInput(mixed, "reviewer"))).error.code, "USER_DIRECTION_REQUIRED");
+  log("PASS: the ordinary queue rejected a number sent before the question and accepted a fresh answer sent after it. Both chats produced one application-generated question about the mode and displayed confirmations derived from saved results.");
   log("PASS: the original 319 request, accented negation, full ID, current card and adjacent card-number clarification saved the exact review mode. Wrong mode, stale revision, invalid number, quote, forged question and authorization mismatch were rejected.");
   assert.equal((await discussion("Верни наследование режима доски", { mode: null })).data.inherited, true);
   const ambiguous = "Use reviewer-human for " + hybrid + " or " + normal;
