@@ -17,22 +17,22 @@ const project = join(scratch, "project");
 const agents = join(project, "AGENTS.md");
 const report = join(artifacts, "report.txt");
 const restart = process.argv.at(-1) === "restart";
-const original = [
+const preamble = "# Правила проекта\n\nОбщее пояснение для списка.";
+const first = [
   "- Сверяйте [справку](docs/guide.md).",
   "  - Сохраняйте вложенное пояснение.",
   "",
   "  ```sh",
   "  npm test",
   "  ```",
-  "- Проверяйте ссылки перед сдачей.",
-  "- Указывайте версию в отчёте.",
-];
-const first = original.slice(0, 6).join("\n");
-const second = original[6];
-const third = original[7];
+].join("\n");
+const second = "- Проверяйте ссылки перед сдачей.";
+const third = "- Указывайте версию в отчёте.";
+const original = [preamble, "", first, second, third, ""].join("\n").replaceAll("\n", "\r\n");
 const temporary = "Временное правило для проверки";
 const rule = (text, enabled = true) => ({ text, enabled });
-const publishedOrder = [rule(third), rule(first), rule(second, false)];
+const importedOrder = [rule(preamble), rule(first), rule(second), rule(third)];
+const publishedOrder = [rule(preamble), rule(third), rule(first), rule(second, false)];
 const form = "#sheet-body form:has(> fieldset > [role=list])";
 const rows = form + " .board-queued-row";
 
@@ -70,6 +70,21 @@ const rules = window => evaluate(window, `Array.from(document.querySelectorAll($
   text: row.querySelector("textarea").value.trimEnd(),
   enabled: row.querySelector("input[type=checkbox]").checked,
 }))`);
+
+function assertPublishedRules(text, expected) {
+  const published = text.replaceAll("\r\n", "\n");
+  assert.equal(published.split(preamble).length, 2);
+  let position = published.indexOf(preamble) + preamble.length;
+  for (const item of expected.slice(1)) {
+    const next = published.indexOf(item.text);
+    if (!item.enabled) {
+      assert.equal(next, -1);
+      continue;
+    }
+    assert.ok(next >= position, "Published rule is missing or out of order: " + item.text);
+    position = next + item.text.length;
+  }
+}
 
 async function openSettings(window) {
   await waitFor(() => !window.webContents.isLoading() && evaluate(window,
@@ -190,7 +205,7 @@ function startApp() {
 async function run() {
   if (!restart) {
     mkdirSync(project);
-    writeFileSync(agents, original.join("\r\n") + "\r\n");
+    writeFileSync(agents, original);
     writeFileSync(report, "");
     log("Команда: node scripts/check-project-rules.mjs --artifacts .tasks/qa/T-0341");
     const node = execFileSync(process.env.TASKBOARD_CHECK_NODE, ["--version"], { encoding: "utf8", windowsHide: true }).trim();
@@ -213,6 +228,7 @@ async function run() {
   if (restart) {
     await openSettings(window);
     assert.deepEqual(await rules(window), publishedOrder);
+    assertPublishedRules(readFileSync(agents, "utf8"), publishedOrder);
     log("Второй процесс Electron восстановил порядок и выключенное правило.");
     return;
   }
@@ -221,12 +237,12 @@ async function run() {
   await click(window, "#welcome-create");
   await click(window, "[data-board-type=agent]");
   await openSettings(window);
-  assert.deepEqual(await rules(window), [rule(first), rule(second), rule(third)]);
+  assert.deepEqual(await rules(window), importedOrder);
   const initialized = readFileSync(agents, "utf8");
-  assert.equal(initialized.split(original.join("\r\n")).length, 2);
+  assert.equal(initialized.split(original).length, 2);
   assert.match(initialized, /AI Taskboard workflow/);
   await capture(window, "imported.png");
-  log("Создание агентной доски через интерфейс сразу показало три правила. Исходные CRLF, ссылка, вложенный список и блок кода сохранились в корневом AGENTS.md.");
+  log("Создание агентной доски показало общий заголовок с пояснением и три самостоятельных пункта. Исходный CRLF, ссылка, вложенный список и блок кода сохранились в AGENTS.md.");
 
   await click(window, form + " fieldset > button");
   await evaluate(window, `Array.from(document.querySelectorAll(${JSON.stringify(rows + " textarea")})).at(-1).value = ${JSON.stringify(temporary)}`);
@@ -237,32 +253,42 @@ async function run() {
   await openSettings(mirror);
   assert.equal((await rules(mirror)).at(-1).text, temporary);
 
-  const secondCheckbox = rows + ":nth-child(2) input[type=checkbox]";
+  const secondCheckbox = rows + ":nth-child(3) input[type=checkbox]";
   await click(window, secondCheckbox);
   await save(window, success);
-  assert.ok(!readFileSync(agents, "utf8").includes(second));
+  assertPublishedRules(readFileSync(agents, "utf8"), [
+    rule(preamble), rule(first), rule(second, false), rule(third), rule(temporary),
+  ]);
   await save(mirror, /изменился|has changed/i);
   assert.ok((await evaluate(mirror, `document.querySelector(${JSON.stringify(form + " textarea[readonly]")}).value`)).includes("[ ] " + second));
-  assert.deepEqual(await rules(mirror), [rule(first), rule(second), rule(third), rule(temporary)]);
+  assert.deepEqual(await rules(mirror), [...importedOrder, rule(temporary)]);
   assert.ok(!readFileSync(agents, "utf8").includes(second));
   await click(window, secondCheckbox);
   await save(window, success);
-  assert.deepEqual(await rules(window), [rule(first), rule(second), rule(third), rule(temporary)]);
-  assert.ok(readFileSync(agents, "utf8").includes(second));
+  assert.deepEqual(await rules(window), [...importedOrder, rule(temporary)]);
+  assertPublishedRules(readFileSync(agents, "utf8"), [...importedOrder, rule(temporary)]);
   await click(window, secondCheckbox);
   await click(window, rows + ":last-child button:last-child");
-  assert.equal((await rules(window)).length, 3);
-  log("Добавление, выключение, включение и удаление проверены в форме. Второе окно получило конфликт, увидело актуальное состояние и сохранило свой черновик.");
+  assert.equal((await rules(window)).length, 4);
+  log("Добавление и удаление проверены в форме. Выключение и включение пункта сохранили заголовок, пояснение и вложенный Markdown. Второе окно показало конфликт и сохранило черновик.");
 
-  await drag(window, 2, 0);
+  await drag(window, 3, 1);
   assert.deepEqual(await rules(window), publishedOrder);
-  const grip = rows + ":nth-child(3) .board-queue-handle";
+  const grip = rows + ":nth-child(4) .board-queue-handle";
   await evaluate(window, `document.querySelector(${JSON.stringify(grip)}).focus()`);
-  for (const key of ["Up", "Down"]) {
-    window.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
-    window.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
-    const expected = key === "Up" ? [rule(third), rule(second, false), rule(first)] : publishedOrder;
-    assert.deepEqual(await rules(window), expected);
+  const debug = window.webContents.debugger;
+  debug.attach("1.3");
+  try {
+    for (const key of ["ArrowUp", "ArrowDown"]) {
+      await debug.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key, code: key });
+      await debug.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key, code: key });
+      const expected = key === "ArrowUp"
+        ? [rule(preamble), rule(third), rule(second, false), rule(first)]
+        : publishedOrder;
+      assert.deepEqual(await rules(window), expected);
+    }
+  } finally {
+    debug.detach();
   }
   const beforeFailure = readFileSync(agents, "utf8");
   const beforeFailedSave = await evaluate(window, "window.taskboard.bootstrap().then(frame => window.taskboard.projectRules(frame.project))");
@@ -276,8 +302,7 @@ async function run() {
   await save(window, success);
   const final = readFileSync(agents, "utf8");
   assert.match(final, /AI Taskboard workflow/);
-  assert.ok(final.indexOf(third) < final.indexOf(first.split("\n")[0]));
-  assert.ok(!final.includes(second) && !final.includes(temporary));
+  assertPublishedRules(final, [...publishedOrder, rule(temporary, false)]);
   await capture(window, "reordered.png");
   await click(window, "#close-sheet");
   await openSettings(window);

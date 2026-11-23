@@ -111,6 +111,71 @@ test("reordering tight list items after prose preserves their Markdown boundarie
   assert.equal(save(disabled.revision, [first, second]).text, original);
 });
 
+test("imports standalone list items under a common heading", t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-heading-list-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  const file = join(root, "AGENTS.md");
+  const original = [
+    "# Правила проекта",
+    "",
+    "- Запускайте тесты перед коммитом",
+    "- Обновляйте журнал перед выпуском",
+    "",
+  ].join("\n");
+  writeFileSync(file, original);
+  initializeBoard(locateBoard(root, true, false, true), () => {}, "manual");
+
+  const imported = readBoardProjectRules(root);
+  assert.deepEqual(imported.rules.map(rule => rule.text), [
+    "# Правила проекта\n",
+    "- Запускайте тесты перед коммитом",
+    "- Обновляйте журнал перед выпуском\n",
+  ]);
+  assert.equal(imported.text, original);
+});
+
+test("keeps introductory and nested Markdown when disabling or moving a headed list item", t => {
+  const root = mkdtempSync(join(tmpdir(), "taskboard-heading-list-edit-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  const file = join(root, "AGENTS.md");
+  const entries = [
+    "# Правила проекта\n\nОбщее пояснение.\n",
+    [
+      "- Запускайте тесты перед коммитом.",
+      "  - Сверьте [справку](./guide.md).",
+      "",
+      "  ```sh",
+      "  npm test",
+      "  ```",
+    ].join("\n"),
+    "- Обновляйте журнал перед выпуском.\n",
+  ];
+  const original = entries.join("\n");
+  writeFileSync(file, original);
+  const location = locateBoard(root, true, false, true);
+  initializeBoard(location, () => {}, "manual");
+
+  const imported = readBoardProjectRules(root);
+  assert.deepEqual(imported.rules.map(rule => rule.text), entries);
+  assert.equal(imported.text, original);
+  const [preamble, commit, release] = imported.rules;
+  const ordered = [preamble, release, { ...commit, enabled: false }];
+  const save = (revision: string, rules: typeof imported.rules) =>
+    withProjectRulesLock(location, () => writeBoardProjectRules(root, { revision, rules }));
+  const disabled = save(imported.revision, ordered);
+  assert.equal(disabled.text, entries[0] + "\n" + entries[2]);
+  assert.deepEqual(readBoardProjectRules(root).rules, ordered);
+  assert.doesNotMatch(readFileSync(file, "utf8"), /npm test/);
+  assert.doesNotMatch(boardProjectRulesPrompt(root), /guide\.md/);
+
+  const enabled = save(disabled.revision, [preamble, release, commit]);
+  assert.equal(enabled.text, [entries[0], entries[2], entries[1]].join("\n"));
+  assert.deepEqual(readBoardProjectRules(root).rules, [preamble, release, commit]);
+  const restored = save(enabled.revision, [preamble, commit, release]);
+  assert.equal(restored.text, original);
+  assert.equal(withProjectRulesLock(location, () => migrateBoardProjectRules(root)).changed, false);
+});
+
 test("an unreadable AGENTS.md leaves initialization retryable", t => {
   const root = mkdtempSync(join(tmpdir(), "taskboard-invalid-agents-"));
   t.after(() => rmSync(root, { recursive: true }));

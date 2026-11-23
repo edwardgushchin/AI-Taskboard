@@ -87,7 +87,18 @@ function splitRules(text: string): ProjectRule[] {
   if (!env.references) {
     const blocks = tokens.filter(token => token.level === 0 && token.map);
     const first = blocks[0];
-    if (first?.type === "heading_open") {
+    const last = blocks.at(-1);
+    const headedList = first?.type === "heading_open" &&
+      blocks.slice(1, -1).every(block => block.type === "paragraph_open");
+    if ((last?.type === "bullet_list_open" || last?.type === "ordered_list_open") &&
+        (blocks.length === 1 || headedList)) {
+      const items = tokens.filter(token => token.type === "list_item_open" && token.level === 1);
+      if (items.length > 1) {
+        for (const item of items) {
+          if (item.map) starts.add(item.map[0]);
+        }
+      }
+    } else if (first?.type === "heading_open") {
       const headings = blocks.filter(token => token.type === "heading_open");
       const roots = headings.filter(heading => heading.tag === first.tag);
       let siblings = roots;
@@ -100,10 +111,6 @@ function splitRules(text: string): ProjectRule[] {
         for (const heading of siblings) {
           if (heading.map) starts.add(heading.map[0]);
         }
-      }
-    } else if (blocks.length === 1 && (first.type === "bullet_list_open" || first.type === "ordered_list_open")) {
-      for (const item of tokens.filter(token => token.type === "list_item_open" && token.level === 1)) {
-        if (item.map) starts.add(item.map[0]);
       }
     }
   }
