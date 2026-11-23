@@ -2644,7 +2644,7 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   if (!project || (kind !== "pause" && kind !== "clear" && (kind !== "edit" || typeof objective !== "string" || !objective.trim()))) {
     return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
   }
-  const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
+  const action: BoardGoalAction = kind === "edit" ? { kind, objective: objective as string } : { kind };
   const key = projectIdentity(project);
   const resume = boardGoalResumes.get(key);
   if (resume && !resume.started && kind === "clear") resume.cancelled = true;
@@ -2793,7 +2793,7 @@ async function changeBoardGoal(project: string, key: string, action: BoardGoalAc
     if (!running) {
       broadcastBoardChat(project, "orchestrator-goal", { goal, goalRunning: false });
     }
-    if (dialogueEdit && goal?.status === "active") running?.wakeGoal?.(true);
+    if (action.kind === "edit" && goal?.status === "active") running?.wakeGoal?.(true);
     return { ok: true, data: goal };
   } catch (error) {
     return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
@@ -3116,7 +3116,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     publishReviewActivity(project);
   }
   const changes: BoardChange[] = [];
-  let requestText = queued?.draft.trim() ?? request.trim();
+  const draftText = queued?.draft ?? request;
+  let requestText = goal === true ? draftText : draftText.trim();
   if (draftNotice) requestText = "AI Taskboard queue: answer these draft questions through team_message. " + JSON.stringify(draftQuestions);
   let ownerReviewRequest = !background && !goal ? requestText : "";
   let previousReviewRequest: string | undefined;
@@ -3541,7 +3542,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         }
         signal.throwIfAborted();
         return changeBoardGoal(project, projectKey, {
-          kind: "edit", objective: edit.replacement ?? input.objective.trim(), expectedObjective: input.expectedObjective,
+          kind: "edit", objective: edit.replacement ?? input.objective, expectedObjective: input.expectedObjective,
         }, { goalId: input.goalId, request: ownerReviewRequest });
       }
       if (name === "goal_configure_iteration") {
@@ -3836,6 +3837,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         bindProvider: stages?.bind,
         stageReporter: stages,
         goal: goal === true ? requestText : undefined,
+        previousObjective: goal === true ? stored?.goal?.objective : undefined,
         resumeGoal: goal === "resume",
         iterativeGoal: Boolean(iteration),
         finishGoalTurn: goal && !iteration

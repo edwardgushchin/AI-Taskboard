@@ -18,6 +18,7 @@ import type { BoardChange } from "./board-actions.ts";
 import { boardToolContent, withBoardMcp } from "./board-mcp.ts";
 import { openComputerUse } from "./computer-use.ts";
 import { goalTaskWaitSeconds } from "./board-actions.ts";
+import { discardGoalObjective, fullGoalObjective, needsGoalFile, prepareGoalObjective } from "./goal-objective.ts";
 import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
 import { callCli, cliFailure } from "./cli.ts";
@@ -257,20 +258,48 @@ async function readGoal(request: Request, threadId: string, notify?: Notificatio
   return (await request<{ goal: BoardGoal | null }>("thread/goal/get", { threadId }, notify)).goal;
 }
 
-async function changeGoal(request: Request, threadId: string, action: BoardGoalAction, goal: BoardGoal | null | undefined,
+async function setGoal(request: Request, project: string, threadId: string, objective: string, status?: GoalStatus,
+  previous?: BoardGoal | null, notify?: Notification) {
+  const providerObjective = prepareGoalObjective(project, threadId, objective);
+  try {
+    return (await request<{ goal: BoardGoal }>("thread/goal/set", {
+      threadId, objective: providerObjective, ...(status ? { status } : {}), origin: "user",
+    }, notify)).goal;
+  } catch (error) {
+    if (error instanceof CodexRpcRejection && providerObjective !== objective && providerObjective !== previous?.objective) {
+      discardGoalObjective(project, threadId, providerObjective);
+    }
+    throw error;
+  }
+}
+
+function displayGoal(project: string, threadId: string, goal: BoardGoal, restore = false): BoardGoal {
+  const objective = fullGoalObjective(project, threadId, goal.objective, restore);
+  return objective === goal.objective ? goal : { ...goal, objective };
+}
+
+async function changeGoal(request: Request, project: string, threadId: string, action: BoardGoalAction, goal: BoardGoal | null | undefined,
   notify?: Notification) {
   if (!goal) throw new Error("No goal in this Codex chat.");
-  if (action.kind === "edit" && action.expectedObjective !== undefined && goal.objective !== action.expectedObjective) {
+  if (action.kind === "edit" && action.expectedObjective !== undefined &&
+      displayGoal(project, threadId, goal).objective !== action.expectedObjective) {
     throw new Error("The goal text changed. Read the current goal before editing.");
   }
   if (action.kind === "resume" && goal.status === "complete") throw new Error("This goal is already complete.");
   if (action.kind === "clear") {
     await request("thread/goal/clear", { threadId, origin: "user" }, notify);
+    discardGoalObjective(project, threadId, goal.objective);
     return null;
   }
+  if (action.kind === "edit") {
+    const updated = await setGoal(request, project, threadId, action.objective, undefined, goal, notify);
+    if (updated.objective !== goal.objective) discardGoalObjective(project, threadId, goal.objective);
+    return updated;
+  }
+  if (action.kind === "resume") displayGoal(project, threadId, goal, true);
   const { goal: updated } = await request<{ goal: BoardGoal }>("thread/goal/set", {
     threadId, origin: "user",
-    ...(action.kind === "edit" ? { objective: action.objective } : { status: action.kind === "pause" ? "paused" : action.kind === "complete" ? "complete" : "active" }),
+    status: action.kind === "pause" ? "paused" : action.kind === "complete" ? "complete" : "active",
   }, notify);
   return updated;
 }
@@ -535,6 +564,7 @@ interface BoardSession {
   attachmentContext?: string;
   saveGeneratedImage?: (image: ChatImage) => Promise<string | undefined>;
   goal?: string;
+  previousObjective?: string;
   resumeGoal?: boolean;
   iterativeGoal?: boolean;
   finishGoalTurn?: () => boolean;
@@ -565,7 +595,8 @@ export function updateBoardGoal(profile: string, project: string, threadId: stri
   return withServer(profile, project, async ({ request }) => {
     const goal = await readGoal(request, threadId);
     if (action.kind === "clear" && goal === null) return null;
-    return changeGoal(request, threadId, action, goal);
+    const updated = await changeGoal(request, project, threadId, action, goal);
+    return updated && displayGoal(project, threadId, updated);
   }, async () => undefined);
 }
 
@@ -628,7 +659,8 @@ export function readBoardHistory(profile: string, project: string, threadId: str
   return withServer(profile, project, async ({ request }) => {
     const metadata = cursor === null ? await request<{ thread: { model?: string | null } }>(
       "thread/read", { threadId, includeTurns: false }) : undefined;
-    const goal = cursor === null ? await readGoal(request, threadId).catch(() => undefined) : undefined;
+    const saved = cursor === null ? await readGoal(request, threadId).catch(() => undefined) : undefined;
+    const goal = saved && displayGoal(project, threadId, saved);
     const page = await request<{ data: {
       turnId: string; item: Record<string, unknown>; startedAtMs?: number | null; completedAtMs?: number | null;
     }[]; nextCursor: string | null }>("thread/items/list", { threadId, cursor, limit: 60, sortDirection: "desc" });
@@ -898,13 +930,19 @@ function reply(profile: string, project: string, prompt: string, images: string[
       });
     }
     let currentGoal: BoardGoal | null | undefined;
+    let previousGoal: BoardGoal | null = null;
+    let stagedGoal: BoardGoal | undefined;
+    const fileGoalLaunch = Boolean(session?.goal && (needsGoalFile(session.goal) ||
+      (session.previousObjective && needsGoalFile(session.previousObjective))));
+    let stagingGoal = fileGoalLaunch;
     let followingGoal = false;
     let goalChange: Promise<BoardGoal | null> | undefined;
     const updateGoal = (goal: BoardGoal | null) => {
       currentGoal = goal;
+      if (stagingGoal) return;
       if (goal?.status === "active" && !session?.separateTurn) followingGoal = true;
       refreshTimeout(goal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
-      session?.onGoal?.(goal);
+      session?.onGoal?.(goal && displayGoal(project, thread.id, goal));
     };
     async function notify(message: RpcMessage) {
       options.observeProvider?.(message, thread.id);
@@ -975,21 +1013,22 @@ function reply(profile: string, project: string, prompt: string, images: string[
       if (waiting) session?.onWaiting(false);
       if (session?.resumeGoal) {
         const saved = await readGoal(request, thread.id, notify);
-        const goal = await changeGoal(request, thread.id, { kind: "resume" }, saved, notify);
+        const goal = await changeGoal(request, project, thread.id, { kind: "resume" }, saved, notify);
         if (goal) updateGoal(goal);
         session.onGoalSet?.();
       } else if (session?.goal) {
-        const { goal } = await request<{ goal: BoardGoal }>("thread/goal/set", {
-          threadId: thread.id, objective: session.goal, status: "active", origin: "user",
-        }, notify);
+        if (fileGoalLaunch && existing) previousGoal = await readGoal(request, thread.id, notify);
+        const goal = await setGoal(request, project, thread.id, session.goal, "active", previousGoal, notify);
+        if (fileGoalLaunch) stagedGoal = goal;
         updateGoal(goal);
-        session.onGoalSet?.();
+        if (!fileGoalLaunch) session.onGoalSet?.();
       } else if (existing) {
         const saved = await readGoal(request, thread.id, notify).catch(() => undefined);
         if (session?.iterativeGoal && saved?.status !== "active") {
           if (saved !== undefined) updateGoal(saved);
           throw new Error("The saved goal is no longer active.");
         }
+        if (session?.iterativeGoal && saved) displayGoal(project, thread.id, saved, true);
         if (saved !== undefined) updateGoal(saved);
       }
       let turn: TurnNotification["turn"];
@@ -1030,9 +1069,24 @@ function reply(profile: string, project: string, prompt: string, images: string[
               value: session.attachmentContext, kind: "untrusted", name: "ai_taskboard_attachments",
             } } : {}),
           } } : {}),
-          input: [{ type: "text", text: prompt, text_elements: [] },
+          input: [{ type: "text", text: stagedGoal && stagedGoal.objective !== session?.goal ? stagedGoal.objective : prompt, text_elements: [] },
             ...images.map(image => session ? { type: "image", url: image } : { type: "localImage", path: image })],
-        }, notify).catch(error => {
+        }, notify).catch(async error => {
+          if (stagedGoal && error instanceof CodexRpcRejection) {
+            try {
+              if (previousGoal) {
+                await request("thread/goal/set", {
+                  threadId: thread.id, objective: previousGoal.objective, status: previousGoal.status, origin: "user",
+                }, notify);
+              } else {
+                await request("thread/goal/clear", { threadId: thread.id, origin: "user" }, notify);
+              }
+              if (previousGoal?.objective !== stagedGoal.objective) discardGoalObjective(project, thread.id, stagedGoal.objective);
+            } catch (restoreError) {
+              throw new Error("Codex rejected the goal launch and the previous goal could not be restored. " +
+                (error as Error).message + " " + (restoreError as Error).message);
+            }
+          }
           if (session?.onTurnRejected && error instanceof CodexRpcRejection) {
             session.onTurnRejected();
           }
@@ -1042,6 +1096,12 @@ function reply(profile: string, project: string, prompt: string, images: string[
           throw error;
         });
         turn = response.turn;
+        if (stagedGoal) {
+          stagingGoal = false;
+          updateGoal(currentGoal ?? stagedGoal);
+          session?.onGoalSet?.();
+          if (previousGoal?.objective !== stagedGoal.objective) discardGoalObjective(project, thread.id, previousGoal?.objective);
+        }
         if (reviewClientId) reviewThread?.saveTurn?.({ clientId: reviewClientId, turnId: turn.id });
         options.worklog?.start(thread.id, turn.id);
         refreshTimeout(currentGoal?.status === "active" ? goalIdleTimeoutMs : idleTimeoutMs);
@@ -1053,10 +1113,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
       };
       const applyGoal = async (action: BoardGoalAction) => {
         const wasActive = currentGoal?.status === "active";
-        const updated = await changeGoal(request, thread.id, action, currentGoal, notify);
+        const updated = await changeGoal(request, project, thread.id, action, currentGoal, notify);
         updateGoal(updated);
         if (wasActive && (action.kind === "pause" || action.kind === "clear")) await interrupt();
-        return updated;
+        return updated && displayGoal(project, thread.id, updated);
       };
       const runGoalChange = (action: BoardGoalAction) => {
         goalChange = applyGoal(action);

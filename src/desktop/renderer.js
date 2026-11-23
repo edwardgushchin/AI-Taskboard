@@ -2317,7 +2317,7 @@ function draftComposer() {
   goalPending.setAttribute("role", "status");
   goalPending.hidden = true;
   const goalActions = element("div", undefined, "board-goal-actions");
-  const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
+  const saveGoal = button("", () => changeGoal("edit", goalText.value), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
   const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
@@ -2365,7 +2365,7 @@ function draftComposer() {
     bindLocalized(goalPending, "textContent", () => t(clearingGoal
       ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
       : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
-    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
+    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
   const showGoal = goal => {
@@ -2410,7 +2410,7 @@ function draftComposer() {
     try {
       const result = await api.boardGoal(kind, objective);
       if (!result.ok) throw new Error(boardError(result.error));
-      if (kind === "edit" && goalText.value.trim() === objective) goalText.value = result.data?.objective ?? "";
+      if (kind === "edit" && goalText.value === objective) goalText.value = result.data?.objective ?? "";
       if (revision === goalRevision) editor.updateGoal(result.data);
     } catch (error) {
       goalError.textContent = error.message;
@@ -3813,7 +3813,7 @@ function draftComposer() {
         if (!job.editing && !job.sending) {
           if (draft !== job.draft) {
             job.draft = draft;
-            job.request = draft.trim();
+            job.request = job.goal ? draft : draft.trim();
             updateQueuedPreview(job);
           }
           if (failed !== job.failed || changedFlight) {
@@ -3912,7 +3912,7 @@ function draftComposer() {
           validate();
         }
         job.draft = edit.value;
-        job.request = edit.value.trim();
+        job.request = job.goal ? edit.value : edit.value.trim();
         updateQueuedPreview(job);
       }
       job.preview.hidden = false;
@@ -4228,7 +4228,7 @@ function draftComposer() {
     if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
   function enqueue(id, draft, goal, submitted, failed = false, inFlight = false) {
-    const request = draft.trim();
+    const request = goal ? draft : draft.trim();
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
