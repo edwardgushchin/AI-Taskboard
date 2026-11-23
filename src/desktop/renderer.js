@@ -802,6 +802,7 @@ function openSheet(kind, title) {
   sheetKind = kind;
   sheet.classList.toggle("task-sheet", kind === "task");
   byId("task-side").hidden = true;
+  byId("task-side").firstElementChild?.disposeWork?.();
   byId("task-side").replaceChildren();
   if (typeof title === "function") bindLocalized(byId("sheet-title"), "textContent", title);
   else byId("sheet-title").textContent = title;
@@ -2124,6 +2125,14 @@ function chatViewport(list) {
     observed.clear();
     for (const child of children) observed.add(child);
   }
+  const captureFolds = () => new Map([...list.querySelectorAll(foldsSelector)]
+    .map(fold => [foldKey(fold), fold.open]).filter(([id]) => id));
+  function applyFolds(states) {
+    for (const fold of list.querySelectorAll(foldsSelector)) {
+      const id = foldKey(fold);
+      if (states.has(id)) fold.open = states.get(id);
+    }
+  }
   list.addEventListener("scroll", () => {
     if (list.scrollTop !== restoredTop) remember();
   });
@@ -2131,13 +2140,21 @@ function chatViewport(list) {
     atEnd,
     restore,
     remember,
+    snapshot() {
+      remember();
+      return {
+        position: { ...position, anchors: position.anchors.map(({ key, offset }) => ({ key, offset })) },
+        folds: captureFolds(),
+      };
+    },
+    restoreSnapshot(snapshot) {
+      position = snapshot.position;
+      applyFolds(snapshot.folds);
+      restore();
+    },
     suspend(change) {
       remember();
-      folds = new Map();
-      for (const fold of list.querySelectorAll(foldsSelector)) {
-        const id = foldKey(fold);
-        if (id) folds.set(id, fold.open);
-      }
+      folds = captureFolds();
       suspended = true;
       resize.disconnect();
       observed.clear();
@@ -2147,10 +2164,7 @@ function chatViewport(list) {
     resume(change) {
       change();
       if (!suspended) return;
-      for (const fold of list.querySelectorAll(foldsSelector)) {
-        const id = foldKey(fold);
-        if (folds.has(id)) fold.open = folds.get(id);
-      }
+      applyFolds(folds);
       folds = undefined;
       restoring = true;
       suspended = false;
@@ -4536,6 +4550,9 @@ async function showTask(id, dialogue = false) {
   const previousMail = refresh ? byId("expert-team-mail") : undefined;
   const focusedMail = previousMail?.firstElementChild === document.activeElement;
   const discussionHandoff = refresh ? byId("task-side").firstElementChild?.discussionHandoff : undefined;
+  const previousWork = refresh && taskInSheet.codexThreadId === task.codexThreadId
+    ? byId("task-side").firstElementChild?.snapshotWork()
+    : undefined;
   const focusedChat = refresh && document.activeElement.id === "task-chat-input" ? document.activeElement : undefined;
   const openDetails = new Set(refresh ? [...body.querySelectorAll(".task-details[open]")].map(details => details.id) : []);
   taskInSheet = task;
@@ -4713,7 +4730,7 @@ async function showTask(id, dialogue = false) {
   if (codexAction) actions.append(codexAction);
   body.append(actions);
   const side = byId("task-side");
-  side.replaceChildren(taskChat(task, renderStageWork, discussionHandoff));
+  side.replaceChildren(taskChat(task, renderStageWork, discussionHandoff, previousWork));
   side.hidden = false;
   if (dialogue) {
     side.firstChild.openDialogue();
@@ -6725,6 +6742,7 @@ document.addEventListener("keydown", event => {
 sheet.addEventListener("close", () => {
   if (sheet.open) return;
   chatPreviews.disconnect();
+  byId("task-side").firstElementChild?.disposeWork?.();
   byId("task-side").replaceChildren();
   byId("task-retry-load")?.remove();
   taskSheetRequest++;

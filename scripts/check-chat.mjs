@@ -1263,7 +1263,7 @@ app.whenReady().then(async () => {
     console.log("Executor composer Chromium checks passed: 10");
     return;
   }
-  await check(`!completedWork.open && completedWork.querySelector('summary').textContent.includes('Выполнено за 7 мин 13 с')`, "completed chronology is folded with its measured duration");
+  await check(`completedWork.open && completedWork.querySelector('summary').textContent.includes('Выполнено за 7 мин 13 с')`, "completed chronology opens with its measured duration");
   await check(`log.textContent.includes('Предыдущий запуск прервался при записи статистики токенов.') &&
     !log.textContent.includes('auth_storage') && !log.textContent.includes('Another command is working') &&
     log.textContent.includes('Не удалось загрузить тестовый ресурс.') &&
@@ -1491,7 +1491,9 @@ app.whenReady().then(async () => {
   await check(`log.querySelectorAll('.chat-work').length === 1 && !log.textContent.includes('Проверяю оформление обсуждения.')`, "separate discussion commentary stays out of executor work");
   await check(`getComputedStyle(log).backgroundColor !== getComputedStyle(body).backgroundColor`, "chat restores its distinct theme background");
   await evaluate(`completedWork.querySelector('summary').click()`);
-  await check(`completedWork.open`, "the entire chronology can be disclosed");
+  await check(`!completedWork.open`, "the entire chronology can be collapsed");
+  await evaluate(`completedWork.querySelector('summary').click()`);
+  await check(`completedWork.open`, "the entire chronology can be reopened");
   await check(`saved.querySelectorAll(':scope > .chat-run-group').length === 2 && !firstGroup().open`, "consecutive operations collapse into two groups separated by messages");
   await check(`firstGroup().querySelector('.chat-run-label').textContent.includes('3 действия')`, "group count is localized");
   await check(`row('cmd-1').querySelector('.chat-run-command').textContent === longCommand`, "full long command is retained");
@@ -1552,7 +1554,7 @@ app.whenReady().then(async () => {
     body.querySelector('.task-chat').updateRun(activity)`);
   await check(`!live.hidden && !live.querySelector('.chat-work') && live.textContent.includes('Проверяю карточку')`, "live run chronology stays visible in Work");
   await evaluate(`updateChat({ project: 'fixture', id: 'T-0032', type: 'run', items: [] }); body.replaceChildren(taskChat(taskInSheet))`);
-  await check(`!body.querySelector('.chat-work').open && body.querySelector('.chat-run-final').textContent.includes('Готово.') && body.querySelector('.chat-run-live').hidden`, "reopening restores folded work and a visible final reply without duplicating the live log");
+  await check(`body.querySelector('.chat-work').open && body.querySelector('.chat-run-final').textContent.includes('Готово.') && body.querySelector('.chat-run-live').hidden`, "reopening shows completed work and a visible final reply without duplicating the live log");
 
   // Native imageView results, including old saved JSON, use the same viewer as attachments.
   await evaluate(`
@@ -1946,7 +1948,7 @@ app.whenReady().then(async () => {
     const log = historyChat.querySelector('.task-work');
     const entries = [...log.querySelectorAll('.chat-coordination')];
     const run = log.querySelector('.chat-work');
-    return historyCalls === 2 && !restoreRun.isConnected && !run.open &&
+    return historyCalls === 2 && !restoreRun.isConnected && run.open &&
       entries[0].compareDocumentPosition(run) === Node.DOCUMENT_POSITION_FOLLOWING &&
       run.compareDocumentPosition(entries[1]) === Node.DOCUMENT_POSITION_FOLLOWING &&
       run.textContent.includes('Сверка проекта') && run.textContent.includes('git status');
