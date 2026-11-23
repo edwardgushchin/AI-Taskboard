@@ -1024,16 +1024,18 @@ function run(
     if (input.deferAt !== undefined) {
       if (Object.keys(input).length !== 1) throw new TaskboardError("INVALID_INPUT", "Deferral takes only the saved message index.");
       const at = number(input.deferAt, "deferAt", 0);
-      const latest = task.history.findLastIndex(event => event.chat);
-      if (task.pendingLimitChat?.includes(at)) return task;
-      if (at !== latest || task.history[at]?.actor !== "user") {
+      const pending = task.pendingLimitChat ?? [];
+      if (pending.includes(at)) return task;
+      const message = task.history[at];
+      if (!message?.chat || message.actor !== "user" ||
+          !task.history.slice(at + 1).every((event, offset) => !event.chat || pending.includes(at + offset + 1))) {
         throw new TaskboardError("CHAT_CHANGED", "The saved message is no longer awaiting a reply.");
       }
       return store.save({
         ...task,
         revision: task.revision + 1,
         updatedAt: new Date().toISOString(),
-        pendingLimitChat: [...(task.pendingLimitChat ?? []), at],
+        pendingLimitChat: [...pending, at].sort((a, b) => a - b),
       });
     }
     if (input.retryAt === undefined) return addChatMessage(store, task, input);

@@ -258,7 +258,6 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       throw new TaskboardError("CHAT_CHANGED", "The manager reply is no longer awaiting discussion.");
     }
   }
-  requireRevision(task, input.revision, draftDiscussion);
   const at = input.at;
   if (at !== undefined && (actor !== "agent" || typeof at !== "string" ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
@@ -282,16 +281,25 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       (input.confirmsDraft && input.awaitingAnswer))) {
     throw new TaskboardError("INVALID_INPUT", "Only a draft dialogue reply without an open question can confirm the draft.");
   }
+  let queuedDuringReply = false;
   if (!draftDiscussion && actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
     const replyTo = number(input.replyTo, "replyTo", 0);
     repliesToPending = pending?.[0] === replyTo;
-    if ((!repliesToPending && (last !== replyTo || pending?.length)) || task.history[replyTo]?.actor !== "user") {
+    const newerPending = (pending ?? []).filter(index => index > replyTo);
+    const onlyQueuedMessages = newerPending.length > 0 && task.history.slice(replyTo + 1).every((event, offset) =>
+      !event.chat || newerPending.includes(replyTo + offset + 1));
+    const startedBeforeQueue = onlyQueuedMessages && pending![0] > replyTo;
+    if ((!repliesToPending && !startedBeforeQueue && (last !== replyTo || pending?.length)) ||
+        !task.history[replyTo]?.chat || task.history[replyTo]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
     }
+    queuedDuringReply = onlyQueuedMessages && typeof input.revision === "number" &&
+      task.revision === input.revision + newerPending.length;
   }
-  if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
-    requireRevision(task, input.revision, true);
+  if (!queuedDuringReply) {
+    const revisableDraftReply = !draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false;
+    requireRevision(task, input.revision, draftDiscussion || revisableDraftReply);
   }
   const requiresChoice = managerReply !== undefined && task.history[managerReply - 1].draftDependencyRequiresChoice;
   const awaitingAnswer = requiresChoice ? true : input.awaitingAnswer;

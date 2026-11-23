@@ -404,3 +404,33 @@ test("state validation and stale reply protection preserve the last saved state"
     replyTo: task.history.length - 1, revision: task.revision, awaitingAnswer: false });
   assert.equal(task.awaitingAnswer, false);
 });
+
+test("an active draft reply can finish once while newer messages wait for limits", t => {
+  const root = mkdtempSync(join(tmpdir(), "draft-limit-queue-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  const settings = { model: "test", effort: "low" };
+  const store = initializeBoard({ root, directory: join(root, ".tasks"), repository: null }, store => store);
+  let task = store.create(createTask("T-0001", { title: "Discussion" }));
+  task = addChatMessage(store, task, { ...settings, text: "First" });
+  const active = task.history.length - 1;
+  const revision = task.revision;
+  task = addChatMessage(store, task, { ...settings, text: "Second", waitForLimit: true });
+  task = addChatMessage(store, task, { ...settings, text: "Third", waitForLimit: true });
+  const pending = [active + 1, active + 2];
+  const answer = {
+    ...settings,
+    actor: "agent",
+    text: "Answer to first",
+    replyTo: active,
+    revision,
+    awaitingAnswer: false,
+  };
+  assert.deepEqual(task.pendingLimitChat, pending);
+  assert.throws(() => addChatMessage(store, task, { ...answer, revision: revision - 1 }), { code: "REVISION_CONFLICT" });
+  task = addChatMessage(store, task, answer);
+  assert.deepEqual(task.pendingLimitChat, pending);
+  assert.throws(() => addChatMessage(store, task, answer), { code: "CHAT_CHANGED" });
+  task = addChatMessage(store, task, { ...answer, revision: task.revision, replyTo: pending[0], text: "Answer to second" });
+  assert.deepEqual(task.pendingLimitChat, pending.slice(1));
+  assert.equal(task.history.filter(event => event.chat && event.actor === "agent").length, 2);
+});
