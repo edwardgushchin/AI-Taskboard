@@ -518,6 +518,16 @@ body:has(> .project-tabs:not([hidden]))::before {
 .board-chat-log {
   margin-bottom: 8px; padding-inline: var(--board-chat-inset) calc(var(--board-chat-inset) + 10px);
 }
+.board-work-panel { position: relative; display: flex; flex: 1; min-height: 0; margin-bottom: 8px; }
+.board-work-panel > .board-work { margin-bottom: 0; }
+.board-work-error {
+  position: absolute; z-index: 1; inset-block-end: 8px;
+  inset-inline: var(--board-chat-inset) calc(var(--board-chat-inset) + 20px);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
+  max-block-size: calc(100% - 16px); overflow: auto; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+}
+.board-work-error > p { flex: 1 1 12rem; margin: 0; overflow-wrap: anywhere; }
 :is(.board-chat-log, .task-dialogue) > * { flex: none; }
 .board-chat-older { align-self: center; color: var(--muted); }
 .board-chat-queue:empty { display: none; }

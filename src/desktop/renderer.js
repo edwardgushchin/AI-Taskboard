@@ -2516,12 +2516,13 @@ function draftComposer() {
     readVisibleMessages();
   }
   const readObserver = new ResizeObserver(showDialoguePosition);
+  const workPanel = element("div", undefined, "board-work-panel");
+  workPanel.hidden = true;
   const work = element("section", undefined, "board-chat-log board-work");
   const workViewport = chatViewport(work);
-  work.hidden = true;
   work.tabIndex = 0;
   const workTimeline = element("div", undefined, "chat-run board-work-timeline");
-  const workError = element("div");
+  const workError = element("div", undefined, "board-work-error");
   workError.hidden = true;
   const workErrorMessage = element("p", undefined, "muted");
   workErrorMessage.setAttribute("role", "alert");
@@ -2538,7 +2539,8 @@ function draftComposer() {
   const workOlderLabel = () => t(workOlderLoading ? "ui.loading_2ad65fd8" : "ui.earlier_activity_e8606f75");
   const workOlder = button("", () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
-  work.append(workOlder, workStatus, workTimeline, workError);
+  work.append(workOlder, workStatus, workTimeline);
+  workPanel.append(work, workError);
   let workCursor;
   let failedWorkCursor;
   let workOlderLoading = false;
@@ -2560,7 +2562,7 @@ function draftComposer() {
     });
   }
   async function loadWork(cursor = null) {
-    if (disposed || work.hidden || !canBrowseHistory()) return;
+    if (disposed || workPanel.hidden || !canBrowseHistory()) return;
     if (workLoading) {
       if (!cursor) workReload = true;
       return;
@@ -2574,7 +2576,7 @@ function draftComposer() {
       bindLocalized(workOlder, "textContent", workOlderLabel);
     } else if (!hasWorkHistory && workTimeline.childElementCount === 0 && workError.hidden) {
       workStatusTimer = setTimeout(() => {
-        if (!work.hidden && workTimeline.childElementCount === 0) workStatus.hidden = false;
+        if (!workPanel.hidden && workTimeline.childElementCount === 0) workStatus.hidden = false;
       }, 200);
     }
     try {
@@ -2590,11 +2592,11 @@ function draftComposer() {
       do {
         visited.add(next);
         const result = await api.boardHistory(project, next, "work");
-        if (disposed || work.hidden || !canBrowseHistory()) return;
+        if (disposed || workPanel.hidden || !canBrowseHistory()) return;
         if (!result.ok) throw new Error(boardError(result.error));
         if (visited.size === 1 && revision === goalRevision) {
           editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
-          if (work.hidden) return;
+          if (workPanel.hidden) return;
         }
         turns.unshift(...result.data.turns);
         reachedOldest ||= result.data.turns.some(turn =>
@@ -2624,7 +2626,7 @@ function draftComposer() {
       hasWorkHistory = true;
       editor.refreshWork();
     } catch (error) {
-      if (!disposed && !work.hidden && canBrowseHistory()) {
+      if (!disposed && !workPanel.hidden && canBrowseHistory()) {
         workViewport.update(() => {
           workStatus.hidden = true;
           failedWorkCursor = cursor;
@@ -2653,12 +2655,12 @@ function draftComposer() {
   function syncViews() {
     views.hidden = !(goalRunning || startingWork || goalLogAvailable ||
       (currentGoal && currentGoal.status !== "complete"));
-    if (views.hidden && !work.hidden) showWork(false);
+    if (views.hidden && !workPanel.hidden) showWork(false);
   }
   function showWork(show) {
     if (show && views.hidden) return;
-    if (show === !work.hidden) return;
-    work.hidden = !show;
+    if (show === !workPanel.hidden) return;
+    workPanel.hidden = !show;
     log.hidden = show;
     dialogueToggle.setAttribute("aria-pressed", String(!show));
     workToggle.setAttribute("aria-pressed", String(show));
@@ -2674,7 +2676,7 @@ function draftComposer() {
     editor.refreshWork();
   }
   editor.invalidateWork = () => {
-    if (work.hidden) {
+    if (workPanel.hidden) {
       const revision = goalRevision;
       void api.boardHistory(project, null, "work").then(result => {
         if (!disposed && result.ok && revision === goalRevision) {
@@ -2686,7 +2688,7 @@ function draftComposer() {
     void loadWork();
   };
   editor.refreshWork = async () => {
-    if (disposed || work.hidden || !editor.matches("[data-open], [data-pinned]")) return;
+    if (disposed || workPanel.hidden || !editor.matches("[data-open], [data-pinned]")) return;
     if (workLivePending) {
       workLiveDirty = true;
       return;
@@ -2694,7 +2696,7 @@ function draftComposer() {
     workLivePending = true;
     try {
       const result = await api.boardHistory(project, null, "live");
-      if (disposed || work.hidden || !canBrowseHistory() || !result.ok) return;
+      if (disposed || workPanel.hidden || !canBrowseHistory() || !result.ok) return;
       const previousLive = liveWork;
       liveWork = [...(result.data.work ?? []), ...(result.data.chat ?? [])];
       const liveIds = new Set(liveWork.map(item => item.id));
@@ -2743,7 +2745,7 @@ function draftComposer() {
   const queue = element("div", undefined, "board-chat-queue");
   queue.setAttribute("role", "list");
   log.append(olderHistory, greeting);
-  chat.append(bar, goalPanel, log, work, queue);
+  chat.append(bar, goalPanel, log, workPanel, queue);
   const input = element("textarea");
   input.name = "request";
   input.rows = 1;
@@ -3707,7 +3709,7 @@ function draftComposer() {
     workViewport.resume(() => {
       if (savedWork.length || liveWork.length || pendingWork.size) renderGoalTimeline();
     });
-    if (!work.hidden) editor.invalidateWork();
+    if (!workPanel.hidden) editor.invalidateWork();
   };
   editor.closeChat = () => {
     if (pinned || !editor.hasAttribute("data-open")) return;

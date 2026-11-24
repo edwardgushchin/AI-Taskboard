@@ -2439,12 +2439,12 @@ app.whenReady().then(async () => {
       workLog.querySelector('.board-chat-older').click();
       new Promise(resolve => setTimeout(resolve, 100));
     `);
-    await check(`workLog.textContent.includes('History unavailable') &&
-      workLog.querySelector('.board-work-retry').checkVisibility() &&
-      !workLog.querySelector('.board-work-retry').disabled`, 'work error permits retry');
+    await check(`workManager.querySelector('.board-work-error [role="alert"]').textContent.includes('History unavailable') &&
+      workManager.querySelector('.board-work-retry').checkVisibility() &&
+      !workManager.querySelector('.board-work-retry').disabled`, 'work error permits retry');
     await evaluate(`
       workFailure = false;
-      workLog.querySelector('.board-work-retry').click();
+      workManager.querySelector('.board-work-retry').click();
       new Promise(resolve => setTimeout(resolve, 100));
     `);
     const workResult = await evaluate(`({ older: workLog.textContent.includes('older-work'), hidden: workLog.querySelector('.board-chat-older').hidden,
@@ -2480,7 +2480,7 @@ app.whenReady().then(async () => {
     cycleManager.querySelector('.board-work-toggle').click();
     new Promise(resolve => setTimeout(resolve, 100));
   `);
-  await check(`cycleManager.querySelector('.board-work').textContent.includes('Initial history failure') &&
+  await check(`cycleManager.querySelector('.board-work-error [role="alert"]').textContent.includes('Initial history failure') &&
     cycleManager.querySelector('.board-work-retry').checkVisibility()`, 'first work history error exposes retry');
   await evaluate(`
     initialWorkFailure = false;
