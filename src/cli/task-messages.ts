@@ -42,6 +42,13 @@ export function draftManagerQuestion(task: Task, sequence: number | undefined) {
     event.expertMessage?.to === "manager" ? event.expertMessage : undefined;
 }
 
+export function activeManagerQuestion(task: Task, event: TaskEvent | undefined) {
+  if (!["ready", "in_progress", "blocked", "review"].includes(task.status) ||
+      event?.action !== "coordination" || event.messageKind !== "question" ||
+      (event.actor !== "agent" && event.actor !== "reviewer")) return;
+  if (event.expertMessage?.to === "manager") return event.expertMessage;
+}
+
 export function linkedDraftManagerReply(task: Task, event: TaskEvent | undefined) {
   if (!event || event.action !== "coordination" || event.messageKind === "question") return;
   const mail = event.expertMessage;
@@ -217,17 +224,39 @@ export function needsManagerAttention(kind: string) {
 }
 
 export function managerInbox(tasks: Task[]) {
-  return tasks.flatMap(task => taskMessages(task, "manager").filter(message =>
-    message.draftQuestion || message.sequence > (task.managerReadThrough ?? 0)))
+  return tasks.flatMap(task => {
+    const answered = new Set<number>();
+    for (const event of task.history) {
+      const mail = event.expertMessage;
+      if (mail?.from === "manager" && mail.replyTo !== undefined && event.messageKind !== "question" &&
+          activeManagerQuestion(task, task.history[mail.replyTo - 1])?.from === mail.to &&
+          !deferredDependencyReply(task, mail.replyTo, event)) {
+        answered.add(mail.replyTo);
+      }
+    }
+    return taskMessages(task, "manager").filter(message => {
+      if (activeManagerQuestion(task, task.history[message.sequence - 1])) {
+        return !answered.has(message.sequence);
+      }
+      return message.draftQuestion || message.sequence > (task.managerReadThrough ?? 0);
+    });
+  })
     .sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id) || left.sequence - right.sequence);
 }
 
 export function sendTaskMessage(task: Task, input: Record<string, unknown>, sender: "manager" | "agent"): Task {
-  requireState(task, sender === "manager" ? ["ready", "in_progress", "blocked", "review"] : ["in_progress", "blocked", "review"]);
   const message = text(input.text, "text", true);
   if (message.length > 4000) throw new TaskboardError("INVALID_INPUT", "Keep coordination messages within 4000 characters.");
   const kind = input.kind === undefined ? "update" : member(input.kind, ["question", "update", "decision"], "kind");
   const replyTo = input.replyTo === undefined ? undefined : number(input.replyTo, "replyTo", 1);
+  const mail = replyTo === undefined ? undefined : task.history[replyTo - 1]?.expertMessage;
+  if (sender === "manager" && mail) {
+    if (mail.to !== "manager") {
+      throw new TaskboardError("INVALID_INPUT", "This team message is addressed to " + mail.to + ". Leave the reply to that recipient.");
+    }
+    throw new TaskboardError("INVALID_INPUT", `Use team_message with id ${task.id}, to ${mail.from}, and replyTo ${replyTo}.`);
+  }
+  requireState(task, sender === "manager" ? ["ready", "in_progress", "blocked", "review"] : ["in_progress", "blocked", "review"]);
   if (replyTo !== undefined && !taskMessages(task, sender).some(message => message.sequence === replyTo)) {
     throw new TaskboardError("INVALID_INPUT", "Reply to a message addressed to you on this card.");
   }

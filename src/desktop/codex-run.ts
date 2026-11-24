@@ -558,6 +558,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Рабочая папка: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria, summary: task.summary, nextStep: task.nextStep }),
       "Use the current description and criteria as active requirements. Resolve confirmed defects in the feedback within that scope. If a remark conflicts with an explicit requirement, preserve the requirement and ask the owner to decide.",
+      "If you are continuing after asking a question through team_message, read team_inbox for the linked reply before proceeding.",
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
@@ -596,9 +597,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     worklog.start(threadId, turn.id);
     activeTurnId = turn.id;
     control = turnControl(request, threadId, turn.id);
-    if (assigned.size || task.expertStage || task.expertStages?.length) {
-      stopMail = watchTeamMail(project, task.id, control, "agent");
-    }
+    stopMail = watchTeamMail(project, task.id, control, "agent");
     const startedUsage = recovered ? tokens.recover(threadId, recovered) : tokens.begin(threadId, turn.id);
     const terminal = turns.get(turn.id) ?? (turn.status !== "inProgress" ? turn : undefined);
     const completedUsage = !recovered && terminal ? tokens.completeTurn(threadId, terminal, Date.now()) : undefined;
