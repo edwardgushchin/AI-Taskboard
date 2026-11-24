@@ -1744,10 +1744,10 @@ function captureCardMoves(affectedLanes) {
   const moves = [];
   for (const { content } of affectedLanes) {
     if (content.hidden) continue;
-    for (const node of content.children) {
+    for (const [index, node] of Array.from(content.children).entries()) {
       if (!node.classList.contains("task-card")) continue;
       const before = node.getBoundingClientRect();
-      if (before.width) moves.push({ node, content, before, offsetTop: node.offsetTop });
+      if (before.width) moves.push({ node, content, index, before, offsetTop: node.offsetTop });
     }
   }
   return moves;
@@ -1775,7 +1775,7 @@ function animateCardMoves(moves) {
   }
 }
 
-function render(previousBoard) {
+function render({ affectedLanes = [], added = [], moves = [] } = {}) {
   // Writing lang invalidates inherited styles throughout the board and chat.
   if (document.documentElement.lang !== localization.locale) {
     document.documentElement.lang = localization.locale;
@@ -1836,9 +1836,6 @@ function render(previousBoard) {
     return;
   }
   const visible = [...board.tasks].sort(recentlyUpdatedFirst);
-  const { affectedLanes, added } = previousBoard && !reducedMotion.matches && !document.hidden ?
-    cardLayoutChanges(previousBoard, visible) : { affectedLanes: [], added: [] };
-  const moves = captureCardMoves(affectedLanes);
   const focused = document.activeElement;
   const toolsKey = JSON.stringify([frame.localization?.locale, [...boardTags], manualColumns()]);
   const columns = (manualBoard() ? manualColumns().map(c => [c.id, c.name]) : lanes).map(([state, labelKey]) => {
@@ -1875,8 +1872,11 @@ function render(previousBoard) {
   laneSizes.observe(byId("board-composer"));
   for (const lane of boardLanes.values()) laneSizes.observe(lane.column);
   if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
-  // An incoming card can temporarily push a visible neighbor out of the current batch.
-  if (affectedLanes.length) fitLanes(affectedLanes);
+  // Fit synchronously if an insertion or move can push a neighbor out of the batch.
+  // When the batch order stays the same, laneTools already schedules the normal fit.
+  if (added.length || moves.some(({ node, content, index }) => content.children[index] !== node)) {
+    fitLanes(affectedLanes);
+  }
   animateCardMoves(moves);
   for (const id of added) {
     const node = boardCards.get(id)?.node;
@@ -6660,7 +6660,12 @@ function update(next) {
   const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
-  const previousBoard = projectChanged ? undefined : frame.board;
+  let cardLayout;
+  if (!projectChanged && frame.board && next.board && !archiveView && !reducedMotion.matches && !document.hidden) {
+    cardLayout = cardLayoutChanges(frame.board, next.board.tasks);
+    // Read old card positions before status, chat, and board updates change the DOM.
+    cardLayout.moves = captureCardMoves(cardLayout.affectedLanes);
+  }
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   if (projectChanged && byId("auto-mode-panel").matches(":popover-open")) byId("auto-mode-panel").hidePopover();
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
@@ -6712,7 +6717,7 @@ function update(next) {
       void body.querySelector(".expert-team")?.refreshRoleNames?.();
     }
   }
-  render(previousBoard);
+  render(cardLayout);
   syncBoardNotice(projectChanged);
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
