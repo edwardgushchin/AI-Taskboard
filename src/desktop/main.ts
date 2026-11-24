@@ -992,7 +992,7 @@ imageTypes.set(".jpeg", "image/jpeg");
 const chatRuns = new Set<string>();
 const replyingTasks = new Set<string>();
 interface ActiveAgent {
-  quotaInterrupted?: boolean;
+  ownerDiscussion?: { ended: boolean; finished: Promise<void> };
   control: AgentControl;
   directories: Set<string>;
   draftDiscussion?: true;
@@ -1299,6 +1299,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   let deferredIndex: number | undefined;
   let discussionThreadId: string | undefined;
   let settledReplyIndex: (() => Promise<number>) | undefined;
+  const finishOwnerDiscussion = !automatic && !active && !persistOnly ? Promise.withResolvers<void>() : undefined;
+  const ownerDiscussion = finishOwnerDiscussion && { ended: false, finished: finishOwnerDiscussion.promise };
   const deferReply = new Error("The saved reply is waiting for Codex limits.");
   try {
     let { model, effort } = request;
@@ -1352,7 +1354,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         sources.push({ path, name: suffix && !imageTypes.has(extname(name).toLowerCase()) ? name + suffix : name });
       }
       signal.throwIfAborted();
-      const waitForLimit = persistOnly || Boolean(quotaWait || boardBudgetFailure(project));
+      const waitForLimit = persistOnly || Boolean(quotaWait || boardBudgetFailure(project) || active?.ownerDiscussion?.ended);
       reply = await callCli<Task>(project, ["chat", id], {
         text, model, effort, attachmentSources: sources, waitForLimit, requestId: request.requestId,
       });
@@ -1460,7 +1462,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     });
     signal.throwIfAborted();
     if (active) {
-      if (active.quotaInterrupted || quotaWait || boardBudgetFailure(project)) throw deferReply;
+      if (active.ownerDiscussion?.ended || quotaWait || boardBudgetFailure(project)) {
+        await active.ownerDiscussion?.finished;
+        throw deferReply;
+      }
       // A finished turn must not silently turn a steering message into another run.
       if (activeAgents.get(key) !== active) throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
       // The request owns its staging files until it hands them to the active turn.
@@ -1507,7 +1512,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     let runAction = actionsFor(task, replyTarget);
     const ready = Promise.withResolvers<AgentControl>();
     void ready.promise.catch(() => {});
-    activeAgents.set(key, { directories, chatWindow, draftDiscussion: automatic ? true : undefined, control: {
+    activeAgents.set(key, { directories, chatWindow, ownerDiscussion, draftDiscussion: automatic ? true : undefined, control: {
       steer: async (text, images) => (await ready.promise).steer(text, images),
       interrupt: async () => (await ready.promise).interrupt(),
     }, updateMessage: (latest, index) => {
@@ -1545,6 +1550,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         accepted: threadId => { discussionThreadId = threadId; },
       })).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
+    if (ownerDiscussion) ownerDiscussion.ended = true;
     await Promise.all(pendingSteering);
     signal.throwIfAborted();
     const result = await callCli<Task>(project, ["chat", id], {
@@ -1552,6 +1558,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       text: replyTarget.reviewConfirmation ??
         (automatic && managerReply === undefined && !answer.text ? t("draft_discussion.ready") : answer.text),
       actor: "agent", model, effort, replyTo: replyTarget.index, durationMs: Math.round(performance.now() - replyStarted),
+      ...(ownerDiscussion ? { queueUnsteered: true } : {}),
       ...(inspectDraft ? { revision: replyTarget.revision } : {}),
       ...(automatic ? { draftDiscussion: true, managerReply } : {}),
     });
@@ -1564,10 +1571,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     return { saved, result };
   } catch (error) {
     if (!signal.aborted && deferredIndex !== undefined && (error === deferReply || error instanceof CodexQuotaExceeded)) {
-      if (!active && discussionThreadId && error instanceof CodexQuotaExceeded) {
-        const interrupted = activeAgents.get(key);
-        if (interrupted) interrupted.quotaInterrupted = true;
-      }
+      if (ownerDiscussion && error instanceof CodexQuotaExceeded) ownerDiscussion.ended = true;
       const interruptedIndex = await settledReplyIndex?.() ?? deferredIndex;
       const result = await callCli<Task>(project, ["chat", id], {
         deferAt: interruptedIndex,
@@ -1617,6 +1621,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       if (!steering?.size) steeringOperations.delete(key);
     }
     operation.finish();
+    finishOwnerDiscussion?.resolve();
   }
 }
 

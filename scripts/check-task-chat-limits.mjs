@@ -40,7 +40,6 @@ let exhausted = restarting;
 let failWrite = false;
 let writeRejected = false;
 const finishRejectedWrite = Promise.withResolvers();
-const finishAttachmentRead = Promise.withResolvers();
 let pausedAttachment;
 let budgetTurn = 0;
 const gates = new Map();
@@ -89,7 +88,7 @@ globalThis.limitChatFixture = {
       return read();
     }
     pausedAttachment.started = true;
-    return finishAttachmentRead.promise.then(read);
+    return pausedAttachment.release.promise.then(read);
   },
   async reply(prompt, action, options) {
     options.beforeStart?.();
@@ -101,7 +100,7 @@ globalThis.limitChatFixture = {
       resume: options.discussionThread?.id, draft: context.task.status === "draft" });
     options.discussionThread?.accepted(sessionId);
     options.onControl({ interrupt: async () => { throw new Error("Explicit answer was interrupted by the board"); } });
-    if (request === messages.running) await gates.get(request).promise;
+    if (request.startsWith(messages.running)) await gates.get(request).promise;
     if (request === messages.interrupted && !options.discussionThread?.id) {
       const result = await action("task_update", { authorization: "сохранить отчёт в XLSX", description: updatedDescription });
       assert.equal(result.ok, true, JSON.stringify(result));
@@ -346,31 +345,73 @@ async function phase() {
   await capture(second, "quota-reply.png", messages.combined, "agent");
   pass("После перезапуска при выключенном авторежиме обе реплики видны в двух окнах. Снятие одной общей квоты не запускает ответ. После сброса бюджета ответы и вложения обрабатываются один раз в порядке отправки.");
 
-  gates.set(messages.running, Promise.withResolvers());
-  await send(first, messages.running, false, false);
-  await until("active reply", () => calls.some(call => call.request === messages.running));
-  spend();
-  exhausted = true;
-  await refresh();
-  gates.get(messages.running).resolve();
-  await until("active reply survives both limits", () => chat(id).some(event => event.actor === "agent" && event.text.includes(messages.running)));
-  await until("previous chat operation released", () => globalThis.limitChatApp.isIdle(project));
-  exhausted = false;
-  await refresh();
-  await reset();
+  async function sendWithPausedAttachment(message) {
+    // Gate attachment preparation after the next user event is durably recorded.
+    const release = Promise.withResolvers();
+    globalThis.limitChatFixture.afterWrite = (args, reply) => {
+      if (args[1][0] === "chat" && args[2]?.text === message && reply.ok) {
+        const [file] = reply.data.history.at(-1).chat.files;
+        pausedAttachment = { file, release, started: false };
+        delete globalThis.limitChatFixture.afterWrite;
+      }
+      return reply;
+    };
+    await send(first, message, false);
+    await until("saved follow-up attachment in preparation", () => pausedAttachment?.started);
+    assert.equal(task(id).pendingLimitChat, undefined);
+    return () => {
+      pausedAttachment = undefined;
+      release.resolve();
+    };
+  }
+
+  const answers = message => chat(id).filter(event => event.actor === "agent" && event.text.endsWith(message));
+  for (const limits of [
+    { label: "дневной бюджет", budget: true, quota: false },
+    { label: "общая квота", budget: false, quota: true },
+    { label: "оба лимита", budget: true, quota: true },
+  ]) {
+    const firstMessage = messages.running + " " + limits.label;
+    const secondMessage = messages.followup + " " + limits.label;
+    const complete = Promise.withResolvers();
+    gates.set(firstMessage, complete);
+    await send(first, firstMessage, false, false);
+    await until("active reply", () => calls.some(call => call.request === firstMessage));
+    const releaseAttachment = await sendWithPausedAttachment(secondMessage);
+    if (limits.budget) spend();
+    if (limits.quota) {
+      exhausted = true;
+      await refresh();
+    }
+    complete.resolve();
+    await until("successful reply saved while the attachment is paused", () => answers(firstMessage).length === 1);
+    const card = task(id);
+    assert.deepEqual(card.pendingLimitChat.map(index => card.history[index].text), [secondMessage]);
+    assert.equal(card.limitChatContinuation, undefined);
+    assert.equal(calls.some(call => call.request === secondMessage), false);
+    await open(first, id);
+    await waitSaved(first, id, secondMessage);
+    releaseAttachment();
+    if (limits.quota) {
+      exhausted = false;
+      await refresh();
+    }
+    if (limits.budget) await reset();
+    await until("next answer after reset", () => answers(secondMessage).length === 1);
+    await until("chat operations released", () => globalThis.limitChatApp.isIdle(project));
+    assert.equal(answers(firstMessage).length, 1);
+    assert.equal(task(id).pendingLimitChat, undefined);
+    assert.deepEqual(calls.slice(-2).map(call => [call.request, call.docs]), [
+      [firstMessage, []],
+      [secondMessage, ["fixture attachment"]],
+    ]);
+    pass(`Успешный ответ сохранён один раз при задержке следующего вложения. Исчерпан ${limits.label}. После сброса следующая реплика получила ответ и вложение.`);
+  }
+
   gates.set(messages.interrupted, Promise.withResolvers());
   await send(first, messages.interrupted, false, false);
   await until("interrupted reply wrote its change", () => task(id).description === updatedDescription);
-  // Arm the read gate when the follow-up is saved, before main prepares its attachment for steering.
-  globalThis.limitChatFixture.afterWrite = (args, reply) => {
-    if (args[1][0] === "chat" && args[2]?.text === messages.followup && reply.ok) {
-      pausedAttachment = { file: reply.data.history.at(-1).chat.files[0], started: false };
-    }
-    return reply;
-  };
-  await send(first, messages.followup, false);
-  await until("saved follow-up attachment in preparation", () => pausedAttachment?.started);
-  assert.equal(task(id).pendingLimitChat, undefined);
+  const releaseAttachment = await sendWithPausedAttachment(messages.followup);
   gates.get(messages.interrupted).resolve();
   await until("previous reply is deferred", () => task(id).limitChatContinuation?.threadId === sessionId);
   assert.equal(task(id).description, updatedDescription);
@@ -379,8 +420,7 @@ async function phase() {
   assert.deepEqual(queued.pendingLimitChat.map(index => queued.history[index].text), [messages.interrupted, messages.followup]);
   await open(first, id);
   await waitSaved(first, id, messages.followup);
-  pausedAttachment = undefined;
-  finishAttachmentRead.resolve();
+  releaseAttachment();
   exhausted = false;
   await refresh();
   await until("interrupted answer completed automatically", () =>
@@ -399,7 +439,10 @@ async function phase() {
   pass("Квота прервала ход, пока готовилось вложение уже сохранённой следующей реплики. Первый ответ продолжился в том же сеансе с одной правкой, второй получил вложение после него.");
   const files = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" })
     .trim().split(/\r?\n/).filter(Boolean);
-  const tested = [...new Set([...files, "src/desktop/chat.js", "src/desktop/renderer.js", "scripts/check-task-chat-limits.mjs"])];
+  const tested = [...new Set([
+    ...files, "src/cli/archive.ts", "src/desktop/main.ts", "src/desktop/chat.js", "src/desktop/renderer.js",
+    "scripts/check-task-chat-limits.mjs",
+  ])];
   const report = {
     command: "node scripts/check-task-chat-limits.mjs --artifacts .tasks/qa/T-0351",
     platform: process.platform,
