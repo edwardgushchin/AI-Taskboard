@@ -174,9 +174,19 @@ const themes = {
 type Theme = keyof typeof themes;
 let theme: Theme = "system";
 let recentBoards: string[] = [];
+let recentBoardNames = new Map<string, string>();
+
+function readBoardReferenceName(path: string): string {
+  try {
+    return readBoardSettings(runtimeLocation(path)).name?.trim() || basename(path);
+  } catch {
+    return subscriptions.get(path)?.board.settings.name?.trim() || basename(path);
+  }
+}
 
 function loadRecentBoards(): void {
   recentBoards = readRecentBoards(app.getPath("appData"), app.getPath("userData")) ?? recentBoards;
+  recentBoardNames = new Map(recentBoards.map(path => [path, readBoardReferenceName(path)]));
 }
 
 function rememberBoard(path: string, current: ProjectTab): void {
@@ -185,6 +195,9 @@ function rememberBoard(path: string, current: ProjectTab): void {
   } catch {
     recentBoards = normalizeRecentBoards([path, ...recentBoards]);
   }
+  const name = current.board?.settings.name?.trim() || basename(path);
+  recentBoardNames.set(path, name);
+  recentBoardNames = new Map(recentBoards.map(path => [path, recentBoardNames.get(path) ?? readBoardReferenceName(path)]));
   for (const state of windowStates.values()) {
     if (state.window !== current.window) send(state.active);
   }
@@ -367,6 +380,14 @@ function frame(state: ProjectTab) {
       return log ? [[task.id, log]] : [];
     }) ?? []),
     recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
+    boardReferenceNames: [...new Set([
+      ...recentBoards.map(path => {
+        const board = subscriptions.get(path)?.board;
+        return board ? board.settings.name?.trim() || basename(path) : recentBoardNames.get(path);
+      }),
+      ...[...subscriptions.values()].filter(watch => watch.tabs.size)
+        .map(({ board }) => board.settings.name?.trim() || basename(board.project)),
+    ].filter(name => name !== undefined).map(name => name.normalize("NFC")))].sort(),
   };
 }
 
@@ -424,6 +445,9 @@ function unbind(state: ProjectTab): void {
 
 function releaseWatch(project: string, watch: BoardWatch): void {
   if (!watch.tabs.size && !watch.listeners.size) {
+    if (recentBoards.includes(project)) {
+      recentBoardNames.set(project, watch.board.settings.name?.trim() || basename(project));
+    }
     watch.stop();
     subscriptions.delete(project);
     releaseBoardUsage(project);
@@ -4194,7 +4218,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           });
         };
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
-      }, requestTools, instructions + (recovery ?
+      }, requestTools, instructions +
+      "\nIn chat replies, link cards on this board as #T-0013. For another board use #Board name/T-0013, with the actual board name as displayed in its tab. " +
+      "Put the whole cross-board reference in inline code when the board name starts with a task ID or contains # or Markdown punctuation. " +
+      "For example, write `#T-0001 Свод/T-0002`, including the backticks, even if the board is unavailable. " + (recovery ?
         "\nRecover the owner's saved request. Inspect current state before answering. Some actions may already have happened. " +
         "Report what is confirmed and which actions still need a new explicit request. This recovery is read-only." : "") +
         (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
@@ -5092,6 +5119,62 @@ ipcMain.handle("board:recent", async (event, path: unknown) => {
   const state = stateOf(event);
   if (typeof path !== "string" || !recentBoards.includes(path)) throw new Error("Unknown recent board.");
   await openProject(state, path);
+});
+
+ipcMain.handle("board:follow-reference", async (event, origin: unknown, name: unknown) => {
+  const source = stateOf(event);
+  const owner = windowStates.get(event.sender.id)!;
+  if (!source.project || origin !== source.project || owner.closing) {
+    return cliFailure("BOARD_CHANGED", t("ui.task_reference_board_changed"));
+  }
+  if (typeof name !== "string" || /[\r\n\0]/u.test(name) || !name.trim()) {
+    return cliFailure("INVALID_INPUT", t("ui.task_reference_board_unavailable", { name: String(name) }));
+  }
+  loadRecentBoards();
+  const normalizeName = (value: string) => value.trim().normalize("NFC");
+  const requestedName = normalizeName(name);
+  const openProjects = [...windowStates.values()].flatMap(window =>
+    window.tabs.flatMap(tab => tab.project ? [tab.project] : []));
+  const projects = new Map<string, string>();
+  for (const path of [...openProjects, ...recentBoards]) {
+    const identity = projectIdentity(path);
+    if (!projects.has(identity)) projects.set(identity, path);
+  }
+  const matches = [...projects.values()].filter(path =>
+    normalizeName(recentBoardNames.get(path) ?? readBoardReferenceName(path)) === requestedName);
+  if (matches.length > 1) {
+    return cliFailure("AMBIGUOUS_BOARD", t("ui.task_reference_board_ambiguous", { name }));
+  }
+  const project = matches[0];
+  if (!project || !existsSync(project)) {
+    return cliFailure("PROJECT_UNAVAILABLE", t("ui.task_reference_board_unavailable", { name }));
+  }
+  const loaded = await callCli<Board>(project, ["list", "--compact"]);
+  if (!loaded.ok) {
+    return cliFailure(loaded.error.code, t("ui.task_reference_board_unavailable", { name }) + " " + loaded.error.message);
+  }
+  if (normalizeName(loaded.data.settings.name?.trim() || basename(loaded.data.project)) !== requestedName) {
+    return cliFailure("PROJECT_UNAVAILABLE", t("ui.task_reference_board_unavailable", { name }));
+  }
+  if (owner.window.isDestroyed() || owner.closing || owner.active !== source || source.project !== origin) {
+    return cliFailure("BOARD_CHANGED", t("ui.task_reference_board_changed"));
+  }
+  const identity = projectIdentity(loaded.data.project);
+  if (projectIdentity(source.project) === identity) return { ok: true, data: { project: source.project } };
+
+  const sourceIndex = owner.tabs.indexOf(source);
+  const targetIndex = owner.tabs.findIndex(tab => tab.project && projectIdentity(tab.project) === identity);
+  const target: ProjectTab = targetIndex < 0 ? { window: owner.window, selection: 0 } : owner.tabs[targetIndex];
+  target.selection++;
+  target.loading = false;
+  target.error = undefined;
+  bind(target, loaded.data);
+  owner.tabs[sourceIndex] = target;
+  // Keep each project's live state attached to its subscriptions while reusing the clicked slot.
+  if (targetIndex >= 0) owner.tabs[targetIndex] = source;
+  activateTab(owner, target);
+  if (targetIndex < 0) unbind(source);
+  return { ok: true, data: { project: target.project } };
 });
 let backupService: BackupService | undefined;
 function backups(): BackupService {

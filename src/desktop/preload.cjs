@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("taskboard", {
   onChatUpdate: listener => { ipcRenderer.on("chat:update", (_event, update) => listener(update)); },
   createBoard: type => ipcRenderer.invoke("board:create", type),
   openRecent: path => ipcRenderer.invoke("board:recent", path),
+  followBoardReference: (project, board) => ipcRenderer.invoke("board:follow-reference", project, board),
   selectTab: project => ipcRenderer.invoke("board:selectTab", project),
   reorderTab: (project, target, after) => ipcRenderer.invoke("board:reorderTab", project, target, after),
   closeTab: project => ipcRenderer.invoke("board:closeTab", project),

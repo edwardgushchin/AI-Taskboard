@@ -4721,6 +4721,15 @@ function taskBriefSections(task) {
   section(() => t("ui.acceptance_criteria_7e3779c2"), criteria);
 }
 
+async function showBoardTask(board, id) {
+  const result = await api.followBoardReference(frame.project, board);
+  if (!result.ok) {
+    notice(boardError(result.error));
+  } else if (frame.project === result.data.project) {
+    await showTask(id);
+  }
+}
+
 async function showTask(id, dialogue = false) {
   const request = ++taskSheetRequest;
   const project = frame.project;
@@ -6754,6 +6763,7 @@ function update(next) {
   const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
+  const referenceNamesChanged = JSON.stringify(frame.boardReferenceNames) !== JSON.stringify(next.boardReferenceNames);
   if (projectChanged) byId("board-composer").firstChild?.suspendBoardView?.();
   let cardLayout;
   if (!projectChanged && frame.board && next.board && !archiveView && !reducedMotion.matches && !document.hidden) {
@@ -6766,6 +6776,7 @@ function update(next) {
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
+  if (referenceNamesChanged) rememberBoardReferenceNames(next.boardReferenceNames ?? []);
   frame = next;
   window.renderProviderLimits?.(frame.dailyBudget, frame.project);
   const languageSelect = byId("language-select");
@@ -6814,6 +6825,9 @@ function update(next) {
   }
   render(cardLayout);
   syncBoardNotice(projectChanged);
+  if (projectChanged || referenceNamesChanged) {
+    syncBoardReferenceLinks(document, frame.boardReferenceNames ?? []);
+  }
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "review" && sheet.open && taskInSheet?.acceptanceRepair) {

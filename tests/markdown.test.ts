@@ -13,6 +13,55 @@ const source = ["source-files.cjs", "markdown.js"].map(name =>
   readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
 const markdown = runInNewContext(source + ";chatMarkdown", { window: { markdownit: MarkdownIt } }) as ReturnType<typeof MarkdownIt>;
 
+test("chat task links keep board names, task IDs and adjacent punctuation separate", () => {
+  for (const env of [{}, { agent: true }, { agent: true, report: true }]) {
+    const text = "Здесь #T-0013, там (#Полевые работы/T-0013), затем `#Говновоз/T-0013`.";
+    const html = markdown.render(text, env);
+    assert.match(html, /href="#T-0013" data-task="T-0013">[^]*?<\/i>T-0013<\/a>,/);
+    assert.match(html, /\(<a [^>]+data-task="T-0013" data-task-board="Полевые работы">[^]*?<\/i>Полевые работы\/T-0013<\/a>\),/);
+    assert.match(html, /data-task-board="Говновоз">[^]*?<\/i>Говновоз\/T-0013<\/a>\./);
+
+    for (const invalid of ["#Полевые работы/T-0013abc", "#Полевые работы/T-0013.5",
+      "#Полевые работы/T-00e3", "#Полевые работы/T-0013/extra", "#T-0013abc"]) {
+      assert.doesNotMatch(markdown.render(invalid, env), /data-task=/, invalid);
+    }
+    assert.doesNotMatch(markdown.render("[#Полевые работы/T-0013](https://example.com)", env), /data-task=/);
+  }
+});
+
+test("chat task links accept separators in board names", () => {
+  const examples = [
+    ["#План/Факт/T-0013", "План/Факт"],
+    ["#Отчёты/T-0002/Свод/T-0013", "Отчёты/T-0002/Свод"],
+    ["`#Полевые работы #1\\свод/T-0013`", "Полевые работы #1\\свод"],
+  ];
+  for (const [reference, name] of examples) {
+    const html = markdown.render("Чужая (" + reference + "), здесь #T-0013.", { agent: true });
+    assert.ok(html.includes('data-task="T-0013" data-task-board="' + name + '"'), html);
+    assert.ok(html.includes("</i>" + name + "/T-0013</a>),"), html);
+    assert.match(html, /href="#T-0013" data-task="T-0013">/);
+  }
+  const neighboringPath = markdown.render("#T-0013, путь План/Факт/T-0014.", {});
+  assert.match(neighboringPath, /data-task="T-0013"/);
+  assert.doesNotMatch(neighboringPath, /data-task-board=/);
+  for (const invalid of ["#План/Факт/T-0013abc", "#План/Факт/T-00e3", "#План/Факт/T-0013.5"]) {
+    assert.doesNotMatch(markdown.render(invalid, {}), /data-task=/, invalid);
+  }
+});
+
+test("a board name can start with a task ID without consuming a neighboring path", () => {
+  const html = markdown.render(
+    "Откройте #T-0013 Свод/T-0014. Сверьте #T-0013 по пути План/Факт/T-0014.",
+    { agent: true },
+  );
+  assert.match(html, /data-task="T-0013" data-candidate-board="T-0013 Свод" data-candidate-task="T-0014"/);
+  assert.match(html, /data-task="T-0013" data-candidate-board="T-0013 по пути План\/Факт" data-candidate-task="T-0014"/);
+  assert.match(html, /<\/a><span> по пути План\/Факт\/T-0014<\/span>\./);
+  assert.doesNotMatch(html, /data-task-board=/);
+  const quoted = markdown.render("`#T-0013 Свод/T-0014`", {});
+  assert.match(quoted, /data-task="T-0014" data-task-board="T-0013 Свод"/);
+});
+
 test("short commit references require explicit context in prose and inline code", () => {
   for (const env of [{}, { agent: true }, { agent: true, report: true }, { coordination: true }]) {
     for (const value of ["190cb97", "ABCDEF12", "abcd", "1".repeat(39)]) {

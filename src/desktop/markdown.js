@@ -1,4 +1,6 @@
 const sourceLocation = new RegExp(sourceFile.source.replace(/\$$/, ":[1-9]\\d*(?::\\d+)?$"), "i");
+const leadingTaskId = /^T-\d{4,}(?=[\s,;:!?)]|\.(?![\p{L}\p{N}]))/u;
+const boardReferenceStoragePrefix = "taskboard.board-reference-name:";
 const fullDigest = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const shortCommit = /^[0-9a-f]{4,39}$/i;
 const commitContext = /(?:^|[^\p{L}\p{N}_])(?:commit|коммит[а-яё]*)[\s:—–=-]*$/iu;
@@ -127,8 +129,19 @@ function createChatMarkdown() {
   const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_#.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
+  const quotedBoardReference = /^#(?<board>[^\s\0][^\r\n\0]*?)\/(?<foreignTask>T-\d{4,})$/u;
+  const shortTaskReference = String.raw`#?T-\d{4,}`;
+  const references = [
+    String.raw`#(?<board>[^#\s\0][^#\r\n\0]*?)\/(?<foreignTask>T-\d{4,})`,
+    shortTaskReference,
+    String.raw`v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?`,
+    String.raw`[\da-fA-F]{64}|[\da-fA-F]{4,40}`,
+  ];
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
-    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:T-\d{4,}|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
+    const reference = new RegExp(
+      String.raw`(?<![\p{L}\p{N}_.\/%\\-])(?:${references.join("|")})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])`,
+      "gu",
+    );
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
       let inLink = false;
@@ -141,7 +154,9 @@ function createChatMarkdown() {
         if (inLink || !["text", "code_inline"].includes(token.type)) return [token];
         const parts = [];
         let cursor = 0;
-        for (const match of token.content.matchAll(reference)) {
+        const quoted = token.type === "code_inline" && quotedBoardReference.exec(token.content);
+        const matches = quoted ? [quoted] : token.content.matchAll(reference);
+        for (const match of matches) {
           const value = match[0];
           if (shortCommit.test(value) && !commitContext.test(before + token.content.slice(0, match.index))) continue;
           if (token.type === "code_inline" && value !== token.content) continue;
@@ -150,9 +165,14 @@ function createChatMarkdown() {
             text.content = token.content.slice(cursor, match.index);
             parts.push(text);
           }
-          const type = /^T-/.test(value) ? "chat_task" : fullDigest.test(value) || shortCommit.test(value) ? "code_inline" : "chat_version";
+          const id = match.groups.foreignTask ?? (/^#?T-/.test(value) ? value.replace(/^#/, "") : undefined);
+          const type = id ? "chat_task" : fullDigest.test(value) || shortCommit.test(value) ? "code_inline" : "chat_version";
           const part = new state.Token(type, type === "code_inline" ? "code" : "", 0);
-          part.content = value;
+          part.content = id ?? value;
+          if (match.groups.board) {
+            const localId = quoted ? undefined : leadingTaskId.exec(match.groups.board)?.[0];
+            part.meta = { board: match.groups.board, localId };
+          }
           parts.push(part);
           cursor = match.index + value.length;
         }
@@ -167,12 +187,22 @@ function createChatMarkdown() {
     }
   });
   chatMarkdown.renderer.rules.chat_task = (tokens, index) => {
-    const id = chatMarkdown.utils.escapeHtml(tokens[index].content);
-    return `<a class="chat-task-reference" href="#${id}" data-task="${id}"><i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>${id}</a>`;
+    const { content: id, meta } = tokens[index];
+    const escape = chatMarkdown.utils.escapeHtml;
+    const label = meta ? meta.board + "/" + id : id;
+    const icon = '<i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>';
+    if (meta?.localId) {
+      const { localId } = meta;
+      const candidate = `data-candidate-board="${escape(meta.board)}" data-candidate-task="${id}"`;
+      const local = `<a class="chat-task-reference" href="#${localId}" data-task="${localId}" ${candidate}>${icon}${localId}</a>`;
+      return local + "<span>" + escape(label.slice(localId.length)) + "</span>";
+    }
+    const board = meta ? ' data-task-board="' + escape(meta.board) + '"' : "";
+    return `<a class="chat-task-reference" href="#${escape(label)}" data-task="${id}"${board}>${icon}${escape(label)}</a>`;
   };
   chatMarkdown.renderer.rules.chat_version = (tokens, index) =>
     `<span class="chat-version"><i class="icon codicon codicon-milestone" aria-hidden="true"></i>${chatMarkdown.utils.escapeHtml(tokens[index].content)}</span>`;
-  chatMarkdown.core.ruler.after("local_markdown_links", "agent_inline_code", state => {
+  chatMarkdown.core.ruler.after("chat_references", "agent_inline_code", state => {
     if (!state.env.agent) return;
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
@@ -471,6 +501,41 @@ function showHexColors(block, plainText = false) {
   }
 }
 
+function rememberBoardReferenceNames(names) {
+  try {
+    for (const name of names) {
+      if (leadingTaskId.test(name)) {
+        localStorage.setItem(boardReferenceStoragePrefix + name, "1");
+      }
+    }
+  } catch {
+    // A renderer without persistent storage still uses the names in the current frame.
+  }
+}
+
+function syncBoardReferenceLinks(container, names) {
+  for (const link of container.querySelectorAll("[data-candidate-board]")) {
+    if (link.dataset.taskBoard) continue;
+    const { candidateBoard, candidateTask } = link.dataset;
+    const name = candidateBoard.trim().normalize("NFC");
+    let qualified = names.includes(name);
+    if (!qualified) {
+      try {
+        qualified = localStorage.getItem(boardReferenceStoragePrefix + name) === "1";
+      } catch {
+        // Keep the local link when persistent storage is unavailable.
+      }
+    }
+    if (!qualified) continue;
+    const label = candidateBoard + "/" + candidateTask;
+    link.dataset.taskBoard = candidateBoard;
+    link.dataset.task = candidateTask;
+    link.setAttribute("href", "#" + label);
+    link.lastChild.textContent = label;
+    link.nextElementSibling.hidden = true;
+  }
+}
+
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
   const markdown = context.taskWork ? workMarkdown : chatMarkdown;
@@ -498,6 +563,7 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
   } else {
     block.innerHTML = markup;
   }
+  syncBoardReferenceLinks(block, typeof frame === "undefined" ? [] : frame.boardReferenceNames ?? []);
   formatReportReferences(block);
   for (const link of block.querySelectorAll("a[href]")) {
     const path = localPngPath(link.getAttribute("href"));
@@ -510,7 +576,9 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
     if (!link) return;
     event.preventDefault();
     const href = link.getAttribute("href");
-    if (link.dataset.task) {
+    if (link.dataset.taskBoard) {
+      void protect(() => showBoardTask(link.dataset.taskBoard, link.dataset.task))();
+    } else if (link.dataset.task) {
       void protect(() => showTask(link.dataset.task))();
     } else if (localDocumentLink(href)) {
       void protect(() => openMarkdownPreview(href, context))();
