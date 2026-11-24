@@ -1090,7 +1090,7 @@ interface ChatRequest {
   requestId?: string;
 }
 
-type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
+type ChatUpdate = { type: "saved"; requestId?: string } | { type: "changed" } | { type: "commentary"; text: string };
 
 let tokenUsage: TokenUsageQueue | undefined;
 const boardUsage = new Map<string, BoardCodexUsage>();
@@ -1353,7 +1353,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         text, model, effort, attachmentSources: sources, waitForLimit, requestId: request.requestId,
       });
       saved = reply.ok;
-      if (saved) notify({ type: "saved" });
+      if (saved) notify({ type: "saved", requestId: request.requestId });
       if (waitForLimit || (reply.ok && reply.data.pendingLimitChat?.length)) return { saved, result: reply };
       if (reply.ok && request.requestId &&
           reply.data.history.findLast(event => event.chat)?.chat?.requestId !== request.requestId) {

@@ -14,6 +14,11 @@ function appendChatTime(entry, at) {
 }
 
 const chatDrafts = new Map();
+function confirmTaskChatMessage(message) {
+  message.saved = true;
+  message.files = [];
+}
+
 let lastTaskReview;
 let chatCatalog;
 const chatPreviews = new IntersectionObserver(entries => {
@@ -632,7 +637,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
 }
 
-function updateChat({ project, id, type, text, items, savedRevision, savedRun, runThreadId, goal, goalId, goalRunning, goalResuming, goalResumeWaiting, error, question, managerRun, managerWork, at }) {
+function updateChat({ project, id, type, text, items, requestId, savedRevision, savedRun, runThreadId, goal, goalId, goalRunning, goalResuming, goalResumeWaiting, error, question, managerRun, managerWork, at }) {
   if (type === "orchestrator-question") {
     if (frame.project === project) {
       frame.managerQuestion = question;
@@ -709,16 +714,16 @@ function updateChat({ project, id, type, text, items, savedRevision, savedRun, r
   }
   const draft = chatDrafts.get(project + "\0" + id);
   if (type === "saved") {
-    if (draft?.saving) {
-      draft.text = "";
-      draft.files = [];
-      delete draft.receipt;
-      if (draft.quotes) draft.quotes.length = 0;
+    const message = draft?.outgoing?.get(requestId);
+    if (message) confirmTaskChatMessage(message);
+    if (message && draft.saving === message) {
       draft.saving = undefined;
       draft.pending = "replying";
-      if (open) byId("task-side").firstElementChild?.renderQuotes?.();
     }
-    if (open) void protect(() => showTask(id))();
+    if (open) {
+      byId("task-side").firstElementChild?.refreshOutgoing?.();
+      void protect(() => showTask(id))();
+    }
   } else if (type === "changed") {
     if (open) void protect(() => showTask(id))();
   } else if (type === "commentary" && draft?.pending) {
@@ -961,6 +966,14 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   if (!draft) {
     draft = { text: "", files: [] };
     chatDrafts.set(key, draft);
+  }
+  const outgoing = draft.outgoing ??= new Map();
+  for (const event of task.history) {
+    if (event.actor !== "user") continue;
+    const message = outgoing.get(event.chat?.requestId);
+    if (!message) continue;
+    confirmTaskChatMessage(message);
+    outgoing.delete(message.id);
   }
   if (draft.savedRun && (draft.savedRun.sequence <= task.history.length ||
       draft.savedRun.threadId !== task.codexThreadId)) delete draft.savedRun;
@@ -1475,8 +1488,48 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     }
   }
   area.refreshReview = () => void refreshReview();
-  list.append(element("li", undefined, "chat-turn"));
+  const turn = element("li", undefined, "chat-turn");
+  list.append(turn);
   area.append(list, work);
+
+  const outgoingRows = new Map();
+  function renderOutgoing() {
+    for (const row of outgoingRows.values()) row.remove();
+    outgoingRows.clear();
+    for (const message of outgoing.values()) {
+      const row = element("li", undefined, "chat-entry");
+      row.dataset.actor = "user";
+      row.append(element("span", () => t("ui.you_05444001"), "chat-author"));
+      if (!message.saved) {
+        const status = message.error
+          ? element("span", message.error, "chat-status")
+          : element("span", () => t("task_chat.sending"), "chat-status");
+        status.setAttribute("role", "status");
+        row.append(status);
+      }
+      if (message.attachmentNames.length) {
+        const tiles = element("div", undefined, "chat-attachments");
+        for (const name of message.attachmentNames) {
+          const tile = element("span", undefined, "chat-attachment");
+          tile.append(icon("attachment"), element("span", name));
+          tiles.append(tile);
+        }
+        row.append(tiles);
+      }
+      if (message.text) row.append(chatText(message.text, { taskId: task.id }));
+      if (message.error && !message.saved) {
+        const retry = button(() => t("task_chat.retry_send"), () => void submit(undefined, message), "quiet");
+        retry.disabled = Boolean(draft.saving || draft.stopping);
+        row.append(retry);
+        row.append(button(() => t("task_chat.dismiss_send"), () => {
+          outgoing.delete(message.id);
+          area.refreshOutgoing();
+        }, "quiet"));
+      }
+      appendChatTime(row, message.at);
+      outgoingRows.set(message, row);
+    }
+  }
 
   let liveItems = [];
   function renderLiveStageWork() {
@@ -1516,9 +1569,19 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     const items = frame.discussionActivity?.[task.id] ?? area.discussionHandoff?.items;
     const savedReply = lastMessage?.actor === "agent" && items?.some(item =>
       item.type === "agentMessage" && item.phase === "final_answer" && item.at === lastMessage.at);
+    for (const [message, row] of outgoingRows) {
+      // Activity already visible before an unconfirmed send belongs to the previous turn.
+      const afterTurn = !message.saved && Boolean(items) && !savedReply;
+      const position = turn.compareDocumentPosition(row);
+      const onCorrectSide = position & (afterTurn ? Node.DOCUMENT_POSITION_FOLLOWING : Node.DOCUMENT_POSITION_PRECEDING);
+      if (row.parentNode === list && onCorrectSide) continue;
+      if (afterTurn) list.append(row);
+      else turn.before(row);
+    }
     renderChatTurn(list, draft, savedReply ? undefined : items, task.id);
   };
   area.updateRun(frame.runActivity?.[task.id]);
+  renderOutgoing();
   area.updateDiscussion();
 
   const composer = element("form", undefined, "chat-composer");
@@ -1539,7 +1602,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     input,
     logs: [list, work],
     quotes,
-    locked: () => Boolean(draft.saving),
+    locked: () => false,
     changed: sync,
     focusComposer: () => {
       selectView("dialogue");
@@ -1658,23 +1721,27 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   function hasDraft() { return Boolean(draft.text.trim() || draft.files.length || quotes.length); }
   function stopping() { return working() && !hasDraft(); }
   function sync() {
-    input.readOnly = Boolean(draft.saving);
-    attach.disabled = microphone.disabled = input.readOnly;
     const stop = stopping();
     syncChatActionIcon(send, stop);
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
     send.disabled = Boolean(draft.saving || draft.stopping) || (!stop && !hasDraft());
     quoteDraft.sync();
-    retryReply.hidden = Boolean(task.pendingLimitChat?.length) || lastMessage?.actor !== "user" || working() ||
+    // A save receipt can arrive while this panel still has the previous message index.
+    const awaitingHistory = [...outgoing.values()].some(message => message.saved);
+    retryReply.hidden = awaitingHistory || Boolean(task.pendingLimitChat?.length) ||
+      lastMessage?.actor !== "user" || working() ||
       Boolean(frame.board?.archived?.some(card => card.id === task.id));
     retryReply.disabled = retryReply.hidden || Boolean(draft.saving || draft.stopping);
     feedback.textContent = draft.error ?? "";
     feedback.hidden = !feedback.textContent;
-    for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = input.readOnly;
   }
 
   area.syncAgentState = sync;
-  area.renderQuotes = quoteDraft.render;
+  area.refreshOutgoing = () => {
+    renderOutgoing();
+    area.updateDiscussion();
+    sync();
+  };
 
   function renderPendingFiles() {
     pendingFiles.hidden = !draft.files.length;
@@ -1687,7 +1754,6 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
         sync();
         input.focus();
       }, "quiet");
-      remove.disabled = Boolean(draft.saving);
       remove.append(icon("close"));
       bindLocalized(remove, "aria-label", () => t("ui.remove_07d1de5b") + file.name, true);
       row.append(icon("attachment"), element("span", file.name), element("small", " / " + file.size + " B"), remove);
@@ -1718,17 +1784,17 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   }
 
   function addFiles(newFiles) {
-    if (draft.saving || !newFiles.length) return;
+    if (!newFiles.length) return;
     draft.files.push(...newFiles);
     draft.error = "";
     renderPendingFiles();
     sync();
   }
 
-  async function submit(retryAt) {
+  async function submit(retryAt, message) {
     const retrying = retryAt !== undefined;
-    if (!retrying && send.disabled) return;
-    if (!retrying && stopping()) {
+    if (draft.saving || draft.stopping || (!retrying && !message && send.disabled)) return;
+    if (!retrying && !message && stopping()) {
       draft.stopping = true;
       draft.error = "";
       sync();
@@ -1743,38 +1809,48 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
       }
       return;
     }
-    const submission = {};
+    if (!retrying && !message) {
+      message = {
+        id: crypto.randomUUID(),
+        text: quoteMessage(draft.text, quotes),
+        files: draft.files,
+        attachmentNames: draft.files.map(file => file.name),
+        at: new Date().toISOString(),
+      };
+      outgoing.set(message.id, message);
+      input.value = draft.text = "";
+      draft.files = [];
+      quotes.length = 0;
+      quoteDraft.render();
+      renderPendingFiles();
+    }
+    const submission = message ?? {};
     (draft.requests ??= new Set()).add(submission);
     draft.saving = submission;
     draft.pending ??= "saving";
     draft.commentary ??= [];
     draft.error = "";
     draft.scroll = undefined;
-    const text = quoteMessage(draft.text, quotes);
-    if (!retrying && (draft.receipt?.text !== text ||
-        draft.receipt.files.length !== draft.files.length ||
-        draft.receipt.files.some((file, index) => file !== draft.files[index]))) {
-      draft.receipt = { id: crypto.randomUUID(), text, files: [...draft.files] };
-    }
-    sync();
+    delete submission.error;
+    area.refreshOutgoing();
     try {
       const { model, effort } = retrying ? lastMessage.chat : await discussionSettings();
-      const files = retrying ? [] : await Promise.all(draft.files.map(file => api.filePayload(file)));
-      if (!area.isConnected || frame.project !== project) return;
+      const files = retrying ? [] : await Promise.all(message.files.map(file => api.filePayload(file)));
+      if (frame.project !== project) throw new Error(t("task_chat.project_changed"));
       const { saved, result } = await api.chatSend(task.id, {
-        model, effort, text: retrying ? "" : text, files,
-        ...(retrying ? { retryAt } : { requestId: draft.receipt.id }),
+        model, effort, text: retrying ? "" : message.text, files,
+        ...(retrying ? { retryAt } : { requestId: message.id }),
       });
-      if (saved && !retrying && draft.saving === submission) {
-        draft.text = "";
-        draft.files = [];
-        delete draft.receipt;
-        quotes.length = 0;
-        quoteDraft.render();
+      if (saved && message) confirmTaskChatMessage(message);
+      if (!result.ok) {
+        throw new Error(boardError(result.error));
       }
-      if (!result.ok) draft.error = boardError(result.error);
     } catch (error) {
-      draft.error = error.message;
+      if (message && !message.saved) {
+        message.error = error.message;
+      } else {
+        draft.error = error.message;
+      }
     } finally {
       draft.requests.delete(submission);
       if (draft.saving === submission) draft.saving = undefined;
@@ -1782,7 +1858,10 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
         draft.pending = undefined;
         draft.commentary = [];
       }
-      if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) await showTask(task.id);
+      if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) {
+        byId("task-side").firstElementChild?.refreshOutgoing?.();
+        await showTask(task.id);
+      }
     }
   }
 
