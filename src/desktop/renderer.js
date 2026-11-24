@@ -1139,13 +1139,14 @@ function quotaLabel() {
     : t("ui.waiting_for_provider_quota");
 }
 
-function card(task) {
-  const audience = task.questionAudience;
-  const questionDescription = audience === "owner" ? "task_question.open_dialogue" : "task_question.waiting_for_manager";
+function cardCover(task) {
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
-  const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
+  return showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
+}
+
+function cardSignature(task, cover) {
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
-  const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
+  return JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id), frame.routingRetries?.[task.id],
@@ -1153,8 +1154,15 @@ function card(task) {
     task.acceptanceWaitUnchanged, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, audience,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, task.questionAudience,
     manualColumns().find(c => c.id === task.status)]);
+}
+
+function card(task) {
+  const audience = task.questionAudience;
+  const questionDescription = audience === "owner" ? "task_question.open_dialogue" : "task_question.waiting_for_manager";
+  const cover = cardCover(task);
+  const signature = cardSignature(task, cover);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
@@ -1622,7 +1630,6 @@ function laneTools(state, title, tasks, total, count, content) {
   const create = manualBoard() ? button("Создать задачу", () => createManualTask(state), "quiet lane-create") : undefined;
   if (create) create.prepend(icon("plus"));
   function renderBatch() {
-    fitted = undefined;
     const children = matching.slice(0, visibleLimit).map(card);
     if (matching.length > visibleLimit) {
       const remaining = matching.length - visibleLimit;
@@ -1647,13 +1654,21 @@ function laneTools(state, title, tasks, total, count, content) {
     if (focused?.parentElement !== content || !focused.classList.contains("task-card")) return 0;
     return matching.findIndex(task => boardCards.get(task.id)?.node === focused) + 1;
   }
+  function nextCardKey() {
+    const next = matching[visibleLimit];
+    if (!next) return null;
+    return JSON.stringify([next.id, matching.length - visibleLimit, cardSignature(next, cardCover(next))]);
+  }
   function fit(availableHeight, bounds) {
     if (collapsed || !matching.length) return;
     const focused = document.activeElement;
     const firstNew = visibleLimit;
     const minimum = Math.min(matching.length, Math.max(1, manualLimit, activeCount, focusedCardPosition()));
+    // A background update can change a card without changing the batch's geometry.
+    // Keep the last fit if the next card and the number of hidden cards also match.
     if (fitted?.availableHeight === availableHeight && fitted.width === bounds.width &&
-        fitted.height === bounds.height && fitted.minimum === minimum) return;
+        fitted.height === bounds.height && fitted.minimum === minimum &&
+        fitted.limit === visibleLimit && visibleLimit <= matching.length && fitted.next === nextCardKey()) return;
     let height = bounds.height;
     const renderAndMeasure = () => {
       renderBatch();
@@ -1680,7 +1695,7 @@ function laneTools(state, title, tasks, total, count, content) {
       const next = more.isConnected ? more : content.children[firstNew];
       next?.focus({ preventScroll: true });
     }
-    fitted = { availableHeight, width: bounds.width, height, minimum };
+    fitted = { availableHeight, width: bounds.width, height, minimum, limit: visibleLimit, next: nextCardKey() };
   }
   updateCards();
   updateCollapse();
@@ -3363,6 +3378,23 @@ function draftComposer() {
     for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url);
     for (const file of pendingPreviews.keys()) releasePreview(file);
   };
+  function deferHistoryRunLayout(node, height) {
+    node.style.contentVisibility = "auto";
+    node.style.containIntrinsicBlockSize = "auto " + height + "px";
+  }
+
+  function deferMountedHistoryLayout(nodes) {
+    // Measure the installed page before changing styles so offscreen replies keep their space.
+    const measured = [];
+    for (const node of nodes) {
+      const turn = historyRuns.get(node);
+      if (!turn || turn.recovery) continue;
+      const height = node.getBoundingClientRect().height;
+      if (height) measured.push({ node, height });
+    }
+    for (const { node, height } of measured) deferHistoryRunLayout(node, height);
+  }
+
   function* renderHistoryTurns(turns, page, delivered, messages, reuseHeights) {
     const liveIds = new Set(active?.items?.map(item => item.id));
     let markdownCache = historyMarkup.get(turns);
@@ -3402,10 +3434,7 @@ function draftComposer() {
       if (!container.hidden) {
         historyRuns.set(container, turn);
         const height = reuseHeights ? historyRunHeights.get(turn) : undefined;
-        if (height) {
-          container.style.contentVisibility = "auto";
-          container.style.containIntrinsicBlockSize = "auto " + height + "px";
-        }
+        if (height) deferHistoryRunLayout(container, height);
         page.append(container);
       }
       yield;
@@ -3475,16 +3504,19 @@ function draftComposer() {
       const result = await api.boardHistory(project, cursor);
       if (disposed || generation !== historyGeneration || !canBrowseHistory()) return;
       if (!result.ok) throw new Error(boardError(result.error));
+      const nodes = [];
       dialogueViewport.update(() => {
         const { page } = renderHistoryPage(result.data.turns);
+        nodes.push(...page.children);
         olderPages.push(result.data.turns);
-        olderNodes.push(...page.children);
+        olderNodes.push(...nodes);
         greeting.after(page);
         updateUnreadMessages();
         olderCursor = result.data.nextCursor === cursor ? null : result.data.nextCursor;
         updateOlderHistory();
         greeting.hidden = log.childElementCount > 2;
       });
+      deferMountedHistoryLayout(nodes);
       lastScrollTop = log.scrollTop;
     } catch (error) {
       if (!disposed && generation === historyGeneration) message(error.message);
@@ -3560,6 +3592,7 @@ function draftComposer() {
             greeting.hidden = log.childElementCount > 2;
             updateUnreadMessages();
           });
+          if (prepared) deferMountedHistoryLayout(recentNodes);
         }
         await restoreQueue().catch(() => {});
         for (const job of [...queued]) {
