@@ -50,6 +50,8 @@ import { githubReadTool } from "../src/desktop/github-read.ts";
 import { ApplicationUpdates, applicationUpdateTools } from "../src/desktop/installation-updates.ts";
 import { expertActions, expertCommands, leadInstructions, phaseStageReporter } from "../src/desktop/expert-tools.ts";
 import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src/desktop/codex.ts";
+import { dailyBudgetInterruption } from "../src/desktop/codex-rpc.ts";
+import type { UsageWriter } from "../src/desktop/codex-token-usage.ts";
 import type { ManagerAccess } from "../src/desktop/codex.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
@@ -63,6 +65,7 @@ const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.g
   text.startsWith("const autoBoards =") || text.startsWith("const managerNoticeKey =") ||
   text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
+  text.startsWith("function interruptedForLimit(") || text.startsWith("function dailyBudgetFailure(") ||
   /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|parseOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
 const cliFailure = (code: string, message: string) => ({ ok: false, error: { code, message } });
@@ -158,6 +161,8 @@ function fixture(t: TestContext) {
   const runtime = runInNewContext(handlerSource + "\n({ frame, scheduleAutoReview, boardRequests, boardWorkRequests, backgroundManagerRequests, acceptanceWork, managerQuestion, runBoardRequest, scheduleRecurringTasks })", {
     get quotaWait() { return quotaPaused ? {} : undefined; },
     boardBudgetFailure: () => undefined, boardCodexBudget: () => undefined, saveDailyUsage: () => {},
+    dailyBudgetInterruption,
+    usageWriter: (_project: string, write: UsageWriter) => write,
     quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     currentActiveGoal: activeManagerGoal, currentManagerGoal: managerGoalState, managerGoalBinding,
     acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit,
@@ -3691,7 +3696,13 @@ test("a connection failure after goal acceptance preserves the request in the ex
   const savedGoal = { objective, status: "active" };
   const { goalId, ...binding } = readJson(f.binding) as { goalId: string };
   assert.match(goalId, codexThreadPattern);
-  assert.deepEqual(binding, { provider: "codex", id: f.threadId, history: "local", goal: savedGoal });
+  assert.deepEqual(binding, {
+    provider: "codex",
+    id: f.threadId,
+    history: "local",
+    goal: savedGoal,
+    ownerObjective: objective,
+  });
   const history = await f.history();
   assert.equal(history.ok, true);
   assert.deepEqual(history.data.goal, savedGoal);

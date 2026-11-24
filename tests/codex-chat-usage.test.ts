@@ -132,7 +132,7 @@ test("task discussion streams task usage before success, provider failure, or a 
     });
   `);
   const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
-    .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
+    .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
   for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
