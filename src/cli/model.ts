@@ -229,6 +229,7 @@ export interface Task {
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
   pendingLimitChat?: number[];
+  limitChatContinuation?: { index: number; threadId: string };
   draftManagerReplyThrough?: number;
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };

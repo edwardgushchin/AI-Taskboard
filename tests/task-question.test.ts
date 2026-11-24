@@ -476,7 +476,60 @@ test("an active draft reply can finish once while newer messages wait for limits
   task = addChatMessage(store, task, answer);
   assert.deepEqual(task.pendingLimitChat, pending);
   assert.throws(() => addChatMessage(store, task, answer), { code: "CHAT_CHANGED" });
+  const update = {
+    actor: "user",
+    preserveStatus: true,
+    ownerChatSequence: pending[0] + 1,
+    authorization: "Second",
+    description: "Second requirement",
+    revision: task.revision,
+  };
+  assert.throws(() => changeTask(task, "update", {
+    ...update, ownerChatSequence: pending[1] + 1, authorization: "Third",
+  }), { code: "USER_DIRECTION_REQUIRED" });
+  task = store.save(changeTask(task, "update", update));
+  assert.equal(changeTask(task, "update", { ...update, revision: task.revision }), task);
+  assert.throws(() => changeTask(task, "update", {
+    ...update, revision: task.revision, description: "Second requirement repeated",
+  }), { code: "USER_DIRECTION_REQUIRED" });
   task = addChatMessage(store, task, { ...answer, revision: task.revision, replyTo: pending[0], text: "Answer to second" });
   assert.deepEqual(task.pendingLimitChat, pending.slice(1));
+  assert.equal(task.description, "Second requirement");
   assert.equal(task.history.filter(event => event.chat && event.actor === "agent").length, 2);
+});
+
+test("saving an owner reply queues later unsteered messages without accepting a stale edit", t => {
+  const root = mkdtempSync(join(tmpdir(), "draft-unsteered-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 3 }));
+  const settings = { model: "test", effort: "low" };
+  const store = initializeBoard({ root, directory: join(root, ".tasks"), repository: null }, store => store);
+  let task = store.create(createTask("T-0001", { title: "Discussion" }));
+  task = addChatMessage(store, task, { ...settings, text: "First" });
+  const active = task.history.length - 1;
+  const revision = task.revision;
+  task = addChatMessage(store, task, { ...settings, text: "Still preparing" });
+  task = addChatMessage(store, task, { ...settings, text: "Waiting for limits", waitForLimit: true });
+  assert.deepEqual(task.pendingLimitChat, [active + 2]);
+
+  const answer = {
+    ...settings,
+    actor: "agent",
+    text: "Answer to first",
+    replyTo: active,
+    revision,
+    awaitingAnswer: false,
+  };
+  assert.throws(() => addChatMessage(store, task, answer), { code: "CHAT_CHANGED" });
+  assert.throws(() => addChatMessage(store, task, {
+    ...answer, queueUnsteered: true, revision: revision - 1,
+  }), { code: "REVISION_CONFLICT" });
+  task = addChatMessage(store, task, { ...answer, queueUnsteered: true });
+  assert.deepEqual(readTask(store, task.id).pendingLimitChat, [active + 1, active + 2]);
+  assert.throws(() => addChatMessage(store, task, {
+    ...answer, queueUnsteered: true,
+  }), { code: "CHAT_CHANGED" });
+  task = addChatMessage(store, task, {
+    ...answer, text: "Answer to second", replyTo: active + 1, revision: task.revision, queueUnsteered: true,
+  });
+  assert.deepEqual(task.pendingLimitChat, [active + 2]);
 });

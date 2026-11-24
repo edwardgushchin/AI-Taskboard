@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { findQueuedTurn } from "./codex-queued-turn.ts";
 import { CodexRoutingRetry, isRoutingDiscoveryFailure } from "./codex-routing-retry.ts";
 import { setTimeout as delay } from "node:timers/promises";
-import { CodexRpcRejection, codexRpc, dailyBudgetInterruption, stopCodexProcess, turnControl } from "./codex-rpc.ts";
+import { CodexQuotaExceeded, CodexRpcRejection, codexRpc, dailyBudgetInterruption, isCodexQuotaError, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
 import { configuredCodex, executorFullAccess, setTaskExecutorAccess } from "./codex.ts";
 import type { ManagerAccess } from "./codex.ts";
@@ -372,6 +372,7 @@ export function replyToTask(
   closedCard = false,
   draft = false,
   beforeStart?: () => void,
+  discussionThread?: { id?: string; accepted: (threadId: string) => void },
 ) {
   const worklog = boardWorklog(project, "executor", taskId);
   const draftDialogue = draft && mode === undefined;
@@ -433,6 +434,7 @@ export function replyToTask(
     onCommentary: mode === "initial" ? undefined : onCommentary,
     onActivity: mode === "initial" || !onActivity ? undefined : discussionActivity,
     beforeStart,
+    discussionThread,
     onTokenUsage, onControl, signal,
     imageDirectory: mode === "initial" ? undefined : imageDirectory, imageLimit,
     finalAnswerSchema: mode === "initial" ? {
@@ -889,6 +891,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
   stageReporter?: ReturnType<typeof phaseStageReporter>;
   observeProvider?: (message: RpcMessage, threadId: string) => void;
   beforeStart?: () => void;
+  discussionThread?: { id?: string; accepted: (threadId: string) => void };
 }) {
   const { onCommentary, onTokenUsage, onControl, onActivity, signal, imageDirectory, imageLimit = 0, session } = options;
   const settings = session ? session.settings : options.settings;
@@ -922,13 +925,16 @@ function reply(profile: string, project: string, prompt: string, images: string[
     if (images.length && model?.inputModalities && !model.inputModalities.includes("image")) {
       throw new Error("Choose a model that supports images.");
     }
-    const existing = session?.separateTurn && !session.keepThread ? undefined : session?.id ?? options.reviewThread?.id;
+    const existing = session?.separateTurn && !session.keepThread ? undefined :
+      session?.id ?? options.reviewThread?.id ?? options.discussionThread?.id;
     const method = existing ? "thread/resume" : "thread/start";
     const researchInstructions = research ? await options.prepareResearch?.(request, client) : undefined;
     const params = {
       ...(existing ? { threadId: existing, excludeTurns: true } : {
         // Native subagents fork from the provider's saved parent rollout.
-        ephemeral: !options.reviewThread && !session?.keepThread && !options.specialistDelegation && (!session || session.separateTurn === true), dynamicTools: options.tools,
+        ephemeral: !options.reviewThread && !options.discussionThread && !session?.keepThread &&
+          !options.specialistDelegation && (!session || session.separateTurn === true),
+        dynamicTools: options.tools,
         ...(session && !session.separateTurn ? { historyMode: "paginated" } : {}),
       }),
       cwd: project, model: modelId, approvalPolicy,
@@ -964,6 +970,9 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
     }
     const { thread } = started;
+    if (options.discussionThread && (!codexThreadPattern.test(thread.id) || (existing && existing !== thread.id))) {
+      throw new Error("Codex returned an unexpected discussion thread ID.");
+    }
     if (research && (started.activePermissionProfile?.id !== permissionProfile || started.approvalPolicy !== approvalPolicy ||
         (!fullAccess && started.approvalsReviewer !== approvalsReviewer))) {
       throw new Error("Codex did not apply the selected manager access mode.");
@@ -1028,6 +1037,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       stopping = true;
       await interruptBudgetTurn();
     });
+    let quotaFailedTurn: string | undefined;
     async function notify(message: RpcMessage) {
       options.observeProvider?.(message, thread.id);
       const data = message.params as TurnNotification | undefined;
@@ -1045,6 +1055,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
       tokens.queue(tokens.observe(message), onTokenUsage);
       if (data?.threadId !== thread.id) return;
+      if (options.discussionThread && message.method === "error" && data.turnId) {
+        const failure = message.params as { willRetry?: boolean; error?: unknown };
+        if (!failure.willRetry && isCodexQuotaError(failure.error)) quotaFailedTurn = data.turnId;
+      }
       if (message.method === "error" && session?.onProviderRetry) {
         const retry = message.params as { willRetry?: boolean; error?: { message?: string } };
         if (retry.willRetry && retry.error?.message) session.onProviderRetry(retry.error.message);
@@ -1181,6 +1195,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
           throw error;
         });
         turn = response.turn;
+        options.discussionThread?.accepted(thread.id);
         const needsBudgetTurn = !notifiedTurn && turn.status === "inProgress";
         if (needsBudgetTurn) {
           activeBudgetTurn = turn.id;
@@ -1295,6 +1310,11 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
       const goalStatus: GoalStatus | "cleared" | undefined = followingGoal ? currentGoal?.status ?? "cleared" : undefined;
       const goalStopped = turn.status === "interrupted" && (goalStatus === "paused" || goalStatus === "cleared");
+      if (options.discussionThread && !stopping && turn.status !== "completed" &&
+          (isCodexQuotaError(turn.error) || quotaFailedTurn === turn.id)) {
+        await Promise.all(calls.values());
+        throw new CodexQuotaExceeded(turn.error?.message ?? "Codex interrupted the reply because its quota was exhausted.");
+      }
       if (stopping || (turn.status === "interrupted" && !goalStopped)) return { interrupted: true as const };
       if (options.role === "reviewer" && isRoutingDiscoveryFailure(turn)) throw new CodexRoutingRetry(turn.error!.message!);
       if (turn.status !== "completed" && !goalStopped) throw new Error(turn.error?.message ?? "Codex did not complete the reply.");

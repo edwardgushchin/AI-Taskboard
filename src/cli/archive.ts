@@ -238,6 +238,11 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   }
   const pending = task.pendingLimitChat;
   let repliesToPending = false;
+  let pendingAfterReply = pending;
+  const queueUnsteered = input.queueUnsteered;
+  if (queueUnsteered !== undefined && (actor !== "agent" || draftDiscussion || typeof queueUnsteered !== "boolean")) {
+    throw new TaskboardError("INVALID_INPUT", "Only an agent dialogue reply can queue unsteered messages.");
+  }
   const pendingManagerReply = task.draftDiscussion?.managerReply;
   const managerReply = draftDiscussion && input.managerReply !== undefined
     ? number(input.managerReply, "managerReply") : undefined;
@@ -286,10 +291,17 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     const last = task.history.findLastIndex(event => event.chat);
     const replyTo = number(input.replyTo, "replyTo", 0);
     repliesToPending = pending?.[0] === replyTo;
-    const newerPending = (pending ?? []).filter(index => index > replyTo);
+    const later = task.history.slice(replyTo + 1);
+    const canQueue = queueUnsteered && !repliesToPending &&
+      (pending?.[0] ?? replyTo) >= replyTo && later.every(event => !event.chat || event.actor === "user");
+    const newerPending = canQueue
+      ? later.flatMap((event, offset) => event.chat ? [replyTo + offset + 1] : [])
+      : (pending ?? []).filter(index => index > replyTo);
+    if (canQueue && newerPending.length) pendingAfterReply = newerPending;
+    if (repliesToPending) pendingAfterReply = newerPending.length ? newerPending : undefined;
     const onlyQueuedMessages = newerPending.length > 0 && task.history.slice(replyTo + 1).every((event, offset) =>
       !event.chat || newerPending.includes(replyTo + offset + 1));
-    const startedBeforeQueue = onlyQueuedMessages && pending![0] > replyTo;
+    const startedBeforeQueue = onlyQueuedMessages && (pendingAfterReply?.[0] ?? replyTo) > replyTo;
     if ((!repliesToPending && !startedBeforeQueue && (last !== replyTo || pending?.length)) ||
         !task.history[replyTo]?.chat || task.history[replyTo]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
@@ -322,8 +334,9 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       : { ...task };
     if (actor === "user" && (waitForLimit || pending?.length)) {
       current.pendingLimitChat = [...(pending ?? []), task.history.length];
-    } else if (repliesToPending) {
-      current.pendingLimitChat = pending!.length > 1 ? pending!.slice(1) : undefined;
+    } else if (pendingAfterReply !== pending) {
+      current.pendingLimitChat = pendingAfterReply;
+      if (repliesToPending && current.limitChatContinuation?.index === pending?.[0]) delete current.limitChatContinuation;
     }
     if (actor === "user" && task.status === "draft") {
       // Keep the proof for an unchanged brief while awaiting the outcome of the dialogue.

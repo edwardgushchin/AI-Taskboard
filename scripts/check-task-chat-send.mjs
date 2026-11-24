@@ -105,7 +105,7 @@ export async function checkTaskChatSend({
   assert.equal(pending.count, 1);
   assert.equal(pending.sending, true);
   assert.equal(pending.thinking, false);
-  assert.equal(pending.input, "");
+  assert.equal(pending.input, first);
   assert.equal(pending.inputEnabled, true);
   assert.ok(pending.text.includes(file) && pending.text.includes(quoted));
   assert.equal(savedUsers(id).length, 0);
@@ -141,7 +141,7 @@ export async function checkTaskChatSend({
   await send(second);
   await until(() => control.calls.filter(call => call.id === id).length === 2, "button reaches delayed steering write");
   assert.equal((await read(second)).sending, true);
-  assert.equal((await read(second)).input, "");
+  assert.equal((await read(second)).input, second);
   assert.equal(savedUsers(id).length, 1);
   control.write.resolve();
   await until(() => control.steering.some(message => message.text === second), "second message steered into current turn");
@@ -160,7 +160,7 @@ export async function checkTaskChatSend({
   await send(refused, { packet: true });
   await until(async () => (await read(refused)).retry, "automatic analysis refuses write and offers retry");
   assert.equal(savedUsers(automatic).length, 0);
-  assert.equal((await read(refused)).input, "");
+  assert.equal((await read(refused)).input, refused);
   await fill(draft);
   analysis.finish.resolve({ text: JSON.stringify({ questions: "Как продолжить разбор?" }) });
   await idle(automatic);
