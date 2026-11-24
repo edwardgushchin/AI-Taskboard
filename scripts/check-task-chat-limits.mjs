@@ -38,6 +38,7 @@ const updatedDescription = "Сохранять итоговый отчёт в XL
 let exhausted = restarting;
 let failWrite = false;
 let writeRejected = false;
+const finishRejectedWrite = Promise.withResolvers();
 let budgetTurn = 0;
 const gates = new Map();
 
@@ -73,7 +74,10 @@ globalThis.limitChatFixture = {
     if (!failWrite || args[1][0] !== "chat" || args[2]?.text !== messages.budget) return;
     failWrite = false;
     writeRejected = true;
-    return { ok: false, error: { code: "BOARD_BUSY", message: "Проверка ошибки записи" } };
+    return finishRejectedWrite.promise.then(() => ({
+      ok: false,
+      error: { code: "BOARD_BUSY", message: "Проверка ошибки записи" },
+    }));
   },
   async reply(prompt, action, options) {
     options.beforeStart?.();
@@ -242,6 +246,17 @@ async function phase() {
     await open(first, draft.id);
     failWrite = true;
     await send(first, messages.budget, true);
+    await until("pending write", () => writeRejected);
+    const held = await evaluate(first, `(() => {
+      const input = document.querySelector('#task-chat-input');
+      const attachments = document.querySelector('.draft-attachments');
+      return { text: input.value, readOnly: input.readOnly, files: attachments.textContent };
+    })()`);
+    assert.equal(held.text, messages.budget);
+    assert.equal(held.readOnly, true);
+    assert.ok(held.files.includes(filename));
+    assert.equal((await rows(first, messages.budget)).length, 0);
+    finishRejectedWrite.resolve();
     await until("draft retained on write error", () => writeRejected && evaluate(first,
       "document.querySelector('#task-chat-input:not([readonly])')?.value === " + JSON.stringify(messages.budget) +
       " && Boolean(document.querySelector('.task-chat p.chat-status:not([hidden])')?.textContent)"))
@@ -258,7 +273,7 @@ async function phase() {
     await until("draft included message in review", async () => (await rows(first, "Разбор учёл новый формат CSV.", "agent")).length);
     assert.deepEqual(calls.map(call => [call.request, call.docs, call.draft]), [[messages.budget, ["fixture attachment"], true]]);
     await capture(first, "draft-reply.png", "Разбор учёл новый формат CSV.", "agent");
-    pass("При дневном лимите Enter сохраняет текст и вложение в черновике. После ошибки записи черновик доступен для повторной отправки. После сброса разбор получил текст и файл.");
+    pass("При дневном лимите Enter сохраняет текст и вложение. Поле очищается после записи, при ошибке черновик доступен для повтора. После сброса разбор получил текст и файл.");
 
     const existing = cli(["create"], plannedDraft({ title: "Отчёт с существующим диалогом", execution: { provider: "codex", ...settings } }));
     const seeded = cli(["chat", existing.id], { ...settings, text: "Предыдущий вопрос." });

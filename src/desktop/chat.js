@@ -14,7 +14,23 @@ function appendChatTime(entry, at) {
 }
 
 const chatDrafts = new Map();
-function confirmTaskChatMessage(message) {
+function clearTaskChatDraft(draft) {
+  draft.text = "";
+  draft.files = [];
+  if (draft.quotes) draft.quotes.length = 0;
+}
+
+function matchesTaskChatDraft(draft, message) {
+  return message.text === quoteMessage(draft.text, draft.quotes ?? []) &&
+    message.files.length === draft.files.length &&
+    message.files.every((file, index) => file === draft.files[index]);
+}
+
+function confirmTaskChatMessage(draft, message) {
+  if (draft.waitingForSave === message) {
+    if (matchesTaskChatDraft(draft, message)) clearTaskChatDraft(draft);
+    delete draft.waitingForSave;
+  }
   message.saved = true;
   message.files = [];
 }
@@ -715,7 +731,7 @@ function updateChat({ project, id, type, text, items, requestId, savedRevision, 
   const draft = chatDrafts.get(project + "\0" + id);
   if (type === "saved") {
     const message = draft?.outgoing?.get(requestId);
-    if (message) confirmTaskChatMessage(message);
+    if (message) confirmTaskChatMessage(draft, message);
     if (message && draft.saving === message) {
       draft.saving = undefined;
       draft.pending = "replying";
@@ -976,7 +992,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     if (event.actor !== "user") continue;
     const message = outgoing.get(event.chat?.requestId);
     if (!message) continue;
-    confirmTaskChatMessage(message);
+    confirmTaskChatMessage(draft, message);
     outgoing.delete(message.id);
   }
   if (draft.savedRun && (draft.savedRun.sequence <= task.history.length ||
@@ -1507,6 +1523,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     for (const row of outgoingRows.values()) row.remove();
     outgoingRows.clear();
     for (const message of outgoing.values()) {
+      if (message === draft.waitingForSave) continue;
       const row = element("li", undefined, "chat-entry");
       row.dataset.actor = "user";
       row.append(element("span", () => t("ui.you_05444001"), "chat-author"));
@@ -1612,7 +1629,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     input,
     logs: [list, work],
     quotes,
-    locked: () => false,
+    locked: () => input.readOnly,
     changed: sync,
     focusComposer: () => {
       selectView("dialogue");
@@ -1731,6 +1748,9 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   function hasDraft() { return Boolean(draft.text.trim() || draft.files.length || quotes.length); }
   function stopping() { return working() && !hasDraft(); }
   function sync() {
+    const holdingDraft = Boolean(draft.waitingForSave && draft.saving === draft.waitingForSave);
+    input.readOnly = attach.disabled = microphone.disabled = holdingDraft;
+    for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = holdingDraft;
     const stop = stopping();
     syncChatActionIcon(send, stop);
     controlLabelForIcon(send, () => stop ? t("ui.stop_agent_f50db092") : t("ui.send_message_173c4807"));
@@ -1748,6 +1768,11 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
 
   area.syncAgentState = sync;
   area.refreshOutgoing = () => {
+    if (!draft.waitingForSave && input.readOnly) {
+      input.value = draft.text;
+      quoteDraft.render();
+      renderPendingFiles();
+    }
     renderOutgoing();
     area.updateDiscussion();
     sync();
@@ -1794,7 +1819,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   }
 
   function addFiles(newFiles) {
-    if (!newFiles.length) return;
+    if (input.readOnly || !newFiles.length) return;
     draft.files.push(...newFiles);
     draft.error = "";
     renderPendingFiles();
@@ -1820,19 +1845,30 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
       return;
     }
     if (!retrying && !message) {
-      message = {
+      const text = quoteMessage(draft.text, quotes);
+      const previous = draft.waitingForSave;
+      const hold = Boolean(frame.quotaWait || frame.dailyBudget?.reason);
+      if (previous && !matchesTaskChatDraft(draft, previous)) {
+        outgoing.delete(previous.id);
+        delete draft.waitingForSave;
+      }
+      message = draft.waitingForSave ?? {
         id: crypto.randomUUID(),
-        text: quoteMessage(draft.text, quotes),
-        files: draft.files,
+        text,
+        files: [...draft.files],
         attachmentNames: draft.files.map(file => file.name),
         at: new Date().toISOString(),
       };
       outgoing.set(message.id, message);
-      input.value = draft.text = "";
-      draft.files = [];
-      quotes.length = 0;
-      quoteDraft.render();
-      renderPendingFiles();
+      if (hold) {
+        draft.waitingForSave = message;
+      } else {
+        delete draft.waitingForSave;
+        clearTaskChatDraft(draft);
+        input.value = draft.text;
+        quoteDraft.render();
+        renderPendingFiles();
+      }
     }
     const submission = message ?? {};
     (draft.requests ??= new Set()).add(submission);
@@ -1851,12 +1887,12 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
         model, effort, text: retrying ? "" : message.text, files,
         ...(retrying ? { retryAt } : { requestId: message.id }),
       });
-      if (saved && message) confirmTaskChatMessage(message);
+      if (saved && message) confirmTaskChatMessage(draft, message);
       if (!result.ok) {
         throw new Error(boardError(result.error));
       }
     } catch (error) {
-      if (message && !message.saved) {
+      if (message && !message.saved && message !== draft.waitingForSave) {
         message.error = error.message;
       } else {
         draft.error = error.message;
