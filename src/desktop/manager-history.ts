@@ -701,14 +701,21 @@ export async function readManagerDialogue(project: string, cursor: string | null
 }
 
 export async function readManagerView(project: string, cursor: string | null, view: "chat" | "work", readLegacy?: LegacyHistoryReader) {
+  const history = readManagerLocalPage(project, cursor, view, Boolean(readLegacy));
+  if (history.providerCutoff !== undefined && readLegacy) {
+    return readManagerProviderHistory(cursor, view, history.providerCutoff, readLegacy);
+  }
+  return history.local;
+}
+
+export function readManagerLocalPage(project: string, cursor: string | null, view: "chat" | "work", hasProvider: boolean) {
   if (!cursor?.startsWith(providerCursorPrefix)) {
     const local = readManagerHistory(project, cursor, view);
-    if (local?.turns.length || local?.nextCursor || !readLegacy) {
-      return local && { ...local, nextCursor: local.nextCursor ?? (readLegacy ? providerCursorPrefix : null) };
+    if (local?.turns.length || local?.nextCursor || !hasProvider) {
+      return { local: local && { ...local, nextCursor: local.nextCursor ?? (hasProvider ? providerCursorPrefix : null) } };
     }
   }
-  if (!readLegacy) return;
-  return readManagerProviderHistory(cursor, view, managerProviderCutoff(project, view), readLegacy);
+  return { providerCutoff: hasProvider ? managerProviderCutoff(project, view) : undefined };
 }
 
 function managerProviderCutoff(project: string, view: "chat" | "work") {

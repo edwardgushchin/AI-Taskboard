@@ -3233,9 +3233,9 @@ function draftComposer() {
     syncAction();
   };
   const seenMessages = new Set();
-  const rememberMessages = container => {
+  const rememberMessages = (container, messages = seenMessages) => {
     for (const entry of container.querySelectorAll("[data-coordination-key]")) {
-      seenMessages.add(entry.dataset.coordinationKey);
+      messages.add(entry.dataset.coordinationKey);
     }
   };
   const streamedText = new WeakMap();
@@ -3362,9 +3362,7 @@ function draftComposer() {
     for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url);
     for (const file of pendingPreviews.keys()) releasePreview(file);
   };
-  function renderHistoryPage(turns, reuseHeights = false) {
-    const page = document.createDocumentFragment();
-    const delivered = new Set();
+  function* renderHistoryTurns(turns, page, delivered, messages, reuseHeights) {
     const liveIds = new Set(active?.items?.map(item => item.id));
     let markdownCache = historyMarkup.get(turns);
     if (!markdownCache) {
@@ -3380,8 +3378,8 @@ function draftComposer() {
       }
       const container = element("div", undefined, "chat-run");
       renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined,
-        { dialogue: true, seenMessages, markdownCache });
-      rememberMessages(container);
+        { dialogue: true, seenMessages: messages, markdownCache });
+      rememberMessages(container, messages);
       if (!container.hidden) {
         historyRuns.set(container, turn);
         const height = reuseHeights ? historyRunHeights.get(turn) : undefined;
@@ -3390,6 +3388,34 @@ function draftComposer() {
           container.style.containIntrinsicBlockSize = "auto " + height + "px";
         }
         page.append(container);
+      }
+      yield;
+    }
+  }
+
+  function renderHistoryPage(turns, reuseHeights = false) {
+    const page = document.createDocumentFragment();
+    const delivered = new Set();
+    for (const _ of renderHistoryTurns(turns, page, delivered, seenMessages, reuseHeights)) {
+      // Remounts restore the saved reading anchor in the current frame.
+    }
+    return { page, delivered };
+  }
+
+  async function prepareRecentHistory(turns, canInstall) {
+    const locale = localization.locale;
+    const page = document.createDocumentFragment();
+    const delivered = new Set();
+    const messages = new Set();
+    let deadline = performance.now() + 8;
+    for (const _ of renderHistoryTurns(turns, page, delivered, messages, false)) {
+      if (performance.now() >= deadline) {
+        await scheduler.yield();
+        if (!canInstall() || active || locale !== localization.locale) {
+          for (const tile of page.querySelectorAll(".chat-attachment")) chatPreviews.unobserve(tile);
+          return;
+        }
+        deadline = performance.now() + 8;
       }
     }
     return { page, delivered };
@@ -3459,6 +3485,15 @@ function draftComposer() {
         if (disposed || reloadAfterHistory || !canBrowseHistory()) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
         void refreshGoalAvailability();
+        const generation = historyGeneration;
+        const canInstall = () => !disposed && !reloadAfterHistory &&
+          generation === historyGeneration && canBrowseHistory();
+        // A large saved reply can monopolize the renderer while the user starts typing.
+        const prepared = active ? undefined : await prepareRecentHistory(result.data.turns, canInstall);
+        if (!canInstall()) {
+          if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
+          return;
+        }
         const oldImages = [...log.querySelectorAll(".chat-attachments img")];
         let delivered;
         dialogueViewport.update(() => {
@@ -3470,7 +3505,8 @@ function draftComposer() {
           recentTurns = result.data.turns;
           recentCursor = olderCursor = result.data.nextCursor;
           seenMessages.clear();
-          const next = renderHistoryPage(recentTurns);
+          const next = prepared ?? renderHistoryPage(recentTurns);
+          if (prepared) rememberMessages(next.page);
           recentNodes = [...next.page.children];
           historyUnmounted = false;
           delivered = next.delivered;
