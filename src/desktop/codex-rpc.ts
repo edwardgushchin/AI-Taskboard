@@ -30,6 +30,13 @@ export interface RpcMessage {
 
 export class CodexRpcRejection extends Error {}
 
+export class CodexQuotaExceeded extends CodexRpcRejection {}
+
+export function isCodexQuotaError(value: unknown) {
+  const error = value as { codexErrorInfo?: unknown; data?: { codexErrorInfo?: unknown } } | undefined;
+  return (error?.codexErrorInfo ?? error?.data?.codexErrorInfo) === "usageLimitExceeded";
+}
+
 export interface AgentControl {
   steer(text: string, images: string[], clientUserMessageId?: string): Promise<void>;
   interrupt(): Promise<void>;
@@ -83,15 +90,16 @@ export function codexRpc(child: ChildProcess,
     try {
       const message = JSON.parse(line) as RpcMessage;
       const notification = message.params as { error?: unknown; turn?: { error?: unknown } } | undefined;
-      const error = (message.error ?? (message.method === "error" ? notification?.error :
-        message.method === "turn/completed" ? notification?.turn?.error : undefined)) as
-        { codexErrorInfo?: unknown; data?: { codexErrorInfo?: unknown } } | undefined;
-      const quotaExceeded = (error?.codexErrorInfo ?? error?.data?.codexErrorInfo) === "usageLimitExceeded";
+      const quotaExceeded = isCodexQuotaError(message.error ?? (message.method === "error" ? notification?.error :
+        message.method === "turn/completed" ? notification?.turn?.error : undefined));
       if (!message.method && typeof message.id === "number") {
         const reply = pending.get(message.id);
         pending.delete(message.id);
         if (reply) logReply(message.id, reply, message.error ? "error" : "ok", receivedAt);
-        if (message.error) reply?.reject(new CodexRpcRejection(message.error.message ?? "Codex rejected the request."));
+        if (message.error) {
+          const Rejection = quotaExceeded ? CodexQuotaExceeded : CodexRpcRejection;
+          reply?.reject(new Rejection(message.error.message ?? "Codex rejected the request."));
+        }
         else reply?.resolve(message.result);
         // The quota listener may synchronously abort the connection. Keep this reply authoritative.
         if (quotaExceeded) onQuotaExceeded?.();

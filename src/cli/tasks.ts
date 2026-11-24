@@ -323,10 +323,17 @@ export function changeTask(task: Task, action: string, input: Record<string, unk
       const source = input.ownerChatSequence;
       if (source !== undefined) {
         requireRevision(task, input.revision, true);
-        const latest = task.history.findLastIndex(event => event.action === "chat" && event.actor === "user");
+        const index = typeof source === "number" ? source - 1 : -1;
+        const message = task.history[index];
+        const queued = task.pendingLimitChat ?? [];
+        const current = message?.action === "chat" && message.actor === "user" &&
+          (index === queued[0] || (
+            (queued[0] === undefined || index < queued[0]) &&
+            !task.history.slice(index + 1).some((event, offset) =>
+              event.chat && !queued.includes(index + offset + 1))
+          ));
         const authorization = text(input.authorization, "owner authorization", true);
-        if (actor !== "user" || latest < 0 || source !== latest + 1 ||
-            !task.history[latest].text?.includes(authorization)) {
+        if (actor !== "user" || !current || !message.text?.includes(authorization)) {
           throw new TaskboardError("USER_DIRECTION_REQUIRED", "Use the current owner message to change the task brief.");
         }
         if (requirementsChanged && task.history.some(event => event.ownerBriefSource === source)) {

@@ -324,6 +324,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       current.pendingLimitChat = [...(pending ?? []), task.history.length];
     } else if (repliesToPending) {
       current.pendingLimitChat = pending!.length > 1 ? pending!.slice(1) : undefined;
+      if (current.limitChatContinuation?.index === pending![0]) delete current.limitChatContinuation;
     }
     if (actor === "user" && task.status === "draft") {
       // Keep the proof for an unchanged brief while awaiting the outcome of the dialogue.

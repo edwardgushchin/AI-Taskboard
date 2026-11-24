@@ -18,6 +18,7 @@ import {
 import { boardAgentRoles, boardReviewMode, taskReviewMode, taskReviewModeVersion, hexTagColor, hasDraftConfirmation, invalidateDraftDiscussion, member, number, object, reasoningEffortPattern, record, registerTags, requireRevision, requireState, reviewModes, scheduleTimePattern, strings, tagKey, taskIdPattern, TaskboardError, text, usesIndependentReviewer, validAgentLimitOverrides } from "./model.ts";
 import { activeManagerGoal } from "./manager-goal.ts";
 import type { GitHubMilestone, Task } from "./model.ts";
+import { codexThreadPattern } from "./model.ts";
 import { exists, initializeBoard, locateBoard, onBoard, readBoardSettings, withMilestoneLinksLock, withTaskStartLock } from "./storage.ts";
 import { inheritedLimits, recordSettings } from "./settings-notices.ts";
 import { requireAutoQueue, requireReleaseTurn, updateAutoQueue } from "./auto-queue.ts";
@@ -1022,20 +1023,29 @@ function run(
   }
   if (command === "chat") {
     if (input.deferAt !== undefined) {
-      if (Object.keys(input).length !== 1) throw new TaskboardError("INVALID_INPUT", "Deferral takes only the saved message index.");
+      const threadId = input.threadId;
+      if (Object.keys(input).some(key => key !== "deferAt" && key !== "threadId") ||
+          (threadId !== undefined && (typeof threadId !== "string" || !codexThreadPattern.test(threadId)))) {
+        throw new TaskboardError("INVALID_INPUT", "Deferral takes a saved message index and an optional Codex thread ID.");
+      }
       const at = number(input.deferAt, "deferAt", 0);
       const pending = task.pendingLimitChat ?? [];
-      if (pending.includes(at)) return task;
+      const alreadyQueued = pending.includes(at);
+      if (alreadyQueued && (!threadId ||
+          task.limitChatContinuation?.index === at && task.limitChatContinuation.threadId === threadId)) return task;
       const message = task.history[at];
       if (!message?.chat || message.actor !== "user" ||
-          !task.history.slice(at + 1).every((event, offset) => !event.chat || pending.includes(at + offset + 1))) {
+          (pending[0] !== undefined && pending[0] < at) ||
+          (!alreadyQueued &&
+            !task.history.slice(at + 1).every((event, offset) => !event.chat || pending.includes(at + offset + 1)))) {
         throw new TaskboardError("CHAT_CHANGED", "The saved message is no longer awaiting a reply.");
       }
       return store.save({
         ...task,
         revision: task.revision + 1,
         updatedAt: new Date().toISOString(),
-        pendingLimitChat: [...pending, at].sort((a, b) => a - b),
+        pendingLimitChat: alreadyQueued ? pending : [...pending, at].sort((a, b) => a - b),
+        ...(threadId ? { limitChatContinuation: { index: at, threadId } } : {}),
       });
     }
     if (input.retryAt === undefined) return addChatMessage(store, task, input);

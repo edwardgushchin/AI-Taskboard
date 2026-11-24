@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexRpc, stopCodexProcess } from "../src/desktop/codex-rpc.ts";
+import { CodexQuotaExceeded, codexRpc, isCodexQuotaError, stopCodexProcess } from "../src/desktop/codex-rpc.ts";
 import { isRoutingTimeout } from "../src/desktop/codex-routing-timeout.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
@@ -49,7 +49,8 @@ test("task discussion streams task usage before success, provider failure, or a 
   writeFileSync(stub, `
     const send = value => console.log(JSON.stringify(value));
     const outcome = process.argv[2];
-    const thread = outcome.startsWith("review") ? "01234567-1234-5678-1234-123456789012" : "root";
+    const quota = outcome.startsWith("quota");
+    const thread = outcome.startsWith("review") || quota ? "01234567-1234-5678-1234-123456789012" : "root";
     require("node:readline").createInterface({ input: process.stdin }).on("line", async line => {
       const { id, method, params } = JSON.parse(line);
       if (id === undefined) return;
@@ -62,6 +63,10 @@ test("task discussion streams task usage before success, provider failure, or a 
         assert.ok(process.argv.includes(reviewing ? 'web_search="disabled"' : 'web_search="live"'));
         assert.equal(params.permissions, undefined);
         assert.equal(params.sandbox, "read-only");
+        if (quota) {
+          assert.notEqual(outcome, "quota-resume");
+          assert.equal(params.ephemeral, false);
+        }
         if (reviewing) {
           assert.equal(params.ephemeral, false, "the provider needs the review lead's rollout for native subagents");
           assert.match(params.developerInstructions, /Assigned review lead specialization: .*QA lead/);
@@ -82,6 +87,12 @@ test("task discussion streams task usage before success, provider failure, or a 
         }
         result = { thread: { id: thread }, model: "actual" };
       }
+      if (method === "thread/resume") {
+        const assert = require("node:assert/strict");
+        assert.equal(outcome, "quota-resume");
+        assert.equal(params.threadId, thread);
+        result = { thread: { id: thread }, model: "actual" };
+      }
       if (method === "turn/start") {
         require("node:assert/strict").deepEqual(params.sandboxPolicy, { type: "readOnly", networkAccess: false });
         if (outcome.startsWith("review")) {
@@ -99,6 +110,18 @@ test("task discussion streams task usage before success, provider failure, or a 
         if (outcome !== "unknown") { notify(); notify(); }
         result = { turn: { id: "turn-1", status: "inProgress" } };
         send({ id, result });
+        if (outcome === "quota-failed" || outcome === "quota-interrupted") {
+          const error = { message: "Provider quota exhausted", codexErrorInfo: "usageLimitExceeded" };
+          if (outcome === "quota-failed") {
+            send({ method: "turn/completed", params: { threadId: thread,
+              turn: { id: "turn-1", status: "failed", error } } });
+          } else {
+            send({ method: "error", params: { threadId: thread, turnId: "turn-1", willRetry: false, error } });
+            send({ method: "turn/completed", params: { threadId: thread,
+              turn: { id: "turn-1", status: "interrupted" } } });
+          }
+          return;
+        }
         if (outcome === "review") {
           const url = process.argv.find(flag => flag.startsWith("mcp_servers=")).match(/http[^"]+/)[0];
           const entry = { title: "Reviewed the task", timeline: [{ time: null, items: ["Read the submission."] }] };
@@ -133,11 +156,15 @@ test("task discussion streams task usage before success, provider failure, or a 
   `);
   const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8")
     .replace(/^import[\s\S]*?;\r?\n/gm, "").replace(/^export /gm, "");
-  for (const outcome of ["ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed"]) {
+  let discussionThreadId: string | undefined;
+  for (const outcome of [
+    "ok", "unknown", "failed", "closed", "storage-failed", "review", "review-storage-failed",
+    "quota-failed", "quota-interrupted", "quota-resume",
+  ]) {
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
       boardProjectRulesPrompt, reviewModeInstruction,
-      randomUUID, stopCodexProcess, isRoutingTimeout, codexThreadPattern,
+      randomUUID, stopCodexProcess, isRoutingTimeout, codexThreadPattern, CodexQuotaExceeded, isCodexQuotaError,
       executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool, leadInstructions, phaseStageReporter, subagentInstructions,
       leadSkillInstructions: async () => [], watchTeamMail: () => () => {},
@@ -185,13 +212,20 @@ test("task discussion streams task usage before success, provider failure, or a 
       assert.ok(counts.includes(1));
       continue;
     }
+    const discussionThread = outcome.startsWith("quota") ? {
+      id: outcome === "quota-resume" ? discussionThreadId : undefined,
+      accepted: (threadId: string) => { discussionThreadId = threadId; },
+    } : undefined;
     const reply = runtime.replyToTask("profile", folder, { model: "selected", effort: "low" }, "Prompt", [],
       () => {}, async () => ({ ok: true }), folder, 1024, async (report: TokenUsageReport) => {
         if (outcome === "storage-failed") throw new Error("Usage storage denied");
         reports.push(report);
-      });
+      }, undefined, undefined, undefined, undefined, undefined, false, false, false, undefined, discussionThread);
     if (["failed", "closed"].includes(outcome)) {
       await assert.rejects(reply, /Provider failed|process closed/);
+    } else if (outcome === "quota-failed" || outcome === "quota-interrupted") {
+      await assert.rejects(reply, CodexQuotaExceeded);
+      assert.match(discussionThreadId ?? "", codexThreadPattern);
     } else {
       const answer = await reply;
       assert.equal(answer.text, "Reply");
@@ -202,11 +236,12 @@ test("task discussion streams task usage before success, provider failure, or a 
     if (outcome === "storage-failed") continue;
     const report = reports.at(-1)!;
     assert.equal(new Set(reports.map(report => report.id)).size, 1);
-    const root = report.records.find(record => record.threadId === "root")!;
+    const rootId = outcome.startsWith("quota") ? discussionThreadId : "root";
+    const root = report.records.find(record => record.threadId === rootId)!;
     assert.equal(root.model, "actual");
     assert.equal(root.totalTokens, outcome === "unknown" ? null : 120);
-    assert.equal(root.incomplete, outcome !== "ok");
-    if (outcome !== "closed") {
+    assert.equal(root.incomplete, outcome !== "ok" && outcome !== "quota-resume");
+    if (!["closed", "quota-failed", "quota-interrupted"].includes(outcome)) {
       const child = report.records.find(record => record.threadId === "child")!;
       assert.equal(child.model, "child-model");
       assert.equal(child.incomplete, outcome === "unknown");

@@ -430,7 +430,24 @@ test("an active draft reply can finish once while newer messages wait for limits
   task = addChatMessage(store, task, answer);
   assert.deepEqual(task.pendingLimitChat, pending);
   assert.throws(() => addChatMessage(store, task, answer), { code: "CHAT_CHANGED" });
+  const update = {
+    actor: "user",
+    preserveStatus: true,
+    ownerChatSequence: pending[0] + 1,
+    authorization: "Second",
+    description: "Second requirement",
+    revision: task.revision,
+  };
+  assert.throws(() => changeTask(task, "update", {
+    ...update, ownerChatSequence: pending[1] + 1, authorization: "Third",
+  }), { code: "USER_DIRECTION_REQUIRED" });
+  task = store.save(changeTask(task, "update", update));
+  assert.equal(changeTask(task, "update", { ...update, revision: task.revision }), task);
+  assert.throws(() => changeTask(task, "update", {
+    ...update, revision: task.revision, description: "Second requirement repeated",
+  }), { code: "USER_DIRECTION_REQUIRED" });
   task = addChatMessage(store, task, { ...answer, revision: task.revision, replyTo: pending[0], text: "Answer to second" });
   assert.deepEqual(task.pendingLimitChat, pending.slice(1));
+  assert.equal(task.description, "Second requirement");
   assert.equal(task.history.filter(event => event.chat && event.actor === "agent").length, 2);
 });

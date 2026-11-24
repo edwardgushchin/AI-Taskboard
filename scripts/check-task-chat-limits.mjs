@@ -1,0 +1,370 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { plannedDraft } from "../tests/fixtures/planned-draft.ts";
+import { electronCheck } from "./electron-check.mjs";
+
+const { scratch, artifacts } = electronCheck(import.meta.url, "task-chat-limits", 180_000,
+  [["--before-restart"], ["--after-restart"]]);
+const require = createRequire(import.meta.url);
+const { app, BrowserWindow } = require("electron");
+const { transformSync } = require("esbuild");
+const { codexLimitSnapshot } = require("../src/desktop/provider-limits.ts");
+const { CodexQuotaExceeded } = require("../src/desktop/codex-rpc.ts");
+const root = fileURLToPath(new URL("../", import.meta.url));
+const project = join(scratch, "board");
+const profile = join(scratch, "profile");
+const saved = join(scratch, "scenario.json");
+const restarting = process.argv.includes("--after-restart");
+const settings = { model: "fixture-sol", effort: "high" };
+const filename = "уточнение.txt";
+const waiting = "Ожидает сброса лимита";
+const messages = {
+  budget: "Разбор черновика: сохранить отчёт в CSV.",
+  quota: "Диалог: сохранить недельный отчёт.",
+  combined: "Диалог: добавить сводку.",
+  running: "Диалог: продолжить уже начатый ответ.",
+  interrupted: "Диалог: сохранить отчёт в XLSX.",
+};
+const calls = [];
+const checks = [];
+const sessionId = "438af716-e741-4385-8a55-f23e82c5db30";
+const updatedDescription = "Сохранять итоговый отчёт в XLSX.";
+let exhausted = restarting;
+let failWrite = false;
+let writeRejected = false;
+let budgetTurn = 0;
+const gates = new Map();
+
+function cli(args, input) {
+  const result = JSON.parse(execFileSync(process.env.TASKBOARD_CHECK_NODE, [
+    "--disable-warning=ExperimentalWarning", join(root, "src/cli/main.ts"), "--project", project, "--json",
+    ...args, ...(input === undefined ? [] : ["--stdin"]),
+  ], { cwd: scratch, encoding: "utf8", windowsHide: true, input: JSON.stringify(input) }));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  return result.data;
+}
+
+async function until(label, probe) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const result = await probe();
+    if (result) return result;
+    await delay(100);
+  }
+  throw new Error("Timed out: " + label + " · " + JSON.stringify(calls));
+}
+
+function pass(message) {
+  checks.push(message);
+  console.log("PASS " + message);
+}
+
+globalThis.limitChatFixture = {
+  limits: () => Promise.resolve(codexLimitSnapshot({ rateLimits: {
+    primary: { usedPercent: exhausted ? 100 : 20, resetsAt: Date.now() / 1000 + 3600 },
+  } })),
+  rejectWrite(args) {
+    if (!failWrite || args[1][0] !== "chat" || args[2]?.text !== messages.budget) return;
+    failWrite = false;
+    writeRejected = true;
+    return { ok: false, error: { code: "BOARD_BUSY", message: "Проверка ошибки записи" } };
+  },
+  async reply(prompt, action, options) {
+    options.beforeStart?.();
+    const context = JSON.parse(prompt);
+    const request = context.latestUserMessage?.text;
+    if (!request) throw new Error("Unexpected initial discussion");
+    const docs = context.attachments.filter(file => context.latestUserMessage.files.includes(file.id));
+    calls.push({ request, docs: docs.map(file => readFileSync(file.path, "utf8")),
+      resume: options.discussionThread?.id, draft: context.task.status === "draft" });
+    options.discussionThread?.accepted(sessionId);
+    options.onControl({ interrupt: async () => { throw new Error("Explicit answer was interrupted by the board"); } });
+    if (request === messages.running) await gates.get(request).promise;
+    if (request === messages.interrupted && !options.discussionThread?.id) {
+      const result = await action("task_update", { authorization: "сохранить отчёт в XLSX", description: updatedDescription });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.data.changed, true);
+      exhausted = true;
+      await globalThis.limitChatApp.refresh();
+      throw new CodexQuotaExceeded("Fixture provider ended the turn because quota was exhausted");
+    }
+    if (request === messages.interrupted) {
+      assert.equal(context.task.description, updatedDescription);
+      assert.equal(options.discussionThread?.id, sessionId);
+    }
+    const draft = context.task.status === "draft";
+    const text = draft ? "Разбор учёл новый формат CSV." : "Ответ сохранён. " + request;
+    return { text: JSON.stringify({ text, awaitingAnswer: false, awaitingOwnerAnswer: false,
+      ...(draft ? { confirmsDraft: true } : {}) }) };
+  },
+};
+
+function compile(url, target, transform) {
+  const source = readFileSync(url, "utf8").replaceAll("import.meta.url", JSON.stringify(url.href))
+    .replace(/from "(\.\.?\/[^"\n]+)"/g, (_, path) => "from " + JSON.stringify(new URL(path, url).href));
+  writeFileSync(target, transformSync(transform(source), { loader: "ts", format: "esm" }).code);
+}
+
+const evaluate = (window, code) => window.webContents.executeJavaScript(code);
+const task = id => cli(["show", id]);
+const chat = id => task(id).history.filter(event => event.chat);
+const savedUsers = id => chat(id).filter(event => event.actor === "user");
+
+async function open(window, id) {
+  await evaluate(window, "showTask(" + JSON.stringify(id) + ", true)");
+  await until("enabled composer " + id, () =>
+    evaluate(window, "Boolean(document.querySelector('#task-chat-input:not([readonly])'))"));
+}
+
+async function send(window, message, enter, withFile = true) {
+  window.focus();
+  window.webContents.focus();
+  const file = withFile ? "const data = new DataTransfer();\n" +
+    "data.items.add(new File(['fixture attachment'], " + JSON.stringify(filename) + ", { type: 'text/plain' }));\n" +
+    "input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true }));\n" : "";
+  await evaluate(window, "(() => {\nconst input = document.querySelector('#task-chat-input');\n" + file +
+    "input.value = " + JSON.stringify(message) + ";\ninput.dispatchEvent(new Event('input'));\ninput.focus();\n})()");
+  if (enter) {
+    const protocol = window.webContents.debugger;
+    protocol.attach("1.3");
+    try {
+      await protocol.sendCommand("Input.dispatchKeyEvent", {
+        type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13,
+      });
+      await protocol.sendCommand("Input.dispatchKeyEvent", {
+        type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13,
+      });
+    } finally {
+      protocol.detach();
+    }
+  } else {
+    await evaluate(window, "document.querySelector('.task-chat .chat-send').click()");
+  }
+}
+
+async function rows(window, message, actor = "user") {
+  return evaluate(window, "Array.from(document.querySelectorAll('.task-dialogue .chat-entry[data-actor=" + actor +
+    "]')).filter(row => row.textContent.includes(" + JSON.stringify(message) + ")).map(row => row.textContent)");
+}
+
+async function waitSaved(window, id, message) {
+  await until("one queued row " + message, async () => {
+    const visible = await rows(window, message);
+    return visible.length === 1 && visible[0].includes(waiting) && visible[0].includes(filename);
+  }).catch(async error => {
+    console.error("Composer after send", await evaluate(window, "document.querySelector('.task-chat').innerText"));
+    throw error;
+  });
+  assert.equal(await evaluate(window, "document.querySelector('#task-chat-input').value"), "");
+  const entries = savedUsers(id).filter(event => event.text === message);
+  assert.equal(entries.length, 1);
+  const [file] = entries[0].chat.files;
+  assert.equal(task(id).attachments.find(item => item.file === file)?.name, filename);
+  assert.equal(Buffer.from(cli(["attachment", "read", id], { file }).base64, "base64").toString(), "fixture attachment");
+  return entries[0].chat.requestId;
+}
+
+async function capture(window, name, message, actor) {
+  await evaluate(window, "document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
+  assert.equal((await rows(window, message, actor)).length, 1);
+  const image = await window.webContents.capturePage();
+  assert.deepEqual(image.getSize(), { width: 1280, height: 800 });
+  writeFileSync(join(artifacts, name), image.toPNG());
+}
+
+async function phase() {
+  if (!restarting) {
+    mkdirSync(project);
+    mkdirSync(profile);
+    writeFileSync(join(profile, "appearance.json"), JSON.stringify({ language: "ru", theme: "dark" }));
+    symlinkSync(dirname(dirname(require.resolve("electron/package.json"))), join(scratch, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir");
+    cli(["init"], { git: false });
+    cli(["settings"], { autoMode: false, codexDailyTokens: 100, executor: { provider: "codex", ...settings } });
+  }
+  app.setPath("userData", profile);
+  app.setPath("appData", scratch);
+  app.requestSingleInstanceLock = () => true;
+  app.disableHardwareAcceleration();
+  app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
+  process.argv.push("--project", project);
+  process.env.GIT_CEILING_DIRECTORIES = scratch;
+  const source = new URL("../src/desktop/main.ts", import.meta.url);
+  const chatSource = new URL("./codex-chat.ts", source);
+  const chatEntry = join(scratch, "limits-chat.mjs");
+  const mainEntry = join(scratch, "limits-main.mjs");
+  compile(chatSource, chatEntry, value => {
+    const target = "reply(profile, project, prompt, images, runAction, { ...options, worklog, mcp: { config, env } })";
+    assert.equal(value.split(target).length, 2);
+    return value.replace(target, "globalThis.limitChatFixture.reply(prompt, runAction, options)");
+  });
+  compile(source, mainEntry, value => value
+    .replace(chatSource.href, pathToFileURL(chatEntry).href)
+    .replace("readCodexLimits(app.getPath(\"userData\"))", "globalThis.limitChatFixture.limits()")
+    .replace("import { callCli,", "import { callCli as realCallCli,")
+    .replace("codexStatus, configuredCodex,", "codexStatus, configuredCodex as realConfiguredCodex,")
+    .replace("import { chatModels,", "import { chatModels as realChatModels,") + [
+    "const callCli = (...args) => Promise.resolve(globalThis.limitChatFixture.rejectWrite(args) ?? realCallCli(...args));",
+    "const configuredCodex = async () => ({});",
+    "const chatModels = async () => [{ id: 'fixture-sol', effort: 'high', default: true, efforts: ['high'] }];",
+    "globalThis.limitChatApp = { createWindow,",
+    "  refresh: () => { readProviderLimits.invalidate(); return refreshQuota(); },",
+    "  budget: boardCodexBudget,",
+    "  isIdle: project => !projectOperations.get(project)?.size,",
+    "  spend: (project, turnId) => {",
+    "    const usage = usageForBoard(project);",
+    "    usage.observe({ threadId: 'fixture-budget', turnId, tokens: 100, observedAt: Date.now() });",
+    "    usage.flush();",
+    "    budgetUpdated(project);",
+    "  },",
+    "};",
+  ].join("\n"));
+  require(mainEntry);
+  const first = await until("first window", () => BrowserWindow.getAllWindows()[0]);
+  const second = globalThis.limitChatApp.createWindow([project]).window;
+  for (const window of [first, second]) {
+    window.setContentSize(1280, 800);
+    await until("loaded board", () =>
+      evaluate(window, "Boolean(typeof frame !== 'undefined' && frame.board)").catch(() => false));
+  }
+  const refresh = () => globalThis.limitChatApp.refresh();
+  const spend = () => globalThis.limitChatApp.spend(project, (restarting ? "restored-" : "initial-") + ++budgetTurn);
+  const reset = () => evaluate(first, "taskboard.resetBoardBudget(" + JSON.stringify(project) + ")");
+  if (!restarting) {
+    spend();
+    const draft = cli(["create"], plannedDraft({ title: "Черновик отчёта", execution: { provider: "codex", ...settings } }));
+    await open(first, draft.id);
+    failWrite = true;
+    await send(first, messages.budget, true);
+    await until("draft retained on write error", () => writeRejected && evaluate(first,
+      "document.querySelector('#task-chat-input:not([readonly])')?.value === " + JSON.stringify(messages.budget) +
+      " && Boolean(document.querySelector('.task-chat p.chat-status:not([hidden])')?.textContent)"))
+      .catch(async error => {
+        console.error("Composer after rejected send", { writeRejected, text: await evaluate(first, "document.querySelector('.task-chat').innerText") });
+        throw error;
+      });
+    assert.equal(savedUsers(draft.id).length, 0);
+    await send(first, messages.budget, true, false);
+    await waitSaved(first, draft.id, messages.budget);
+    assert.equal(calls.length, 0);
+    await capture(first, "budget-wait.png", messages.budget, "user");
+    await reset();
+    await until("draft included message in review", async () => (await rows(first, "Разбор учёл новый формат CSV.", "agent")).length);
+    assert.deepEqual(calls.map(call => [call.request, call.docs, call.draft]), [[messages.budget, ["fixture attachment"], true]]);
+    await capture(first, "draft-reply.png", "Разбор учёл новый формат CSV.", "agent");
+    pass("При дневном лимите Enter сохраняет текст и вложение в черновике. После ошибки записи черновик доступен для повторной отправки. После сброса разбор получил текст и файл.");
+
+    const existing = cli(["create"], plannedDraft({ title: "Отчёт с существующим диалогом", execution: { provider: "codex", ...settings } }));
+    const seeded = cli(["chat", existing.id], { ...settings, text: "Предыдущий вопрос." });
+    cli(["chat", existing.id], {
+      ...settings,
+      actor: "agent",
+      text: "Предыдущий ответ.",
+      replyTo: seeded.history.length - 1,
+      revision: seeded.revision,
+      awaitingAnswer: false,
+      confirmsDraft: true,
+    });
+    assert.equal(cli(["approve", existing.id]).status, "ready");
+    exhausted = true;
+    await refresh();
+    await open(first, existing.id);
+    await open(second, existing.id);
+    await send(first, messages.quota, false);
+    const requestId = await waitSaved(first, existing.id, messages.quota);
+    const duplicate = await evaluate(second, "taskboard.chatSend(" + JSON.stringify(existing.id) + ", " +
+      JSON.stringify({ ...settings, text: messages.quota, requestId, files: [] }) + ")");
+    assert.equal(duplicate.saved, true);
+    await waitSaved(second, existing.id, messages.quota);
+    spend();
+    await send(second, messages.combined, true);
+    await waitSaved(second, existing.id, messages.combined);
+    assert.equal(calls.length, 1);
+    await capture(second, "quota-wait.png", messages.combined, "user");
+    await evaluate(second, "document.querySelector('#close-sheet').click()");
+    await open(second, existing.id);
+    await waitSaved(second, existing.id, messages.combined);
+    pass("При общей квоте кнопка сохраняет текст и вложение. При двух исчерпанных лимитах Enter сохраняет вторую реплику. Два окна, повтор requestId и закрытие карточки сохраняют по одной реплике.");
+    writeFileSync(saved, JSON.stringify({ checks, existing: existing.id, pending: task(existing.id).pendingLimitChat }));
+    return;
+  }
+  const previous = JSON.parse(readFileSync(saved, "utf8"));
+  checks.push(...previous.checks);
+  const id = previous.existing;
+  await open(first, id);
+  await open(second, id);
+  assert.deepEqual(task(id).pendingLimitChat, previous.pending);
+  await waitSaved(first, id, messages.quota);
+  await waitSaved(second, id, messages.combined);
+  assert.equal((await evaluate(first, "taskboard.bootstrap()")).board.settings.autoMode, false);
+  exhausted = false;
+  await refresh();
+  assert.equal(globalThis.limitChatApp.budget(project)?.reason, "exhausted");
+  assert.equal(calls.length, 0);
+  await reset();
+  await until("both replies after reset", () => chat(id).filter(event => event.actor === "agent").length === 3);
+  assert.deepEqual(calls.map(call => [call.request, call.docs]), [
+    [messages.quota, ["fixture attachment"]],
+    [messages.combined, ["fixture attachment"]],
+  ]);
+  assert.equal(task(id).pendingLimitChat, undefined);
+  await until("reply shown in both windows", async () =>
+    (await rows(first, messages.combined, "agent")).length === 1 && (await rows(second, messages.combined, "agent")).length === 1);
+  await capture(second, "quota-reply.png", messages.combined, "agent");
+  pass("После перезапуска при выключенном авторежиме обе реплики видны в двух окнах. Снятие одной общей квоты не запускает ответ. После сброса бюджета ответы и вложения обрабатываются один раз в порядке отправки.");
+
+  gates.set(messages.running, Promise.withResolvers());
+  await send(first, messages.running, false, false);
+  await until("active reply", () => calls.some(call => call.request === messages.running));
+  spend();
+  exhausted = true;
+  await refresh();
+  gates.get(messages.running).resolve();
+  await until("active reply survives both limits", () => chat(id).some(event => event.actor === "agent" && event.text.includes(messages.running)));
+  exhausted = false;
+  await refresh();
+  await reset();
+  await send(first, messages.interrupted, false, false);
+  await until("previous reply is deferred", () => task(id).limitChatContinuation?.threadId === sessionId);
+  assert.equal(task(id).description, updatedDescription);
+  await until("interrupted reply shown as waiting", async () => (await rows(first, messages.interrupted))[0]?.includes(waiting));
+  exhausted = false;
+  await refresh();
+  await until("interrupted answer completed automatically", () =>
+    chat(id).some(event => event.actor === "agent" && event.text.includes(messages.interrupted)));
+  assert.deepEqual(calls.filter(call => call.request === messages.interrupted).map(call => call.resume), [undefined, sessionId]);
+  assert.equal(savedUsers(id).filter(event => event.text === messages.interrupted).length, 1);
+  assert.equal(task(id).history.filter(event => event.action === "update" && event.ownerBriefSource).length, 1);
+  assert.equal(task(id).limitChatContinuation, undefined);
+  pass("Начатый ответ завершён после исчерпания обоих лимитов. Прерванный провайдером ответ продолжен автоматически в том же сеансе, запись правки одна.");
+  const files = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" })
+    .trim().split(/\r?\n/).filter(Boolean);
+  const tested = [...new Set([...files, "src/desktop/chat.js", "src/desktop/renderer.js", "scripts/check-task-chat-limits.mjs"])];
+  const report = {
+    command: "node scripts/check-task-chat-limits.mjs --artifacts .tasks/qa/T-0351",
+    platform: process.platform,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    gitBase: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+    fixture: "Изолированная доска и профиль. Реальные renderer, preload, IPC, планировщик, бюджет и CLI. Лимиты и ответы Codex заданы на границе провайдера.",
+    checks,
+    sha256CheckoutBytes: Object.fromEntries(tested.map(path => [path,
+      createHash("sha256").update(readFileSync(join(root, path))).digest("hex")])),
+  };
+  writeFileSync(join(artifacts, "report.json"), JSON.stringify(report, null, 2) + "\n");
+}
+
+process.on("unhandledRejection", error => {
+  console.error(error);
+  app.exit(1);
+});
+void phase().then(async () => {
+  await until("chat operations released", () => globalThis.limitChatApp.isIdle(project));
+  app.quit();
+});

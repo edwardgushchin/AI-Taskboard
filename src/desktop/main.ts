@@ -4,7 +4,7 @@ import { russianWriting } from "./russian-writing.ts";
 import { showAbout } from "./about.ts";
 import { captureFileLink, isFileLink, verifyFileLink } from "../cli/attachment-links.ts";
 import type { FileLink } from "../cli/attachment-links.ts";
-import { CodexRpcRejection, dailyBudgetInterruption, watchCodexQuotaExceeded } from "./codex-rpc.ts";
+import { CodexQuotaExceeded, CodexRpcRejection, dailyBudgetInterruption, watchCodexQuotaExceeded } from "./codex-rpc.ts";
 import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, consumeCodexReset, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import { BoardCodexUsage, type CodexBudgetRole } from "./codex-daily-budget.ts";
@@ -1265,9 +1265,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   const limited = quotaWait ? quotaFailure() : boardBudgetFailure(project);
   const persistOnly = Boolean(limited && !automatic && request.retryAt === undefined);
   if (limited && !persistOnly) return { saved: false, result: limited };
-  if (returningDrafts.has(key) || (!persistOnly && !active && (chatRuns.has(key) || launchingTasks.has(key))) ||
-      (active && (automatic || active.draftDiscussion || request.retryAt !== undefined ||
-        active.chatWindow !== undefined && active.chatWindow !== chatWindow))) {
+  if (returningDrafts.has(key) || (!persistOnly && (!active
+    ? chatRuns.has(key) || launchingTasks.has(key)
+    : automatic || active.draftDiscussion || request.retryAt !== undefined ||
+      active.chatWindow !== undefined && active.chatWindow !== chatWindow))) {
     return { saved: false, result: cliFailure("CHAT_BUSY", t("ui.the_agent_is_already_replying_to_this_task_234378d8")) };
   }
   if (closingProjects.has(project)) return { saved: false, result: cliFailure("PROJECT_CLOSING",
@@ -1295,6 +1296,8 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
   let savedDiscussionRevision: number | undefined;
   let managerReply: number | undefined;
   let deferredIndex: number | undefined;
+  let discussionThreadId: string | undefined;
+  let settledReplyIndex: (() => Promise<number>) | undefined;
   const deferReply = new Error("The saved reply is waiting for Codex limits.");
   try {
     let { model, effort } = request;
@@ -1383,6 +1386,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     if (retryAt !== undefined && message?.chat) ({ model, effort } = message.chat);
     if (!automatic) deferredIndex = last;
+    const continuation = !automatic && task.limitChatContinuation?.index === last ? task.limitChatContinuation : undefined;
     if (!active && !automatic) {
       replyingTasks.add(key);
       publishDiscussionActivity(project, id, []);
@@ -1430,6 +1434,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         { id: dependency, error: result.error.message };
     })) : undefined;
     const prompt = JSON.stringify({
+      continuation: continuation ?
+        "Finish the interrupted reply in this conversation. Use the current saved card below. Preserve changes already made and do not repeat successful actions." :
+        undefined,
       task: { id, title: task.title, status: task.status, description: task.description,
         criteria: task.criteria, openQuestions: task.questions, awaitingAnswer: task.awaitingAnswer,
         awaitingOwnerAnswer: task.awaitingOwnerAnswer, tags: task.tags, priority: task.priority,
@@ -1470,6 +1477,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     let replyTarget: { index: number; revision: number; reviewConfirmation?: string } = { index: last, revision: task.revision };
     let actionIndex = last;
     const pendingSteering = new Set<Promise<void>>();
+    settledReplyIndex = async () => {
+      await Promise.all(pendingSteering);
+      return replyTarget.index;
+    };
     const requestChanges = async (card: Task, reason: string): Promise<CliReply> => {
       if (isManual(readBoardSettings(runtimeLocation(project)))) return cliFailure("MANUAL_BOARD", "На обычной доске статусы меняет пользователь.");
       const review = await callCli<{ revision: number; targetHead: string | null }>(project, ["review", id], { compact: true });
@@ -1525,6 +1536,9 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       automatic === undefined ? undefined : managerReply === undefined ? "initial" : "handoff",
       task.status === "review", Boolean(task.closedAt), inspectDraft, () => {
         if (!automatic && (quotaWait || boardBudgetFailure(project))) throw deferReply;
+      }, automatic ? undefined : {
+        id: continuation?.threadId,
+        accepted: threadId => { discussionThreadId = threadId; },
       })).finally(() => ready.reject(new Error("The agent session ended.")));
     if ("interrupted" in answer) return { saved, result: { ok: true as const, data: task } };
     await Promise.all(pendingSteering);
@@ -1545,8 +1559,12 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     }
     return { saved, result };
   } catch (error) {
-    if (error === deferReply && deferredIndex !== undefined) {
-      const result = await callCli<Task>(project, ["chat", id], { deferAt: deferredIndex });
+    if (!signal.aborted && deferredIndex !== undefined && (error === deferReply || error instanceof CodexQuotaExceeded)) {
+      const interruptedIndex = await settledReplyIndex?.() ?? deferredIndex;
+      const result = await callCli<Task>(project, ["chat", id], {
+        deferAt: interruptedIndex,
+        ...(discussionThreadId ? { threadId: discussionThreadId } : {}),
+      });
       return { saved, result };
     }
     if (signal.reason === dailyBudgetInterruption) return { saved, result: dailyBudgetFailure() };
