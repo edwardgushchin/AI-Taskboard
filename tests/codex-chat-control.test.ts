@@ -60,7 +60,7 @@ test("an executor access request gets an independent manager decision scoped to 
   let answer = "";
   let calls = 0;
   const request = runInNewContext(stripTypeScriptTypes(source) + "\nreply = managerReply; requestExecutorAccess", {
-    AbortSignal, cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
+    AbortSignal, responseLanguageInstructions, cliFailure: (code: string, message: string) => ({ ok: false, error: { code, message } }),
     callCli: async (_project: string, argv: string[]) => {
       assert.equal(argv[1], task.id);
       return { ok: true, data: task };
@@ -78,6 +78,7 @@ test("an executor access request gets an independent manager decision scoped to 
       assert.equal(options.tools.length, 0);
       assert.equal(options.finalAnswerSchema.properties.approved.type, "boolean");
       assert.match(options.instructions, /read-only shell does not limit that decision/);
+      assert.ok(options.instructions.includes(responseLanguageInstructions()));
       return { text: answer };
     },
   });
