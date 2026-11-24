@@ -127,7 +127,7 @@ app.whenReady().then(async () => {
         }
         const turns = cursor ? makeTurns(project + ' · страница архива ' + cursor + ' · реплика ', 30) : recent[project];
         const nextCursor = cursor === '2' ? null : cursor === '1' ? '2' : '1';
-        return { ok: true, data: { turns, nextCursor } };
+        return { ok: true, data: { turns: structuredClone(turns), nextCursor } };
       };
       const tabs = boardNames.map(path => ({ path, name: path }));
       const board = { tasks: [], archived: [], settings: {} };
@@ -231,8 +231,13 @@ app.whenReady().then(async () => {
           go('Orion');
         `);
         await settle();
-        await check("end() && Boolean(row('Orion · новая реплика 0')) && input().value === 'Черновик Orion'",
-          "Orion follows the new reply and retains its draft");
+        const latest = await evaluate(`({
+          distance: feed().scrollHeight - feed().scrollTop - feed().clientHeight,
+          delivered: Boolean(row('Orion · новая реплика 0')),
+          draft: input().value,
+        })`);
+        assert.ok(latest.distance <= 1 && latest.delivered && latest.draft === "Черновик Orion",
+          `Orion follows the new reply and retains its draft: ${JSON.stringify(latest)}`);
         await evaluate("go('Atlas')");
         await settle();
         const tops = await evaluate("[recorded.top, feed().scrollTop]");

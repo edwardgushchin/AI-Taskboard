@@ -49,6 +49,7 @@ app.whenReady().then(async () => {
       window.taskboard = {
         providerLimits: async () => window.fixture,
         onProviderLimitsChanged: callback => { window.refreshFixture = callback; },
+        onBoardBudgetChanged: () => {},
       };
       ${localizationFixture()}
       ${read("provider-limits.js")}

@@ -4,7 +4,7 @@ import { skillEvidence } from "./skill-evidence.ts";
 import { previewRunActivity, runActivity } from "./run-activity.ts";
 import { stageRunJournal } from "./stage-run-history.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
-import type { teamInbox } from "../cli/expert-team.ts";
+import type { claimTeamMailNotification } from "../cli/expert-team.ts";
 import type { Expert } from "../cli/experts.ts";
 import { codexThreadPattern } from "../cli/model.ts";
 import type { ExpertPhase, RunActivity } from "../cli/model.ts";
@@ -63,16 +63,13 @@ export function watchTeamMail(project: string, taskId: string, control: AgentCon
   const timer = setInterval(() => {
     if (reading) return;
     reading = true;
-    void callCli<ReturnType<typeof teamInbox>>(project, ["expert-inbox", taskId], { actor, afterSequence }).then(async inbox => {
-      if (stopped || !inbox.ok || !inbox.data.messages.length) return;
-      const sequence = Math.max(...inbox.data.messages.map(message => message.sequence));
-      if (actor === "agent" || inbox.data.messages.some(message =>
-        message.from !== "reviewer" && !message.from.startsWith("review:"))) {
-        await control.steer("AI Taskboard: new addressed team mail through sequence " + sequence +
+    void callCli<ReturnType<typeof claimTeamMailNotification>>(project, ["expert-notify", taskId], { actor, afterSequence })
+      .then(async claim => {
+        if (stopped || !claim.ok || claim.data.sequence === null) return;
+        await control.steer("AI Taskboard: new addressed team mail through sequence " + claim.data.sequence +
           ". Read team_inbox and coordinate with the sender. Owner questions need a human answer.", []);
-      }
-      afterSequence = sequence;
-    }).catch(() => { /* Persisted mail remains available; retry on the next pass. */ }).finally(() => { reading = false; });
+      }).catch(() => { /* The recipient can read the persisted reply when its turn resumes. */ })
+      .finally(() => { reading = false; });
   }, 2000);
   timer.unref();
   return () => {

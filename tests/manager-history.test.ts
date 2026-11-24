@@ -15,7 +15,7 @@ import type { Task } from "../src/cli/model.ts";
 import { goalActivityItems, hasManagerImageView, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readManagerDialogue, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory } from "../src/desktop/manager-history.ts";
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import type { ReviewedSubmission } from "../src/desktop/board-actions.ts";
-import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
+import { backgroundDialogueHistory, backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
 
 function fixture(t: import("node:test").TestContext) {
   const project = mkdtempSync(join(tmpdir(), "ai-taskboard-local-history-"));
@@ -526,6 +526,29 @@ test("unclassified shared turns and background reviews are hidden in both views"
   assert.deepEqual(readManagerHistory(project, null, "work")!.turns, []);
 });
 
+
+test("background dialogue reads current and older pages and preserves provider fallback", async t => {
+  const project = fixture(t);
+  const other = fixture(t);
+  const start = 1_760_000_000_000;
+  for (let index = 0; index < 22; index++) {
+    saveManagerHistory(project, start + index, randomUUID(), {
+      lane: "chat", message: { text: "Message " + index, files: [] }, items: [],
+    });
+  }
+  const [recent, empty] = await Promise.all([
+    backgroundDialogueHistory(project, null, true),
+    backgroundDialogueHistory(other, null, false),
+  ]);
+  assert.equal(empty.local, undefined);
+  assert.deepEqual(recent.local, readManagerHistory(project, null, "chat"));
+  const older = (await backgroundDialogueHistory(project, recent.local!.nextCursor, true)).local!;
+  assert.equal(older.turns[0]!.messages[0]!.text, "Message 0");
+  assert.equal(older.nextCursor, "provider:");
+  assert.deepEqual(await backgroundDialogueHistory(project, older.nextCursor, true), { providerCutoff: start });
+  await assert.rejects(backgroundDialogueHistory(project, "invalid", false), /Invalid manager history cursor/);
+  assert.deepEqual((await backgroundDialogueHistory(project, null, false)).local, recent.local);
+});
 
 test("message timestamps survive saved streaming updates, reopening and older pages", t => {
   const project = fixture(t);

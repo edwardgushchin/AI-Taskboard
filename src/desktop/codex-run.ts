@@ -36,11 +36,11 @@ import type { Expert } from "../cli/experts.ts";
 import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions, watchTeamMail } from "./expert-tools.ts";
 import { insideProject } from "./project-files.ts";
 import { findQueuedTurn, missingCodexThread } from "./codex-queued-turn.ts";
-import { isRoutingTimeout } from "./codex-routing-timeout.ts";
+import { isRoutingDiscoveryFailure } from "./codex-routing-retry.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; completedAt?: number | null; error?: { message?: string } | null };
-type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean; routingTimeout?: boolean; unconfirmed?: boolean };
+type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean; routingDiscoveryFailure?: boolean; unconfirmed?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
 type QueuedTurn = {
   clientId: string;
@@ -402,7 +402,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       const turn = turns.get(turnId)!;
       if (turn.status !== "completed") failure = {
         reason: turn.error?.message || "Codex ended the task run: " + turn.status + ".",
-        ...(isRoutingTimeout(turn) ? { routingTimeout: true } : {}),
+        ...(isRoutingDiscoveryFailure(turn) ? { routingDiscoveryFailure: true } : {}),
         ...(turn.status === "interrupted" ? { interrupted: true } : {}),
       };
     } catch (error) {
@@ -558,6 +558,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       "Рабочая папка: " + cwd,
       JSON.stringify({ title: task.title, description: task.description, criteria: task.criteria, summary: task.summary, nextStep: task.nextStep }),
       "Use the current description and criteria as active requirements. Resolve confirmed defects in the feedback within that scope. If a remark conflicts with an explicit requirement, preserve the requirement and ask the owner to decide.",
+      "If you are continuing after asking a question through team_message, read team_inbox for the linked reply before proceeding.",
       ...(task.feedback ? ["Замечание к последней сдаче: " + task.feedback] : []),
     ].join("\n");
     activeThreadId = threadId;
@@ -596,9 +597,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
     worklog.start(threadId, turn.id);
     activeTurnId = turn.id;
     control = turnControl(request, threadId, turn.id);
-    if (assigned.size || task.expertStage || task.expertStages?.length) {
-      stopMail = watchTeamMail(project, task.id, control, "agent");
-    }
+    stopMail = watchTeamMail(project, task.id, control, "agent");
     const startedUsage = recovered ? tokens.recover(threadId, recovered) : tokens.begin(threadId, turn.id);
     const terminal = turns.get(turn.id) ?? (turn.status !== "inProgress" ? turn : undefined);
     const completedUsage = !recovered && terminal ? tokens.completeTurn(threadId, terminal, Date.now()) : undefined;

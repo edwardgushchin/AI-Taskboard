@@ -25,6 +25,8 @@ const seed = process.argv.includes("--seed");
 const reviewCrash = process.argv.includes("--review-crash");
 const restore = process.argv.includes("--restore");
 const timeout = "workspace routing discovery timed out";
+const failure = "workspace routing discovery failed";
+const retryFailure = failure + ".";
 const evidencePath = join(scratch, "evidence.json");
 const reviewCrashPath = join(scratch, "review-crash.json");
 
@@ -47,10 +49,11 @@ function provider() {
   const { join } = require("node:path");
   const { spawnSync } = require("node:child_process");
   const { createInterface } = require("node:readline");
-  const [log, timeout, casesPath, cliPath, project, ...flags] = process.argv.slice(2);
+  const [log, timeout, failure, retryFailure, casesPath, cliPath, project, ...flags] = process.argv.slice(2);
   const cases = JSON.parse(readFileSync(casesPath, "utf8"));
   let threadId;
   let cwd;
+  const routingError = message => ({ message, codexErrorInfo: "other", additionalDetails: null });
   const send = message => console.log(JSON.stringify(message));
   const records = () => existsSync(log)
     ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line))
@@ -118,7 +121,7 @@ function provider() {
       record(method, { history });
       result = { data: starts.filter(event => event.number === 1 || history).reverse().map(event => ({
         id: event.turnId, status: event.number === 1 ? "failed" : "interrupted", completedAt: event.at,
-        ...(event.number === 1 ? { error: { message: timeout } } : {}),
+        ...(event.number === 1 ? { error: routingError(failure) } : {}),
         itemsView: "full", items: [{ type: "userMessage", clientId: event.clientId }],
       })) };
     } else if (method === "turn/start") {
@@ -132,7 +135,11 @@ function provider() {
         send({ id, result: { turn: { id: turnId, status: "inProgress" } } });
         let turn = { id: turnId, status: "completed" };
         if (number <= 2) {
-          turn = { id: turnId, status: "failed", error: { message: timeout } };
+          turn = {
+            id: turnId,
+            status: "failed",
+            error: routingError(number === 1 ? failure : retryFailure),
+          };
         } else {
           const text = JSON.stringify({
             summary: "Fixture review passed.", findings: [],
@@ -169,7 +176,13 @@ function provider() {
           cli("expert-stage", task.id, { ...stage, key: "verify", state: "running", threadId });
         }
         writeFileSync(join(cwd, "saved-change.txt"), "Saved during the first turn.\n");
-        turn = { id: turnId, status: "failed", error: { message: timeout } };
+        let message = failure;
+        if (testCase.scenario === "stop") {
+          message = timeout;
+        } else if (number === 2) {
+          message = retryFailure;
+        }
+        turn = { id: turnId, status: "failed", error: routingError(message) };
       } else if (testCase.scenario === "success") {
         const task = cli("show", testCase.id);
         cli("expert-stage", testCase.id, {
@@ -188,6 +201,7 @@ function provider() {
         });
         turn = { id: turnId, status: "completed" };
       }
+      record("turn/completed", { turnId, status: turn.status, error: turn.error });
       send({ method: "turn/completed", params: { threadId, turn } });
       return;
     }
@@ -216,7 +230,7 @@ if (seed) {
   const cases = {};
   for (const [scenario, title] of [
     ["success", "Проверить отчёт в той же рабочей папке"],
-    ["limit", "Ограничить повторяющийся тайм-аут"],
+    ["limit", "Ограничить повторяющийся сбой маршрутизации"],
     ["stop", "Остановить ожидающий повтор"],
     ["cancel", "Отменить карточку во время ожидания"],
     ["unknown", "Сверить исход хода после разрыва"],
@@ -255,7 +269,9 @@ app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 app.requestSingleInstanceLock = () => true;
 globalThis.routingCheckClient = {
-  path: node, args: [providerPath, log, timeout, casesPath, cliPath, project], windowsSandbox: "mxc",
+  path: node,
+  args: [providerPath, log, timeout, failure, retryFailure, casesPath, cliPath, project],
+  windowsSandbox: "mxc",
 };
 function instrument(name, transform) {
   const source = new URL("../src/desktop/" + name + ".ts", import.meta.url);
@@ -267,8 +283,8 @@ function instrument(name, transform) {
   return output;
 }
 function interceptReviewCleanup(code) {
-  const cleanup = /(result\.error\.code === "CODEX_ROUTING_TIMEOUT"\) \{[\s\S]*?)(rmSync\(checkpointToRemove, \{ force: true \}\))/g;
-  assert.equal([...code.matchAll(cleanup)].length, 1, "instrument exactly one routing timeout checkpoint removal");
+  const cleanup = /(result\.error\.code === "CODEX_ROUTING_RETRY"\) \{[\s\S]*?)(rmSync\(checkpointToRemove, \{ force: true \}\))/g;
+  assert.equal([...code.matchAll(cleanup)].length, 1, "instrument exactly one routing retry checkpoint removal");
   return code.replace(cleanup, '$1globalThis.routingCheckCrash(checkpointToRemove)');
 }
 globalThis.routingCheckCrash = path => {
@@ -381,23 +397,28 @@ async function captureWaiting(window) {
   })()`), "visible wait and stop action");
   assert.match(viewport.label, /Ожидание повтора Codex|Waiting to retry Codex/);
   assert.equal(Math.abs(viewport.width - 1280) <= 16, true, JSON.stringify(viewport));
-  assert.equal(Math.abs(viewport.height - 900) <= 16, true, JSON.stringify(viewport));
+  assert.equal(Math.abs(viewport.height - 800) <= 16, true, JSON.stringify(viewport));
   await window.webContents.capturePage();
   await wait(200);
   const image = await window.webContents.capturePage();
   assert.equal(image.isEmpty(), false);
-  writeFileSync(join(artifacts, "codex-timeout-retry.png"), image.toPNG());
+  writeFileSync(join(artifacts, "codex-routing-retry.png"), image.toPNG());
   return { ...viewport, pixels: image.getSize(), zoom: window.webContents.getZoomFactor() };
 }
 
 async function checkSeed(window) {
+  const snapshot = sourceSnapshot();
   await launch(window, cases.success);
   await waiting(window, cases.success);
   assert.equal((await card(window, cases.success)).status, "in_progress");
+  const completed = records().filter(event => event.cwd === cases.success.cwd && event.method === "turn/completed");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].status, "failed");
+  assert.deepEqual(completed[0].error, { message: failure, codexErrorInfo: "other", additionalDetails: null });
   const viewport = await captureWaiting(window);
   assert.equal(turns(cases.success).length, 1);
   await released();
-  writeFileSync(evidencePath, JSON.stringify({ viewport, seedPid: process.pid, snapshot: sourceSnapshot() }));
+  writeFileSync(evidencePath, JSON.stringify({ viewport, seedPid: process.pid, snapshot }));
 }
 
 async function checkBeforeReviewCrash(window) {
@@ -442,12 +463,14 @@ async function checkRestore(window) {
   } finally {
     release();
   }
-  assert.equal((await blocked(window, cases.limit)).blocked.reason, timeout);
+  assert.equal((await blocked(window, cases.limit)).blocked.reason, retryFailure);
   assert.equal(turns(cases.limit).length, 2);
   await released();
   console.log("PASS: two windows, occupied slot and executor retry limit");
   await launch(window, cases.stop);
   await waiting(secondWindow, cases.stop);
+  const timeoutTurn = records().find(event => event.cwd === cases.stop.cwd && event.method === "turn/completed");
+  assert.equal(timeoutTurn?.error?.message, timeout);
   await show(secondWindow, cases.stop);
   await clickVisible(secondWindow, "#task-stop-waiting");
   await until(async () => !(await frame(secondWindow)).waitingTasks.includes(cases.stop.id), "owner stopped the pending retry");
@@ -538,8 +561,8 @@ async function checkReviewWaiting(window, evidence) {
   assert.equal(current.expertReviewPlanned, true, JSON.stringify(current));
   await until(async () => {
     const retry = (await frame(window))?.routingRetries?.[testCase.id];
-    return reviewTurns().length === 1 && retry?.reason === timeout && !retry.exhausted;
-  }, "independent review queued after the first timeout");
+    return reviewTurns().length === 1 && retry?.reason === failure && !retry.exhausted;
+  }, "independent review queued after the first routing failure");
 }
 
 async function checkReviewAfterCrash(window, initial) {
@@ -547,7 +570,7 @@ async function checkReviewAfterCrash(window, initial) {
   const crash = JSON.parse(readFileSync(reviewCrashPath, "utf8"));
   assert.notEqual(process.pid, crash.pid, "a new Electron process opened the board");
   assert.equal(crash.exhausted, true, "the exhausted flag must be on disk before checkpoint cleanup");
-  assert.equal(crash.reason, timeout);
+  assert.equal(crash.reason, retryFailure);
   const persistedRetry = () => runtimeEntries(project).find(entry => entry.task === "review-retry:" + testCase.id)?.reviewRetry;
   assert.equal(persistedRetry()?.exhausted, true, "the restarted process sees the exhausted flag");
   const unchangedCheckpoint = () => createHash("sha256").update(readFileSync(reviewCheckpoint(testCase.id))).digest("hex");
@@ -564,7 +587,7 @@ async function checkReviewAfterCrash(window, initial) {
     const status = document.querySelector("#task-agent-run");
     const button = status?.querySelector("button");
     return button?.checkVisibility() && /Повторить ревью|Retry review/.test(button.innerText) &&
-      status.innerText.includes(${JSON.stringify(timeout)});
+      status.innerText.includes(${JSON.stringify(retryFailure)});
   })()`), "visible reason and manual review retry action after restart");
   await wait(5_600);
   assert.ok(Date.now() >= crash.notBefore, "pass the saved deadline");
@@ -602,7 +625,7 @@ function sourceSnapshot() {
     "scripts/check-codex-routing-retry.mjs", "scripts/electron-check.mjs",
     "src/cli/main.ts", "src/desktop/agent-limits.ts", "src/desktop/board-actions.ts",
     "src/desktop/board-runtime.ts", "src/desktop/codex-chat.ts", "src/desktop/codex-queued-turn.ts",
-    "src/desktop/codex-routing-timeout.ts", "src/desktop/codex-run.ts", "src/desktop/locales/en.json",
+    "src/desktop/codex-routing-retry.ts", "src/desktop/codex-run.ts", "src/desktop/locales/en.json",
     "src/desktop/locales/ru.json", "src/desktop/main.ts", "src/desktop/preload.cjs", "src/desktop/renderer.js",
     ...git("diff", "--name-only", "HEAD").split(/\r?\n/),
     ...git("ls-files", "--others", "--exclude-standard").split(/\r?\n/),
@@ -616,23 +639,25 @@ function sourceSnapshot() {
 
 function writeReport({ viewport, delay, snapshot }) {
   assert.deepEqual(sourceSnapshot(), snapshot, "Product sources stayed unchanged throughout the run");
-  writeFileSync(join(artifacts, "codex-timeout-retry-check.txt"), [
-    "Восстановление хода Codex после тайм-аута — Windows Electron",
+  writeFileSync(join(artifacts, "codex-routing-retry-check.txt"), [
+    "Восстановление хода Codex после сбоя маршрутизации — Windows Electron",
     "",
     "Команда: node scripts/check-codex-routing-retry.mjs --artifacts .tasks/qa",
     "Windows " + process.getSystemVersion() + ", Electron " + process.versions.electron +
       ", Chromium " + process.versions.chrome + ", Node Electron " + process.versions.node,
     "",
+    "Тестовый App Server прислал turn/completed со статусом failed, error.message = «" + failure +
+      "», codexErrorInfo = other и additionalDetails = null.",
     "Ожидание: " + viewport.label.trim() + ". Доступно действие: " + viewport.stop.trim() + ".",
     "Снимок " + viewport.width + "×" + viewport.height + " CSS, " + viewport.pixels.width + "×" +
       viewport.pixels.height + " PNG, масштаб " + viewport.zoom + ".",
     "После перезапуска с выключенным авторежимом прошёл один повтор через " + delay +
       " мс. Чат, рабочая папка и сохранённая правка совпали. Этап проверки завершился, сдача записана один раз.",
-    "Два окна показали одну очередь. Занятый слот удержал повтор. Второй тайм-аут заблокировал карточку с исходной причиной. Следующий ход начался только после ручного запуска.",
-    "Остановка из второго окна и отмена через CLI прекратили ожидание. Другая ошибка была записана как причина блокировки без повтора.",
+    "Два окна показали одну очередь. Занятый слот удержал повтор. Второй сбой заблокировал карточку с последним сообщением: " + retryFailure + " Следующий ход начался после ручного запуска.",
+    "Прежняя ошибка " + timeout + " также поставила карточку в очередь. Остановка из второго окна и отмена другой карточки через CLI сняли ожидание. Произвольная ошибка провайдера заблокировала карточку без повтора.",
     "Со включённым авторежимом при неизвестном исходе повторного хода приложение ждало историю. После ещё одного перезапуска и появления хода в истории очередь снялась, нового запроса turn/start не было.",
     "После циклов запуска, выхода и сверки все PID тестовых провайдеров завершились, слоты и временные каталоги исполнителей освобождены.",
-    "Независимое ревью повторило исходную сдачу после задержки. На втором тайм-ауте стенд прервал Electron перед удалением контрольной точки. Исчерпание попыток уже было записано на диск.",
+    "Независимое ревью повторило исходную сдачу после задержки. На втором сбое стенд прервал Electron перед удалением контрольной точки. Исчерпание попыток уже было записано на диск.",
     "После перезапуска та же контрольная точка осталась на диске. Карточка осталась на проверке, в ней видны причина и действие «Повторить ревью». После срока повтора было ровно два запуска ревью. Нажатие кнопки запустило одно ревью той же сдачи и сохранило одобрение. Событие submit осталось единственным.",
     "Тестовый App Server передаёт ошибку завершения по JSON-RPC. Живая модель, Linux, macOS и установщики не проверялись.",
     "",
@@ -646,7 +671,7 @@ void app.whenReady().then(async () => {
     const [current] = BrowserWindow.getAllWindows();
     return current && (await frame(current))?.board && current;
   }, "board");
-  window.setContentSize(1280, 900);
+  window.setContentSize(1280, 800);
   window.webContents.setZoomFactor(1);
   window.webContents.setBackgroundThrottling(false);
   if (seed) await checkSeed(window);
