@@ -12,7 +12,7 @@ import type { Repository } from "./git.ts";
 import { boardAgentRoles, codexThreadPattern, defaultBoardAgents, defaultCodexDailyResetTime, githubRepositoryPattern, hexTagColor, legacyTagColors, reasoningEffortPattern, registerTags, reviewModes, scheduleTimePattern, tagKey, TaskboardError, taskIdPattern, taskStates, validAgentLimitOverrides, validDueDate, validScheduleDate } from "./model.ts";
 import type { BoardIndex, Task } from "./model.ts";
 import { parseUsageReport, tokenFields, totalTokenUsage } from "./token-usage.ts";
-import { writeBoardProjectRules } from "./board-agents.ts";
+import { migrateBoardProjectRules } from "./board-agents.ts";
 
 function stat(path: string) {
   try {
@@ -76,8 +76,9 @@ export function readJson(path: string): unknown {
   }
 }
 
-export function writeAtomic(path: string, contents: string | Uint8Array, beforeReplace?: () => void): void {
-  requireRegular(path);
+export function writeAtomic(path: string, contents: string | Uint8Array, beforeReplace?: () => void,
+  replaceSymlink = false): void {
+  if (!replaceSymlink || !stat(path)?.isSymbolicLink()) requireRegular(path);
   const temporary = join(dirname(path), "." + basename(path) + "." + randomUUID() + ".tmp");
   const file = openSync(temporary, "wx");
   try {
@@ -623,7 +624,7 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
         settings: { boardType, ...(boardType === "manual" ? { manualColumns: defaultColumns(), autoMode: false } : {}), archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...defaultBoardAgents },
         tags: [], tasks: {}, archive: {},
       };
-      withProjectRulesLock(location, () => writeBoardProjectRules(location.root));
+      withProjectRulesLock(location, () => migrateBoardProjectRules(location.root, false));
       writeJson(path, board);
     }
     const store = new BoardStore(location);

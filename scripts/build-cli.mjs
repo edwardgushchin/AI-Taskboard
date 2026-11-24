@@ -26,10 +26,20 @@ for (const name of ["LICENSE", "NOTICE", "README.md", "THIRD_PARTY_NOTICES.md"])
 const nodeLicenseUrl = `https://raw.githubusercontent.com/nodejs/node/v${process.versions.node}/LICENSE`;
 const nodeLicense = await fetch(nodeLicenseUrl, { signal: AbortSignal.timeout(30000) });
 if (!nodeLicense.ok) throw new Error(`Cannot read Node.js license: ${nodeLicense.status} ${nodeLicenseUrl}`);
+const bundledLicenses = [
+  ["fflate", "LICENSE"],
+  ["semver", "LICENSE"],
+  ["markdown-it", "LICENSE"],
+  ["entities", "LICENSE"],
+  ["linkify-it", "LICENSE"],
+  ["mdurl", "LICENSE"],
+  ["punycode.js", "LICENSE-MIT.txt"],
+  ["uc.micro", "LICENSE.txt"],
+];
 writeFileSync(join(directory, "THIRD-PARTY-NOTICES.txt"),
   `Node.js ${process.versions.node} and bundled components\n${nodeLicenseUrl}\n\n${await nodeLicense.text()}\n\n` +
-  `fflate\n\n${readFileSync(join(root, "node_modules/fflate/LICENSE"), "utf8")}\n\n` +
-  `semver\n\n${readFileSync(join(root, "node_modules/semver/LICENSE"), "utf8")}`);
+  bundledLicenses.map(([name, license]) =>
+    `${name}\n\n${readFileSync(join(root, "node_modules", name, license), "utf8")}`).join("\n\n"));
 
 await build({
   entryPoints: [join(root, "src", "cli", "main.ts")],

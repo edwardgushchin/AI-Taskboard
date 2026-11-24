@@ -2320,7 +2320,7 @@ function draftComposer() {
   goalPending.setAttribute("role", "status");
   goalPending.hidden = true;
   const goalActions = element("div", undefined, "board-goal-actions");
-  const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
+  const saveGoal = button("", () => changeGoal("edit", goalText.value), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
   const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
@@ -2368,7 +2368,7 @@ function draftComposer() {
     bindLocalized(goalPending, "textContent", () => t(clearingGoal
       ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
       : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
-    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
+    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
   const showGoal = goal => {
@@ -2413,7 +2413,7 @@ function draftComposer() {
     try {
       const result = await api.boardGoal(kind, objective);
       if (!result.ok) throw new Error(boardError(result.error));
-      if (kind === "edit" && goalText.value.trim() === objective) goalText.value = result.data?.objective ?? "";
+      if (kind === "edit" && goalText.value === objective) goalText.value = result.data?.objective ?? "";
       if (revision === goalRevision) editor.updateGoal(result.data);
     } catch (error) {
       goalError.textContent = error.message;
@@ -3728,8 +3728,8 @@ function draftComposer() {
     }).catch(() => {});
   }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
-  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId) => {
-    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId);
+  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences) => {
+    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences);
     if (!result.ok) throw new Error(boardError(result.error));
     return result.data;
   };
@@ -3805,19 +3805,22 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false, inFlight } of jobs) {
+      for (const { id, draft, quotedReferences, goal, files, failed = false, inFlight } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight);
+          const submitted = files.map(file => file.link
+            ? { ...file, size: file.link.size }
+            : new File([file.bytes], file.name, { type: file.type }));
+          enqueue(id, draft, goal, submitted, failed, inFlight, quotedReferences);
           continue;
         }
         const changedFlight = job.inFlight !== inFlight;
         job.inFlight = inFlight;
         if (!job.editing && !job.sending) {
-          if (draft !== job.draft) {
+          if (draft !== job.draft || quotedReferences !== job.quotedReferences) {
             job.draft = draft;
-            job.request = draft.trim();
+            job.quotedReferences = quotedReferences;
             updateQueuedPreview(job);
           }
           if (failed !== job.failed || changedFlight) {
@@ -3917,7 +3920,6 @@ function draftComposer() {
           validate();
         }
         job.draft = edit.value;
-        job.request = edit.value.trim();
         updateQueuedPreview(job);
       }
       job.preview.hidden = false;
@@ -3929,7 +3931,9 @@ function draftComposer() {
     };
     const saveButton = button(() => t("ui.save_7eea8139"), () => finish(true), "quiet");
     const cancel = button(() => t("ui.cancel_4c6dcc32"), () => finish(false), "quiet");
-    const validate = () => { saveButton.disabled = !edit.value.trim() && (job.goal || !job.submitted.length); };
+    const validate = () => {
+      saveButton.disabled = !edit.value.trim() && !job.quotedReferences && (job.goal || !job.submitted.length);
+    };
     edit.addEventListener("input", validate);
     edit.addEventListener("keydown", event => {
       if (event.isComposing) return;
@@ -4193,7 +4197,7 @@ function draftComposer() {
     event.preventDefault();
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const text = input.value;
-    const draft = quoteMessage(text, quotes);
+    const quotedReferences = quoteMessage("", quotes);
     const goal = goalMode;
     const submitted = [...files];
     const replies = log.querySelectorAll(".board-manager-message[data-message-id]");
@@ -4206,7 +4210,7 @@ function draftComposer() {
     quoteDraft.sync();
     try {
       await restoreQueue();
-      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted), reviewModeQuestionId);
+      id = await queueStorage("add", undefined, text, goal, await pasteFiles(submitted), reviewModeQuestionId, quotedReferences);
     } catch (error) {
       if (!disposed) message(error.message);
       return;
@@ -4229,7 +4233,7 @@ function draftComposer() {
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
     if (active?.id !== id && !queued.some(job => job.id === id)) {
-      enqueue(id, draft, goal, submitted);
+      enqueue(id, text, goal, submitted, false, false, quotedReferences);
     }
     openChat();
     showWork(goal);
@@ -4237,12 +4241,13 @@ function draftComposer() {
     syncAction();
   });
   function updateQueuedPreview(job) {
+    const message = [job.draft, job.quotedReferences].filter(Boolean).join("\n\n");
+    job.request = job.goal ? message : message.trim();
     job.preview.textContent = job.request.replace(/\s+/g, " ") || job.messageFiles.map(file => file.name).join(", ");
     job.preview.title = job.preview.textContent.slice(0, 180);
     if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false) {
-    const request = draft.trim();
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, quotedReferences) {
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
@@ -4251,7 +4256,7 @@ function draftComposer() {
     });
     const row = element("div", undefined, "board-queued-row");
     row.setAttribute("role", "listitem");
-    const handle = goal ? undefined : element("button", undefined, "button quiet board-queue-handle");
+    const handle = goal ? undefined : reorderHandle();
     row.append(handle ?? icon("target"));
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
@@ -4270,29 +4275,21 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight };
+    const job = { id, row, preview, status, handle, draft, quotedReferences, goal, submitted, messageFiles, failed, inFlight };
     queued.push(job);
     if (handle) {
-      handle.type = "button";
-      handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
-      handle.append(icon("gripper"));
       handle.addEventListener("dragstart", event => {
         if (!canMove(job) || movingQueue) { event.preventDefault(); return; }
         draggedJob = job;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", job.id);
-        event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+        startReorderDrag(event, row, job.id);
       });
       handle.addEventListener("dragend", () => {
         draggedJob = undefined;
         clearQueueDrop();
       });
-      handle.addEventListener("keydown", event => {
-        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-        event.preventDefault();
+      bindReorderKeys(handle, after => {
         const pending = queued.filter(canMove);
         const index = pending.indexOf(job);
-        const after = event.key === "ArrowDown";
         const target = pending[index + (after ? 1 : -1)];
         if (index >= 0 && target) void moveQueueJob(job, target, after);
       });
@@ -5625,15 +5622,35 @@ function settings() {
   if (frame.board) body.append(button(() => t("experts.title"), () => expertSettings()));
 }
 
+function reorderHandle() {
+  const handle = element("button", undefined, "button quiet board-queue-handle");
+  handle.type = "button";
+  handle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+  handle.append(icon("gripper"));
+  return handle;
+}
+
+function startReorderDrag(event, row, id) {
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", id);
+  event.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2);
+}
+
+function bindReorderKeys(handle, move) {
+  handle.addEventListener("keydown", event => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    move(event.key === "ArrowDown");
+  });
+}
+
 function appendProjectRules(project, before) {
   const form = element("form", undefined, "form");
-  const label = element("label", () => t("projectRules.label"));
-  const input = element("textarea");
-  input.name = "projectRules";
-  input.rows = 5;
-  label.append(input);
+  const label = element("legend", () => t("projectRules.label"));
+  const fields = element("fieldset", undefined, "form");
+  const list = element("div", undefined, "form");
+  list.setAttribute("role", "list");
   const help = element("small", () => t("projectRules.help"), "muted");
-  help.id = "board-project-rules-help";
   const status = element("p", "", "muted");
   status.setAttribute("role", "status");
   const savedLabel = element("label", () => t("projectRules.current"));
@@ -5643,12 +5660,98 @@ function appendProjectRules(project, before) {
   savedLabel.append(saved);
   savedLabel.hidden = true;
   const save = element("button", () => t("projectRules.save"), "button primary");
-  input.setAttribute("aria-describedby", help.id);
-  input.disabled = save.disabled = true;
-  form.append(label, help, savedLabel, status, save);
+  const add = button(() => t("projectRules.add"), () => {
+    const row = appendRule({ text: "", enabled: true });
+    row.querySelector("textarea").focus();
+  });
+  fields.disabled = save.disabled = true;
+  fields.append(label, help, list, add);
+  form.append(fields, savedLabel, status, save);
   if (before) before.before(form);
   else body.append(form);
 
+  const rows = new Map();
+  let dragged;
+  let dropRow;
+  const clearDrop = () => {
+    if (dropRow) delete dropRow.dataset.queueDrop;
+    dropRow = undefined;
+  };
+  const move = (row, target, after) => {
+    if (!target || row === target || fields.disabled) return;
+    if (after) target.after(row);
+    else target.before(row);
+    row.querySelector(".board-queue-handle").focus();
+  };
+  const dropTarget = event => {
+    const row = event.target.closest(".board-queued-row");
+    if (!dragged || !rows.has(row) || row === dragged || fields.disabled) return;
+    const bounds = row.getBoundingClientRect();
+    return { row, after: event.clientY >= bounds.top + bounds.height / 2 };
+  };
+  list.addEventListener("dragover", event => {
+    clearDrop();
+    const target = dropTarget(event);
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropRow = target.row;
+    dropRow.dataset.queueDrop = target.after ? "after" : "before";
+  });
+  list.addEventListener("dragleave", event => {
+    if (!list.contains(event.relatedTarget)) clearDrop();
+  });
+  list.addEventListener("drop", event => {
+    const target = dropTarget(event);
+    clearDrop();
+    if (!target) return;
+    event.preventDefault();
+    move(dragged, target.row, target.after);
+  });
+
+  function appendRule(rule) {
+    const row = element("div", undefined, "board-queued-row project-rule-row");
+    row.setAttribute("role", "listitem");
+    const handle = reorderHandle();
+    handle.draggable = true;
+    controlLabelForIcon(handle, () => t("projectRules.reorder"));
+    handle.addEventListener("dragstart", event => {
+      dragged = row;
+      startReorderDrag(event, row, "project-rule");
+    });
+    handle.addEventListener("dragend", () => {
+      dragged = undefined;
+      clearDrop();
+    });
+    bindReorderKeys(handle, after => move(row, after ? row.nextElementSibling : row.previousElementSibling, after));
+    const input = element("textarea");
+    input.rows = 3;
+    input.required = true;
+    input.value = rule.text;
+    bindLocalized(input, "ariaLabel", () => t("projectRules.markdown"));
+    const controls = element("div", undefined, "project-rule-controls");
+    const enableLabel = element("label", () => t("projectRules.enabled"), "form-checkbox");
+    const enabled = element("input");
+    enabled.type = "checkbox";
+    enabled.checked = rule.enabled;
+    enableLabel.prepend(enabled);
+    const remove = button(() => t("projectRules.remove"), () => {
+      const next = row.nextElementSibling ?? row.previousElementSibling;
+      rows.delete(row);
+      row.remove();
+      (next?.querySelector(".board-queue-handle") ?? add).focus();
+    }, "quiet");
+    controls.append(enableLabel, remove);
+    row.append(handle, input, controls);
+    list.append(row);
+    rows.set(row, { input, enabled, separator: rule.separator });
+    return row;
+  }
+
+  const draftRules = () => Array.from(list.children, row => {
+    const { input, enabled, separator } = rows.get(row);
+    return { text: input.value, enabled: enabled.checked, separator };
+  });
   let revision;
   const request = async draft => {
     try {
@@ -5656,13 +5759,18 @@ function appendProjectRules(project, before) {
       if (!form.isConnected) return;
       if (result.ok) {
         revision = result.data.revision;
-        if (!draft || input.value === draft.text) input.value = result.data.text;
+        if (!draft) {
+          list.replaceChildren();
+          rows.clear();
+          for (const rule of result.data.rules) appendRule(rule);
+        }
         savedLabel.hidden = true;
         bindLocalized(status, "textContent", () => draft ? t("projectRules.saved") : "");
-        input.disabled = false;
+        fields.disabled = false;
       } else if (result.error.code === "PROJECT_RULES_CONFLICT") {
         revision = result.error.details.revision;
-        saved.value = result.error.details.text;
+        saved.value = result.error.details.rules.map(rule =>
+          (rule.enabled ? "[✓] " : "[ ] ") + rule.text).join("\n\n");
         savedLabel.hidden = false;
         bindLocalized(status, "textContent", () => t("projectRules.conflict"));
       } else {
@@ -5671,6 +5779,7 @@ function appendProjectRules(project, before) {
     } catch (error) {
       bindLocalized(status, "textContent", () => error.message);
     } finally {
+      fields.disabled = revision === undefined;
       save.disabled = false;
       bindLocalized(save, "textContent", () => t(revision === undefined ? "projectRules.load" : "projectRules.save"));
     }
@@ -5679,7 +5788,9 @@ function appendProjectRules(project, before) {
     event.preventDefault();
     if (save.disabled) return;
     save.disabled = true;
-    void request(revision === undefined ? undefined : { text: input.value, revision });
+    const draft = revision === undefined ? undefined : { rules: draftRules(), revision };
+    fields.disabled = true;
+    void request(draft);
   });
   void request();
   return form;
