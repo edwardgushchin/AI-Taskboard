@@ -13,6 +13,13 @@ import { forgetExecutor, matchesQueuedExecutor, prepareQueuedTurn, queueWritePro
   runtimeEntries, runtimeTransaction } from "../src/desktop/board-runtime.ts";
 import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 
+function initializeInheritingBoard(project: string) {
+  initializeBoard(locateBoard(project, true), store => {
+    delete store.index.settings.taskLimits;
+    store.saveIndex();
+  });
+}
+
 test("comments and priority changes retain saved manual executor requests", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-manual-first-launch-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
@@ -83,7 +90,7 @@ test("comments and priority changes retain saved manual executor requests", t =>
 test("write probe retry persists its delay and respects shared slots and cancellation", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-write-probe-retry-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
-  initializeBoard(locateBoard(project, true), () => {});
+  initializeInheritingBoard(project);
   const first = createAgentSlots(true);
   first.configure({ executor: 1, manager: 0, reviewer: 1 });
   first.remember(project);
@@ -166,7 +173,10 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-shared-limits-"));
   t.after(() => rmSync(scratch, { recursive: true, maxRetries: 5 }));
   const project = join(scratch, "board"), alias = join(scratch, "alias"), other = join(scratch, "other");
-  for (const path of [project, other]) { mkdirSync(path); initializeBoard(locateBoard(path, true), () => {}); }
+  for (const path of [project, other]) {
+    mkdirSync(path);
+    initializeInheritingBoard(path);
+  }
   symlinkSync(project, alias, process.platform === "win32" ? "junction" : "dir");
   const a = createAgentSlots(true), b = createAgentSlots(true);
   a.configure({ executor: 2, manager: 1, reviewer: 1 }); a.remember(project); b.remember(alias); b.remember(other);
@@ -196,7 +206,7 @@ test("shared defaults, overrides and canonical aliases use one pool without inte
 test("a profile save only replaces an older shared task limit", t => {
   const project = mkdtempSync(join(tmpdir(), "taskboard-profile-limits-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
-  initializeBoard(locateBoard(project, true), () => {});
+  initializeInheritingBoard(project);
   const first = createAgentSlots(true), second = createAgentSlots(true);
   first.configure({ executor: 4, manager: 0, reviewer: 3 }, 10);
   first.remember(project);
@@ -244,7 +254,7 @@ test("runtime snapshots and reservations stay responsive during a board transact
   const project = mkdtempSync(join(tmpdir(), "taskboard-runtime-lock-"));
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
   const location = locateBoard(project, true);
-  initializeBoard(location, () => {});
+  initializeInheritingBoard(project);
   const slots = createAgentSlots(true);
   slots.remember(project);
   withLock(location.directory, () => {
@@ -262,7 +272,7 @@ test("manager context and reviewer capacity are shared with another process", t 
   const scratch = mkdtempSync(join(tmpdir(), "taskboard-manager-pool-"));
   t.after(() => rmSync(scratch, { recursive: true, maxRetries: 5 }));
   const project = join(scratch, "board"); mkdirSync(project);
-  initializeBoard(locateBoard(project, true), () => {});
+  initializeInheritingBoard(project);
   const slots = createAgentSlots(true); slots.remember(project);
   slots.configure({ executor: 1, manager: 1, reviewer: 1 });
   const writer = slots.claim(project, "manager:context")!;

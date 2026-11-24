@@ -36,11 +36,11 @@ import {
   readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
   saveManagerHistory, sendGoalMessage,
 } from "../src/desktop/manager-history.ts";
-import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
+import { backgroundDialogueHistory, backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "../src/desktop/goal-actions.ts";
 import { russianWriting } from "../src/desktop/russian-writing.ts";
 import { autoQueueSettings, earliestOpenRelease, releaseWait, updateAutoQueue } from "../src/cli/auto-queue.ts";
-import { nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { launchableTasks, nextReadyTask } from "../src/desktop/auto-queue.ts";
 import { acknowledgeInterval, advanceInterval, goalQueueCondition, intervalDeadline, iterativeEnabled, ownerIterationDirective,
   goalEventConditions, goalReserveTarget, iterationDirectiveAfterEdit, normalizeGoalRules,
   readIterativeGoal, saveIterativeGoal } from "../src/desktop/iterative-goal.ts";
@@ -54,6 +54,8 @@ import { executorFullAccess, managerAccess, setTaskExecutorAccess } from "../src
 import { dailyBudgetInterruption } from "../src/desktop/codex-rpc.ts";
 import type { UsageWriter } from "../src/desktop/codex-token-usage.ts";
 import type { ManagerAccess } from "../src/desktop/codex.ts";
+import { rememberTaskCodexThread } from "../src/desktop/codex-task-archive.ts";
+import { writeBoardProjectRules } from "../src/cli/board-agents.ts";
 
 process.env.GIT_CEILING_DIRECTORIES = realpathSync(tmpdir());
 process.env.GIT_CONFIG_NOSYSTEM = "1";
@@ -64,6 +66,7 @@ const boardSource = stripTypeScriptTypes(source("board-actions.ts").replace(/^im
 const main = ts.createSourceFile("main.ts", source("main.ts"), ts.ScriptTarget.Latest, true);
 const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
   text.startsWith("const autoBoards =") || text.startsWith("const managerNoticeKey =") ||
+  text.startsWith("const queuedRecoveryDelay =") || text.startsWith("function nextDeferredExecutor(") ||
   text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
   text.startsWith("function reviewRetryBinding(") || text.startsWith("function reviewRetryFor(") ||
@@ -74,7 +77,6 @@ const cliFailure = (code: string, message: string) => ({ ok: false, error: { cod
 
 function fixture(t: TestContext) {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "taskboard-orchestrator-test-")));
-  t.after(() => rmSync(folder, { recursive: true, force: true, maxRetries: 3 }));
   const project = join(folder, "project");
   mkdirSync(project);
   const env = { ...process.env, GIT_CEILING_DIRECTORIES: folder };
@@ -180,7 +182,7 @@ function fixture(t: TestContext) {
     reviewModeReplyTarget, setReviewModeFromChat,
     reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot,
+    backgroundDialogueHistory, backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot,
     managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     readManagerTurn: async (_profile: string, _project: string, reference: { turnId?: string }) => {
@@ -189,6 +191,7 @@ function fixture(t: TestContext) {
     },
     send() {},
     notifyRunChange() {},
+    rememberTaskCodexThread,
     usageKey,
     tokenUsageQueue: () => ({
       enqueue: (cwd: string, id: string, report: unknown) => callCli(cwd, ["token-usage", id], report),
@@ -362,6 +365,12 @@ function fixture(t: TestContext) {
             }, interrupt: async () => {},
           }) });
     },
+  });
+  t.after(async () => {
+    const watches = [...subscriptions.values()];
+    subscriptions.clear();
+    await Promise.all(watches.flatMap(watch => [...watch.reviewerRuns?.values() ?? []]));
+    rmSync(folder, { recursive: true, force: true, maxRetries: 3 });
   });
   const reviewing = () => runtime.frame({ project, board: subscriptions.get(project)?.board, window: { webContents: {} } }).reviewingTasks;
   return {
@@ -823,7 +832,7 @@ test("acceptance of a converted queue hold dispatches once when a slot opens", {
         const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
           quotaWait: undefined, boardBudgetFailure: () => undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
           subscriptions: new Map([[f.project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
-          nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
+          launchableTasks, nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
           currentActiveGoal: activeManagerGoal, readBoardThread: () => goalId ? { id: goalId } : undefined,
           boardThreadPath: managerGoalBinding, goalMessages, goalQueueCondition, readIterativeGoal, intervalDeadline, iterativeEnabled,
           boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
@@ -921,7 +930,7 @@ test("release dispatch rechecks the queue and milestone under the start lock", {
   const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
     quotaWait: undefined, boardBudgetFailure: () => undefined, applicationUpdates: { installing: false }, closingProjects: new Set(),
     subscriptions: new Map([[f.project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
-    nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
+    launchableTasks, nextReadyTask, pendingReviewApprovals, agentSlots: slots, projectIdentity: (project: string) => project,
     currentActiveGoal: () => undefined,
     boardWorkRequests: new Map(), boardRequests: new Map(), backgroundManagerRequests: new Map(),
     executorBusy: (_project: string, id: string) => release.has(id),
@@ -1053,7 +1062,7 @@ test("the goal dispatcher wakes when release order leaves its ready queue below 
   const runtime = runInNewContext(dispatcherSource + "\n({ scheduleAutoBoard, autoBoards })", {
     applicationUpdates: { installing: false }, quotaWait: undefined, boardBudgetFailure: () => undefined, closingProjects: new Set(),
     subscriptions: new Map([[project, watch]]), isManual, taskReviewMode, usesIndependentReviewer,
-    nextReadyTask, pendingReviewApprovals, projectIdentity: (key: string) => key,
+    launchableTasks, nextReadyTask, pendingReviewApprovals, projectIdentity: (key: string) => key,
     agentSlots: {
       entries: () => executorRelease ? [...slots, executorRelease] : slots,
       available: () => !automationPaused,
@@ -1480,7 +1489,14 @@ function attemptWhileBoardLocked<T>(project: string, attempt: () => T): T {
 
 test("a board snapshot with auto-review on wakes the manager once per submitted revision", async t => {
   const f = fixture(t);
+  f.agentSlots.entries = runtimeEntries;
+  f.agentSlots.update = (project, task, state) => runtimeTransaction(project, entries => {
+    const entry = entries.find(entry => entry.owner === process.pid && entry.task === task && entry.kind === "task");
+    if (entry) entry.state = state;
+  });
   await f.cli(["init"]);
+  const { data: card } = await f.cli(["create"], plannedDraft({ title: "Review target" }));
+  assert.equal(card.id, "T-0001");
   const goalBinding = { provider: "codex", id: f.threadId, goal: { objective: "Saved goal", status: "active" } };
   writeJson(f.binding, goalBinding);
   let calls = 0;
@@ -1785,6 +1801,7 @@ test("a saved reviewer note prevents duplicate reviews after restart for both su
   assert.equal((await f.cli(["init"])).ok, true);
   assert.equal((await f.cli(["settings"], {
     autoMode: false, reviewMode: "reviewer", reviewer: { model: "fixture", effort: "low" },
+    taskLimits: { reviewer: 2 },
   })).ok, true);
 
   const tasks: Task[] = [];
@@ -4282,7 +4299,7 @@ test("manager returns the same card in every review mode and preserves human acc
       assert.equal((await f.cli(["request-changes", task.id], { ...ref, revision: ref.revision - 1, actor: "manager", reviewMode: mode, targetHead: null })).error.code, "REVISION_CONFLICT");
       const otherMode = mode === "human" ? "manager" : "human";
       await f.cli(["settings"], { reviewMode: otherMode });
-      assert.equal((await act("task_request_changes", ref)).error.code, "REVIEW_REQUIRED");
+      assert.equal((await act("task_request_changes", ref)).error.code, "REVIEW_MODE_CHANGED");
       await f.cli(["settings"], { reviewMode: mode });
       await act("task_review", { id: task.id });
       const returned = await act("task_request_changes", ref);
@@ -4427,6 +4444,7 @@ test("manager Git branch workflow stays scoped and uses checked commits", { time
   mkdirSync(join(project, "tools"));
   await writeFile(join(project, "tools", "smudge.sh"), "test \"$(cat tools/smudge-mode)\" = ready || exit 1\nsh \"$1\"\n");
   await writeFile(join(project, "tools", "smudge-mode"), "ready\n");
+  writeBoardProjectRules(project);
   git(project, "add", ".");
   git(project, "commit", "-m", "Base");
   const base = git(project, "rev-parse", "HEAD");
