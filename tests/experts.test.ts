@@ -7,12 +7,14 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { BoardStore, initializeBoard, onBoard, readJson, writeJson } from "../src/cli/storage.ts";
 import { expertAssets, expertContext, expertSkill, listExperts, readExpert, saveExpert } from "../src/cli/experts.ts";
 import { createTask } from "../src/cli/tasks.ts";
 import { createExpertPlan, expertStagesStatus, reviewDecisionSequence, sendTeamMessage, teamInbox, updateExpertStage } from "../src/cli/expert-team.ts";
 import { managerInbox } from "../src/cli/task-messages.ts";
 import { callCli } from "../src/desktop/cli.ts";
+import { turnControl } from "../src/desktop/codex-rpc.ts";
 import { leadSkillInstructions, phaseStageReporter, watchTeamMail } from "../src/desktop/expert-tools.ts";
 import { readStageRunHistory } from "../src/desktop/stage-run-history.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
@@ -58,32 +60,72 @@ test("the active reviewer gets a signal for newly addressed mail and can read it
   assert.deepEqual(inbox.messages.map(m => m.text), ["Reviewer asks for evidence", "Verify the missing loading state."]);
 });
 
-test("an active executor can read a linked reply after the team mail signal", { timeout: 20_000 }, async t => {
+test("executor team mail signals survive a restart and new replies reach the same session", { timeout: 30_000 }, async t => {
   const f = fixture(t);
+  const threadId = "01234567-1234-5678-1234-123456789012";
   const task = f.run(store => store.create({
     ...createTask(store.allocateId(), { title: "Use the approved fixture" }),
     status: "in_progress",
+    codexThreadId: threadId,
   }));
-  const question = f.run(store => sendTeamMessage(store, task.id, task.id, {
-    to: "manager", kind: "question", text: "Which fixture should I use?",
+  const ask = (text: string) => f.run(store => sendTeamMessage(store, task.id, task.id, {
+    to: "manager", kind: "question", text,
   }));
-  const noticed = Promise.withResolvers<string>();
-  const deadline = setTimeout(() => noticed.reject(new Error("No executor mail signal")), 12_000);
-  const stop = watchTeamMail(f.root, task.id, {
-    interrupt: async () => {},
-    steer: async text => { noticed.resolve(text); },
-  }, "agent", question.sequence);
-  t.after(() => {
-    clearTimeout(deadline);
-    stop();
+  const reply = (replyTo: number, text: string) => f.run(store => sendTeamMessage(store, task.id, "manager", {
+    to: task.id, replyTo, text,
+  }));
+  const signals: object[] = [];
+  const start = (turn: string) => {
+    const noticed = Promise.withResolvers<void>();
+    const control = turnControl(async <R>(method: string, params: object) => {
+      assert.equal(method, "turn/steer");
+      signals.push(params);
+      noticed.resolve();
+      return {} as R;
+    }, threadId, turn);
+    const stop = watchTeamMail(f.root, task.id, control, "agent");
+    t.after(stop);
+    return { noticed: noticed.promise, stop };
+  };
+
+  const first = start("first");
+  const question = ask("Which fixture should I use?");
+  const answer = reply(question.sequence, "Use the CSV fixture.");
+  await first.noticed;
+  first.stop();
+  assert.match(JSON.stringify(signals[0]), new RegExp("sequence " + answer.sequence + "\\b"));
+
+  const restarted = start("restarted");
+  await delay(3_500);
+  restarted.stop();
+  assert.equal(signals.length, 1);
+  const checkClaim = (afterSequence: unknown) => callCli(f.root, ["expert-notify", task.id], { actor: "agent", afterSequence });
+  assert.deepEqual(await checkClaim(0), { ok: true, data: { sequence: null } });
+
+  const nextQuestion = ask("Which separator should I use?");
+  const nextAnswer = reply(nextQuestion.sequence, "Use commas.");
+  for (const invalid of ["1x", "0x1", "1", -1]) {
+    const result = await checkClaim(invalid);
+    assert.equal(result.ok ? "" : result.error.code, "INVALID_INPUT");
+  }
+  const inbox = await callCli<ReturnType<typeof teamInbox>>(f.root, ["expert-inbox", task.id], {
+    actor: "agent", afterSequence: nextQuestion.sequence,
   });
-  const answer = f.run(store => sendTeamMessage(store, task.id, "manager", {
-    to: task.id, replyTo: question.sequence, text: "Use the CSV fixture.",
-  }));
-  assert.match(await noticed.promise, new RegExp("sequence " + answer.sequence + "\\b"));
-  stop();
-  const inbox = f.run(store => teamInbox(store, task.id, task.id, question.sequence));
-  assert.deepEqual(inbox.messages.map(mail => mail.replyTo), [question.sequence]);
+  assert.ok(inbox.ok);
+  assert.deepEqual(inbox.data.messages.map(mail => mail.replyTo), [nextQuestion.sequence]);
+  const resumed = start("resumed");
+  await resumed.noticed;
+  resumed.stop();
+  assert.equal(signals.length, 2);
+  assert.deepEqual(signals.map(entry => {
+    const { threadId, expectedTurnId } = entry as { threadId: string; expectedTurnId: string };
+    return { threadId, expectedTurnId };
+  }), [{ threadId, expectedTurnId: "first" }, { threadId, expectedTurnId: "resumed" }]);
+  assert.match(JSON.stringify(signals[1]), new RegExp("sequence " + nextAnswer.sequence + "\\b"));
+  assert.deepEqual(await checkClaim(0), { ok: true, data: { sequence: null } });
+  const saved = f.run(store => store.card(task.id));
+  assert.equal(saved.revision, task.revision);
+  assert.equal(saved.codexThreadId, threadId);
 });
 
 test("220 board-local expert packages can be edited, disabled and extended without changing provider profiles", t => {

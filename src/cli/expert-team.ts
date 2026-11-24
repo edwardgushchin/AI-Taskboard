@@ -356,11 +356,30 @@ export function teamInbox(store: BoardStore, taskId: string, recipient: string, 
   return { parentId: parent.id, expertTeam: parent.expertTeam, stages, members: (parent.expertStages ?? []).map(stage => {
     const card = readTask(store, stage.taskId);
     return { ...stage, expertId: card.expertId ?? stage.expertId, status: card.status, revision: card.revision, summary: card.summary, result: card.result, artifacts: card.artifacts };
-  }), messages: parent.history.flatMap((event, index) => event.expertMessage && index + 1 > after &&
+  }), messages: teamMessages(parent, recipient, after) };
+}
+
+function teamMessages(parent: Task, recipient: string, after: number) {
+  return parent.history.flatMap((event, index) => event.expertMessage && index + 1 > after &&
     (event.expertMessage.to === recipient || event.expertMessage.to === "team" || event.expertMessage.from === recipient ||
       (recipient === parent.id && [event.expertMessage.to, event.expertMessage.from].some(address => address.startsWith("work:"))) ||
       (recipient === "reviewer" && [event.expertMessage.to, event.expertMessage.from].some(address => address.startsWith("review:"))))
-    ? [{ sequence: index + 1, at: event.at, text: event.text, kind: event.messageKind, ...event.expertMessage }] : []) };
+    ? [{ sequence: index + 1, at: event.at, text: event.text, kind: event.messageKind, ...event.expertMessage }] : []);
+}
+
+export function claimTeamMailNotification(store: BoardStore, taskId: string, role: "agent" | "reviewer", after: number) {
+  const task = store.card(taskId);
+  const parent = task.expertStage ? readTask(store, task.expertStage.parentId) : task;
+  const previous = Math.max(after, task.teamMailNotifiedThrough?.[role] ?? 0);
+  const recipient = role === "reviewer" ? "reviewer" : taskId;
+  const message = teamMessages(parent, recipient, previous).findLast(mail =>
+    mail.from !== recipient && (role !== "reviewer" || !mail.from.startsWith("review:")));
+  if (!message) return { sequence: null };
+
+  // Save the claim before steering so an interrupted RPC cannot repeat the signal.
+  // The reply remains readable in team_inbox even if the turn ended before the signal.
+  store.save({ ...task, teamMailNotifiedThrough: { ...task.teamMailNotifiedThrough, [role]: message.sequence } });
+  return { sequence: message.sequence };
 }
 export function sendTeamMessage(store: BoardStore, taskId: string, sender: string, input: Record<string, unknown>,
   dependency?: { parent: Task; id?: string; requiresChoice?: true }) {

@@ -395,6 +395,9 @@ export function validateCard(value: unknown, id: string): Task {
           (typeof value.execution.effort !== "string" || !reasoningEffortPattern.test(value.execution.effort))))) ||
       (value.awaitingAnswer !== undefined && typeof value.awaitingAnswer !== "boolean") ||
       (value.awaitingOwnerAnswer !== undefined && typeof value.awaitingOwnerAnswer !== "boolean") ||
+      (value.teamMailNotifiedThrough !== undefined && (!isRecord(value.teamMailNotifiedThrough) ||
+        Object.entries(value.teamMailNotifiedThrough).some(([role, sequence]) =>
+          !["agent", "reviewer"].includes(role) || !Number.isSafeInteger(sequence) || Number(sequence) < 1))) ||
       (value.draftConfirmed !== undefined && typeof value.draftConfirmed !== "boolean") ||
       !["criteria", "questions", "subtasks"].every(key => Array.isArray(value[key])) || !isTagList(value.tags) ||
       !Array.isArray(value.attachments) || value.attachments.some(entry => !isRecord(entry) ||
