@@ -3822,22 +3822,24 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false, inFlight, recovery } of jobs) {
+      for (const { id, draft, goal, files, failed = false, inFlight, recovery, historyPending } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight, recovery);
+          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight, recovery, historyPending);
           continue;
         }
         const changedFlight = job.inFlight !== inFlight;
+        const changedHistory = Boolean(job.historyPending) !== Boolean(historyPending);
         job.inFlight = inFlight;
+        job.historyPending = historyPending;
         if (!job.editing && !job.sending) {
           if (draft !== job.draft) {
             job.draft = draft;
             job.request = draft.trim();
             updateQueuedPreview(job);
           }
-          if (failed !== job.failed || changedFlight) {
+          if (failed !== job.failed || changedFlight || changedHistory) {
             job.failed = failed;
             renderQueuedActions(job);
           }
@@ -3874,7 +3876,9 @@ function draftComposer() {
       status.append(element("span", () => t("ui.sending_15dba7c5")));
       return;
     }
-    if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
+    if (job.failed) {
+      status.append(element("span", () => t(job.historyPending ? "ui.manager_history_pending" : "ui.not_sent_28bb3764"), "board-queued-failed"));
+    }
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
       if (!queued.includes(job)) return;
@@ -3884,7 +3888,7 @@ function draftComposer() {
       renderQueuedActions(job);
       sendNext();
     }, "quiet"));
-    if (!job.recovery) {
+    if (!job.recovery && !job.historyPending) {
       status.append(button(() => t("ui.edit_086d59cf"), () => editQueuedMessage(job), "quiet"));
       if (!job.goal) status.append(button(() => t("ui.send_now_84358b1c"), () => sendQueuedNow(job), "quiet"));
     }
@@ -4134,7 +4138,8 @@ function draftComposer() {
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
-    const entry = next.recovery ? undefined : next.entry ?? chatMessage("user", request, next.messageFiles, true, false, next.id);
+    const entry = next.recovery || next.historyPending ? undefined :
+      next.entry ?? chatMessage("user", request, next.messageFiles, true, false, next.id);
     const turn = beginTurn(next.id, entry);
     const { container, thinking } = turn;
     let accepted = false;
@@ -4184,7 +4189,7 @@ function draftComposer() {
       editor.updateManagerRun(managerRun);
       if (accepted) {
         releaseSubmittedPreviews(submitted);
-        if (next.recovery || persistedError || loadingHistory || !container.childElementCount || (historyInvalidated && atEndOfHistory()) ||
+        if (next.recovery || next.historyPending || persistedError || loadingHistory || !container.childElementCount || (historyInvalidated && atEndOfHistory()) ||
             log.childElementCount - olderNodes.length - 2 > 120) {
           editor.invalidateHistory();
         }
@@ -4196,7 +4201,7 @@ function draftComposer() {
       renderQueuedActions(next);
       entry?.remove();
       queue.prepend(next.row);
-      if (orderChanged) editor.refreshQueue();
+      if (orderChanged || !deferred) editor.refreshQueue();
       else sendNext();
     });
   }
@@ -4252,7 +4257,7 @@ function draftComposer() {
     job.preview.title = job.preview.textContent.slice(0, 180);
     if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, recovery) {
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, recovery, historyPending) {
     const request = draft.trim();
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
@@ -4281,7 +4286,7 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight, recovery };
+    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight, recovery, historyPending };
     queued.push(job);
     if (handle) {
       handle.addEventListener("dragstart", event => {

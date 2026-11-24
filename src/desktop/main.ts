@@ -2340,6 +2340,7 @@ function boardThreadPath(project: string, dialogue = false) {
 type QueuedBoardMessage = {
   id: string; draft: string; goal: boolean; created: number; failed?: boolean;
   recovery?: string;
+  acceptedHistory?: { startedAt: number; id: string; run: Parameters<typeof saveManagerHistory>[3] };
   displayedReviewModeQuestionId?: string;
   files: { name: string; type: string; bytes: string; link?: FileLink }[];
 };
@@ -2377,8 +2378,9 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
     if (existsSync(directory)) storageDirectory(directory);
     if (action === "list") {
       const context = agentSlots.entries(board.project).find(entry => entry.task === "manager:dialogue");
-      return { ok: true, data: listQueuedMessages(directory).map(job => ({
-        ...job, files: queuedFiles(job), inFlight: context?.queuedMessageId === job.id || context?.steeringMessageId === job.id,
+      return { ok: true, data: listQueuedMessages(directory).map(({ acceptedHistory, ...job }) => ({
+        ...job, historyPending: Boolean(acceptedHistory), files: queuedFiles(job),
+        inFlight: context?.queuedMessageId === job.id || context?.steeringMessageId === job.id,
       })) };
     }
     if (action === "recover" && typeof draft === "string") {
@@ -2433,6 +2435,7 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         const job = readQueuedMessage(path);
         if (!job) return;
         if (action === "retry") { writeJson(path, { ...job, failed: undefined }); return; }
+        if (job.acceptedHistory) return cliFailure("INVALID_INPUT", t("ui.manager_history_save_failed"));
         if (!(draft as string).trim() && (job.goal || !job.files.length)) return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
         writeJson(path, { ...job, draft,
           displayedReviewModeQuestionId: job.draft === draft ? job.displayedReviewModeQuestionId : undefined,
@@ -2865,11 +2868,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   if (quotaWait) return quotaFailure();
   const queuedPath = typeof messageId === "string" ? join(board.project, ".tasks", "manager-queue", messageId + ".json") : undefined;
-  const delivered = () => {
-    if (!queuedPath) return;
+  const delivered = (path = queuedPath) => {
+    if (!path) return;
     try {
-      storageDirectory(dirname(queuedPath));
-      runtimeTransaction(board.project, () => rmSync(queuedPath, { force: true }));
+      storageDirectory(dirname(path));
+      runtimeTransaction(board.project, () => rmSync(path, { force: true }));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error("Could not remove a delivered manager message.", error);
     }
@@ -2904,7 +2907,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
         }
         const pending = readQueuedMessage(queuedPath);
-        if (pending?.recovery) throw new Error(t("ui.manager_recovery_action"));
+        if (pending?.recovery || pending?.acceptedHistory) throw new Error(t("ui.manager_recovery_action"));
         if (pending) {
           writer.steeringMessageId = pending.id;
           claimed = true;
@@ -3018,7 +3021,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       const selection = runtimeTransaction(board.project, entries => {
         const pending = readQueuedMessage(queuedPath);
         if (!pending) return;
-        if (hasManagerMessage(board.project, pending.id, pending.created)) {
+        if (!pending.acceptedHistory && hasManagerMessage(board.project, pending.id, pending.created)) {
           rmSync(queuedPath, { force: true });
           return;
         }
@@ -3153,6 +3156,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   const scratch = new Set<string>();
   let sendingNow: Promise<void> | undefined;
   const steering = new Map<string, ReturnType<typeof Promise.withResolvers<boolean>>>();
+  const unsavedSteering = new Set<string>();
   const deliveredMessages = new Set<string>();
   let waitWork = new AbortController();
   let items: BoardActivity[] = [];
@@ -3164,7 +3168,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let outcome: { status: "running" | "completed" | "interrupted"; reason?: string } | undefined;
   let providerTurn: NonNullable<NonNullable<typeof original>["provider"]> | undefined;
   let providerRetry: string | undefined;
-  const saveHistory = () => {
+  const saveHistory = (deliveryPath?: string) => {
     if (cleanupJob) {
       try {
         const root = join(project, ".tasks", "maintenance-runs");
@@ -3173,18 +3177,44 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       } catch (error) { console.warn("Private maintenance diagnostic could not be saved", error); }
       return;
     }
-    if (!(historyAccepted && historyMessage) && !items.length) return;
-    try {
-      const changed = saveManagerHistory(project, original?.startedAt ?? startedAt, original?.id ?? managerRun.id, {
+    if (!(historyAccepted && historyMessage) && !items.length) return false;
+    const record: NonNullable<QueuedBoardMessage["acceptedHistory"]> = {
+      startedAt: original?.startedAt ?? startedAt,
+      id: original?.id ?? managerRun.id,
+      run: {
         message: original?.originalMessage ?? (historyAccepted ? historyMessage : undefined),
         items: original ? [...original.items, ...items] : items,
-        model: historyModel ?? original?.model, durationMs: Date.now() - startedAt, lane, goalId: goal ? goalId : undefined,
-        outcome, provider: providerTurn ?? original?.provider,
-      });
+        model: historyModel ?? original?.model,
+        durationMs: Date.now() - startedAt,
+        lane,
+        goalId: goal ? goalId : undefined,
+        outcome,
+        provider: original?.provider ?? providerTurn,
+      },
+    };
+    try {
+      const changed = saveManagerHistory(project, record.startedAt, record.id, record.run);
       if (changed) publishManagerUnread(project);
+      return true;
     } catch (error) {
       console.warn("Could not save manager chat history.", (error as Error).message);
+      if (deliveryPath) {
+        try {
+          runtimeTransaction(project, () => {
+            const pending = readQueuedMessage(deliveryPath);
+            if (pending) writeJson(deliveryPath, { ...pending, acceptedHistory: record, failed: true });
+          });
+        } catch (queueError) {
+          console.warn("Could not preserve accepted manager history in the queue.", (queueError as Error).message);
+        }
+      }
+      return false;
     }
+  };
+  const saveAcceptedHistory = () => {
+    if (!saveHistory(queuedPath)) return false;
+    delivered();
+    return true;
   };
   const restoreAnswer = async (reference: typeof providerTurn) => {
     if (!reference) return;
@@ -3198,9 +3228,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     outcome = { status: "completed" };
     historyAccepted = true;
     acceptedMessage = true;
-    saveHistory();
-    delivered();
-    return { ok: true as const, data: { answer, items: managerChatItems(items), changes, error: undefined } };
+    const saved = saveAcceptedHistory();
+    return { ok: true as const, data: { answer, items: managerChatItems(items), changes,
+      error: saved ? undefined : t("ui.manager_history_save_failed"), keepQueued: Boolean(queuedPath && !saved) } };
   };
   let threadId: string | undefined;
   let goalId: string | undefined;
@@ -3286,6 +3316,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   }
   try {
     publishRun();
+    if (queued?.acceptedHistory) {
+      // A provider already accepted this message. Retry only the local write.
+      const { startedAt, id, run } = queued.acceptedHistory;
+      try {
+        if (saveManagerHistory(project, startedAt, id, run)) publishManagerUnread(project);
+      } catch {
+        return cliFailure("BOARD_QUEUE_FAILED", t("ui.manager_history_save_failed"));
+      }
+      delivered();
+      broadcastMaintenanceSafe(project, lane === "chat" ? "orchestrator-history" : "orchestrator-work-history");
+      return { ok: true as const, data: { answer: "", changes } };
+    }
     if (repairTask) {
       const started = await callCli(project, ["start", repairTask.id, "--compact"], { revision: repairTask.revision, resolveConflicts: true });
       if (!started.ok) return started;
@@ -3479,10 +3521,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         phase: "final_answer", text: answer, status: "completed",
         reviewModeCardQuestion: reviewQuestion === "card" ? true : undefined,
       }];
-      historyAccepted = true;
-      saveHistory();
-      delivered();
-      return { ok: true as const, data: { answer, items, changes, id: threadId } };
+      historyAccepted = acceptedMessage = true;
+      const saved = saveAcceptedHistory();
+      return { ok: true as const, data: { answer, items, changes, id: threadId,
+        error: saved ? undefined : t("ui.manager_history_save_failed"), keepQueued: Boolean(queuedPath && !saved) } };
     }
     const questionId = queued?.displayedReviewModeQuestionId;
     const previousChat = (allowReviewModeChange && questionId) || (lane === "chat" && !threadId)
@@ -3963,8 +4005,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           outcome = { status: "running" };
           historyAccepted = true;
           acceptedMessage = true;
-          saveHistory();
-          delivered();
+          saveAcceptedHistory();
         } : undefined,
         onGoalSet: () => {
           goalSet = true;
@@ -3974,10 +4015,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               dialogueEditFingerprint: undefined });
             acceptedMessage = true;
             historyAccepted = true;
-            saveHistory();
+            const historySaved = saveAcceptedHistory();
             notify("orchestrator-message-time", { at: historyMessage?.at });
-            delivered();
-            if (typeof messageId === "string") broadcastMaintenanceSafe(project, "orchestrator-work-accepted", { id: messageId });
+            if (historySaved && typeof messageId === "string") broadcastMaintenanceSafe(project, "orchestrator-work-accepted", { id: messageId });
           }
         },
         messageId: typeof messageId === "string" ? messageId : undefined,
@@ -3989,12 +4029,15 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             }
             acceptedMessage = true;
             historyAccepted = true;
-            saveHistory();
+            saveAcceptedHistory();
             notify("orchestrator-message-time", { at: historyMessage?.at });
-            delivered();
           }
-          if (steering.has(id)) saveHistory();
-          steering.get(id)?.resolve(true);
+          const receipt = steering.get(id);
+          if (receipt) {
+            const saved = saveHistory(join(project, ".tasks", "manager-queue", id + ".json"));
+            if (!saved) unsavedSteering.add(id);
+            receipt.resolve(Boolean(saved));
+          }
         },
         onGoal: updatedGoal => {
           if (!goal) return;
@@ -4151,7 +4194,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               waitWork.abort();
               waitWork = new AbortController();
               if (receipt && !await receipt.promise) {
-                throw new Error(t("ui.the_active_reply_ended_before_the_message_was_de_d8eae951"));
+                throw new Error(t(messageId && unsavedSteering.has(messageId) ? "ui.manager_history_save_failed" :
+                  "ui.the_active_reply_ended_before_the_message_was_de_d8eae951"));
               }
               if (messageId) {
                 const path = join(project, ".tasks", "manager-queue", messageId + ".json");
@@ -4172,9 +4216,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if ("interrupted" in response) {
       const reason = t("ui.reply_stopped_c7fee9e0");
       if (lane === "chat") outcome = { status: "interrupted", reason };
+      const keepQueued = Boolean(queuedPath && (!acceptedMessage || !saveAcceptedHistory()));
       return { ok: true as const, data: {
-        answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: reason, id: threadId,
-        keepQueued: Boolean(queuedPath && !acceptedMessage),
+        answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: reason, id: threadId, keepQueued,
       } };
     }
     const goalNotice = {
@@ -4204,13 +4248,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       const state = readIterativeGoal(project, iteration.id);
       saveIterativeGoal(project, { ...state, step: response.text.trim() });
     }
-    if (!error && queuedPath && !acceptedMessage) {
-      acceptedMessage = true;
-      saveHistory();
-      delivered();
-    }
-    return { ok: true as const, data: { answer, items: lane === "chat" ? managerChatItems(items) : items, changes, model: response.model, error, id: threadId,
-      keepQueued: Boolean(queuedPath && error && !acceptedMessage) } };
+    if (!error && queuedPath) acceptedMessage = true;
+    const keepQueued = Boolean(queuedPath && (!acceptedMessage || !saveAcceptedHistory()));
+    return { ok: true as const, data: { answer, items: lane === "chat" ? managerChatItems(items) : items, changes, model: response.model,
+      error: error ?? (keepQueued ? t("ui.manager_history_save_failed") : undefined), id: threadId, keepQueued } };
   } catch (error) {
     await pendingAction;
     if (signal.reason === switchMode) return { ok: true as const, data: { answer: "", changes } };
@@ -4222,6 +4263,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 1500);
     const message = [t("ui.could_not_complete_the_board_request_91ea559c"), reason,
       providerRetry !== reason ? providerRetry : undefined].filter(Boolean).join("\n");
+    if (changes.length && historyMessage) historyAccepted = acceptedMessage = true;
     if (lane === "chat" && historyAccepted) {
       if (completedManagerAnswer(items)) outcome = { status: "completed" };
       else {
@@ -4230,12 +4272,15 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         outcome = { status: "interrupted", reason: message };
       }
       if (outcome.status === "completed") {
-        return { ok: true as const, data: { answer: "", items: managerChatItems(items), changes, error: undefined } };
+        const keepQueued = Boolean(queuedPath && !saveAcceptedHistory());
+        return { ok: true as const, data: { answer: "", items: managerChatItems(items), changes,
+          error: keepQueued ? t("ui.manager_history_save_failed") : undefined, keepQueued } };
       }
     }
     if (goalSet || changes.length || acceptedMessage) {
-      if (changes.length) delivered();
-      return { ok: true as const, data: { answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: goalSet ? t("ui.the_goal_is_saved_in_the_codex_chat_this_run_end_5bbc3859") + "\n" + message : message, id: threadId, keepQueued: Boolean(queuedPath && !acceptedMessage && !changes.length) } };
+      const keepQueued = Boolean(queuedPath && (!acceptedMessage || !saveAcceptedHistory()));
+      return { ok: true as const, data: { answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes,
+        error: goalSet ? t("ui.the_goal_is_saved_in_the_codex_chat_this_run_end_5bbc3859") + "\n" + message : message, id: threadId, keepQueued } };
     }
     return cliFailure("CODEX_BOARD_REQUEST_FAILED", message);
   } finally {
@@ -4250,7 +4295,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       try { rmSync(reviewThreadPath, { force: true }); }
       catch (error) { console.warn("Could not remove the completed review thread binding.", error); }
     }
-    saveHistory();
+    if (acceptedMessage && queuedPath) saveAcceptedHistory();
+    else saveHistory();
+    for (const id of unsavedSteering) {
+      const path = join(project, ".tasks", "manager-queue", id + ".json");
+      if (saveHistory(path)) delivered(path);
+    }
     endReview();
     running.question?.settle(null);
     running.sendNow = undefined;
