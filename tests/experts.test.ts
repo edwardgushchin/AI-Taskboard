@@ -58,6 +58,34 @@ test("the active reviewer gets a signal for newly addressed mail and can read it
   assert.deepEqual(inbox.messages.map(m => m.text), ["Reviewer asks for evidence", "Verify the missing loading state."]);
 });
 
+test("an active executor can read a linked reply after the team mail signal", { timeout: 20_000 }, async t => {
+  const f = fixture(t);
+  const task = f.run(store => store.create({
+    ...createTask(store.allocateId(), { title: "Use the approved fixture" }),
+    status: "in_progress",
+  }));
+  const question = f.run(store => sendTeamMessage(store, task.id, task.id, {
+    to: "manager", kind: "question", text: "Which fixture should I use?",
+  }));
+  const noticed = Promise.withResolvers<string>();
+  const deadline = setTimeout(() => noticed.reject(new Error("No executor mail signal")), 12_000);
+  const stop = watchTeamMail(f.root, task.id, {
+    interrupt: async () => {},
+    steer: async text => { noticed.resolve(text); },
+  }, "agent", question.sequence);
+  t.after(() => {
+    clearTimeout(deadline);
+    stop();
+  });
+  const answer = f.run(store => sendTeamMessage(store, task.id, "manager", {
+    to: task.id, replyTo: question.sequence, text: "Use the CSV fixture.",
+  }));
+  assert.match(await noticed.promise, new RegExp("sequence " + answer.sequence + "\\b"));
+  stop();
+  const inbox = f.run(store => teamInbox(store, task.id, task.id, question.sequence));
+  assert.deepEqual(inbox.messages.map(mail => mail.replyTo), [question.sequence]);
+});
+
 test("220 board-local expert packages can be edited, disabled and extended without changing provider profiles", t => {
   const f = fixture(t);
   f.run(store => {

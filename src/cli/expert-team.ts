@@ -7,7 +7,7 @@ import { isManual } from "./manual-board.ts";
 import { readExpert } from "./experts.ts";
 import { readTask } from "./archive.ts";
 import { artifactSource } from "./artifacts.ts";
-import { currentReviewApproval, draftManagerQuestion, draftManagerReply, pendingDraftDependency } from "./task-messages.ts";
+import { activeManagerQuestion, currentReviewApproval, draftManagerQuestion, draftManagerReply, pendingDraftDependency } from "./task-messages.ts";
 import { runtimeEntries } from "../desktop/board-runtime.ts";
 
 type Phase = NonNullable<TaskEvent["expertPhase"]>;
@@ -382,10 +382,16 @@ export function sendTeamMessage(store: BoardStore, taskId: string, sender: strin
   const question = sender === "manager" && kind !== "question" && !isManual(store.index.settings)
     ? draftManagerQuestion(parent, replyTo) : undefined;
   const answersDraft = question?.from === to && replyTo !== undefined;
-  if (answersDraft) {
-    const existing = draftManagerReply(parent, replyTo, to);
-    if (existing) return { parentId: parent.id, sequence: existing, at: parent.history[existing - 1].at };
-    if (!dependency && pendingDraftDependency(parent, replyTo)) {
+  if (sender === "manager" && replyTo !== undefined) {
+    const activeQuestion = activeManagerQuestion(parent, parent.history[replyTo - 1]);
+    if (activeQuestion && (to !== activeQuestion.from || kind === "question")) {
+      throw new TaskboardError("INVALID_INPUT", `To answer question ${replyTo}, use to ${activeQuestion.from} and kind update or decision. Send a separate message to ask a new question.`);
+    }
+    if (answersDraft || activeQuestion) {
+      const existing = draftManagerReply(parent, replyTo, to);
+      if (existing) return { parentId: parent.id, sequence: existing, at: parent.history[existing - 1].at };
+    }
+    if (answersDraft && !dependency && pendingDraftDependency(parent, replyTo)) {
       throw new TaskboardError("PENDING_OPERATION", "Finish the saved dependency action before answering this question.");
     }
   }

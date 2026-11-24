@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { addChatMessage, readTask } from "../src/cli/archive.ts";
-import { sendTeamMessage } from "../src/cli/expert-team.ts";
+import { sendTeamMessage, teamInbox } from "../src/cli/expert-team.ts";
 import { TaskboardError } from "../src/cli/model.ts";
 import { BoardStore, initializeBoard, validateCard } from "../src/cli/storage.ts";
-import { managerInbox, sendTaskMessage, taskQuestionAudience, taskQuestionState } from "../src/cli/task-messages.ts";
+import { acknowledgeTaskMessages, managerInbox, sendTaskMessage, taskQuestionAudience, taskQuestionState } from "../src/cli/task-messages.ts";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
 
 const source = readFileSync(new URL("../src/desktop/codex-chat.ts", import.meta.url), "utf8");
@@ -166,6 +166,52 @@ test("team questions use the saved recipient and close only on a linked reply fr
   assert.equal(audience(), "manager");
   sendTeamMessage(store, id, "manager", { to: "reviewer", replyTo: manager.sequence, text: "Use CSV." });
   assert.equal(audience(), undefined);
+});
+
+test("manager inbox keeps read team questions replyable and delivers one linked answer to each sender", t => {
+  const root = mkdtempSync(join(tmpdir(), "active-manager-reply-"));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const location = { root, directory: join(root, ".tasks"), repository: null };
+  const store = initializeBoard(location, store => store);
+  const id = "T-0001";
+  const read = () => readTask(new BoardStore(location), id);
+  store.create({ ...createTask(id, { title: "Report" }), status: "in_progress" });
+  const executor = sendTeamMessage(store, id, id, { to: "manager", kind: "question", text: "May I use the fixture?" });
+  const reviewer = sendTeamMessage(store, id, "reviewer", { to: "manager", kind: "question", text: "Which result is required?" });
+  store.save(sendTaskMessage(read(), { text: "You have access." }, "manager"));
+  store.save(acknowledgeTaskMessages(read(), { through: reviewer.sequence }));
+
+  const questions = () => managerInbox([read()]).map(entry => entry.sequence);
+  assert.deepEqual(questions(), [executor.sequence, reviewer.sequence]);
+  assert.equal(taskQuestionAudience(read()), "manager");
+  assert.throws(() => sendTaskMessage(read(), { replyTo: executor.sequence, text: "Yes." }, "manager"), {
+    code: "INVALID_INPUT",
+    message: `Use team_message with id ${id}, to ${id}, and replyTo ${executor.sequence}.`,
+  });
+  const answer = { to: id, replyTo: executor.sequence, text: "Yes." };
+  for (const replyTo of [String(executor.sequence), "2x", "0x2", null, 0]) {
+    assert.throws(() => sendTeamMessage(store, id, "manager", { ...answer, replyTo }), { code: "INVALID_INPUT" });
+  }
+  assert.throws(() => sendTeamMessage(store, id, "manager", { ...answer, to: "reviewer" }), { code: "INVALID_INPUT" });
+  assert.throws(() => sendTeamMessage(store, id, "manager", { ...answer, kind: "question" }), { code: "INVALID_INPUT" });
+  assert.deepEqual(questions(), [executor.sequence, reviewer.sequence]);
+
+  const saved = sendTeamMessage(store, id, "manager", answer);
+  const reopened = new BoardStore(location);
+  assert.deepEqual(sendTeamMessage(reopened, id, "manager", answer), saved);
+  const executorMail = teamInbox(reopened, id, id, reviewer.sequence).messages;
+  assert.equal(executorMail.length, 1);
+  assert.equal(executorMail[0].replyTo, executor.sequence);
+  assert.equal(executorMail[0].text, answer.text);
+  assert.deepEqual(questions(), [reviewer.sequence]);
+  assert.equal(taskQuestionAudience(read()), "manager");
+
+  sendTeamMessage(reopened, id, "manager", { to: "reviewer", replyTo: reviewer.sequence, text: "The CSV." });
+  const reviewerMail = teamInbox(reopened, id, "reviewer", saved.sequence).messages;
+  assert.equal(reviewerMail.length, 1);
+  assert.equal(reviewerMail[0].replyTo, reviewer.sequence);
+  assert.deepEqual(questions(), []);
+  assert.equal(taskQuestionAudience(read()), undefined);
 });
 
 function providerResult(result: object, mode?: "initial" | "handoff", onActivity?: (items: any[]) => void, draft = false, prompt = "{}") {
