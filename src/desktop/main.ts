@@ -1474,7 +1474,7 @@ type ManagerRequest = {
   settingsChanged?: () => void;
   managerRun?: ManagerRun;
   stop?: () => Promise<void>;
-  sendNow?: (text: string, files: PastedFile[], messageId?: string) => Promise<void>;
+  sendNow?: (text: string, files: PastedFile[], messageId?: string, quotedReferences?: string) => Promise<void>;
   goal?: (action: BoardGoalAction) => Promise<BoardGoal | null>;
   goalRunning?: boolean;
   switchToIterative?: () => void;
@@ -2202,9 +2202,8 @@ function parseOwnerGoalEdit(request: string): { replacement?: string } | undefin
   const literalPrefix = /^(?:(?:пожалуйста|please),?\s+)?(?:замени(?:те)? (?:(?:текст|формулировку) (?:текущей )?цели|(?:текущую )?цель)(?: на)?|replace (?:the )?(?:current )?goal(?: text)?(?: (?:with|to|as follows))?)[ \t]*:/iu;
   const literal = literalPrefix.exec(request);
   if (literal) {
-    // The composer appends quoted references after the owner's message.
-    const replacement = request.slice(literal[0].length).split(/\r?\n\r?\nQuote 1:\r?\n(?=\x60{3,})/u, 1)[0].trim();
-    const firstLine = replacement.split(/\r?\n/, 1)[0];
+    const replacement = request.slice(literal[0].length).replace(/^(?: |\r?\n)/, "");
+    const firstLine = replacement.trim().split(/\r?\n/, 1)[0];
     const wording = withoutCourtesy(firstLine.replace(/^[«“"']+|[»”"']+$/gu, ""));
     if (!/[\p{L}\p{N}]/u.test(firstLine) || /^[>~\x60]/u.test(firstLine) ||
         isVagueWording(wording)) {
@@ -2339,6 +2338,7 @@ function boardThreadPath(project: string, dialogue = false) {
 
 type QueuedBoardMessage = {
   id: string; draft: string; goal: boolean; created: number; failed?: boolean;
+  quotedReferences?: string;
   displayedReviewModeQuestionId?: string;
   files: { name: string; type: string; bytes: string; link?: FileLink }[];
 };
@@ -2366,7 +2366,7 @@ function listQueuedMessages(directory: string) {
 }
 
 ipcMain.handle("board:queue", async (event, project: string, action: unknown, id?: unknown, draft?: unknown,
-  goal?: unknown, files?: unknown, displayedQuestionId?: unknown) => {
+  goal?: unknown, files?: unknown, displayedQuestionId?: unknown, quotedReferences?: unknown) => {
   const state = stateOf(event);
   const board = state.project === project ? state.board :
     windowStates.get(state.window.webContents.id)?.tabs.find(tab => tab.board?.project === project)?.board;
@@ -2409,21 +2409,24 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         const job = readQueuedMessage(path);
         if (!job) return;
         if (action === "retry") { writeJson(path, { ...job, failed: undefined }); return; }
-        if (!(draft as string).trim() && (job.goal || !job.files.length)) return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
+        if (!(draft as string).trim() && !job.quotedReferences && (job.goal || !job.files.length)) {
+          return cliFailure("INVALID_INPUT", t("errors.e10b22707db91d58"));
+        }
         writeJson(path, { ...job, draft,
           displayedReviewModeQuestionId: job.draft === draft ? job.displayedReviewModeQuestionId : undefined,
         });
       });
       if (error) return error;
     } else if (action === "add" && typeof draft === "string" && typeof goal === "boolean" &&
-        Array.isArray(files) && files.every(isPastedFile) && (draft.trim() || (!goal && files.length)) &&
+        (quotedReferences === undefined || typeof quotedReferences === "string") &&
+        Array.isArray(files) && files.every(isPastedFile) && (draft.trim() || quotedReferences || (!goal && files.length)) &&
         files.reduce((total, file) => total + file.bytes.byteLength, 0) <= maxAttachmentBytes) {
       storageDirectory(directory, true);
       const question = !goal && typeof displayedQuestionId === "string" && reviewModeReplyTarget(draft)
         ? readManagerHistory(project, null, "chat")?.turns.at(-1)?.items.at(-1) : undefined;
       const displayedReviewModeQuestionId = question?.reviewModeCardQuestion && question.id === displayedQuestionId
         ? question.id : undefined;
-      writeJson(path, { id, draft, goal, created: Date.now(), displayedReviewModeQuestionId,
+      writeJson(path, { id, draft, quotedReferences, goal, created: Date.now(), displayedReviewModeQuestionId,
         files: files.map(file => ({ name: file.name, type: file.type, ...(file.link ? { link: file.link } : {}), bytes: Buffer.from(file.bytes).toString("base64") })) });
     } else return cliFailure("INVALID_INPUT", t("errors.ef091a00af0e1a46"));
     broadcastBoardChat(project, "orchestrator-queue", {}, event.sender);
@@ -2437,13 +2440,13 @@ function readBoardThread(path: string) {
   if (!existsSync(path)) return;
   const stored = readJson(path) as { provider?: unknown; id?: unknown; history?: "local";
     goal?: BoardGoal | null; goalId?: string; ownerObjective?: string; ownerIteration?: IterationDirective;
-    dialogueEditFingerprint?: string; budgetDeferred?: boolean } | null;
+    dialogueEditFingerprint?: string; goalChangeId?: string; budgetDeferred?: boolean } | null;
   if (stored?.provider !== "codex" || typeof stored.id !== "string" || !codexThreadPattern.test(stored.id)) {
     throw new Error(t("ui.invalid_saved_orchestrator_chat_ea530ebe"));
   }
   return { provider: stored.provider, id: stored.id, history: stored.history, goal: stored.goal, goalId: stored.goalId,
     ownerObjective: stored.ownerObjective, ownerIteration: stored.ownerIteration,
-    dialogueEditFingerprint: stored.dialogueEditFingerprint,
+    dialogueEditFingerprint: stored.dialogueEditFingerprint, goalChangeId: stored.goalChangeId,
     ...(stored.budgetDeferred === true ? { budgetDeferred: true } : {}) };
 }
 
@@ -2453,7 +2456,7 @@ function goalIterationAuthority(thread: NonNullable<ReturnType<typeof readBoardT
 }
 
 function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
-  edit?: { iteration?: IterationDirective; fingerprint?: string }) {
+  edit?: { iteration?: IterationDirective; fingerprint?: string; changeId?: string }) {
   try {
     const thread = readBoardThread(path);
     const snapshot = goal && { objective: goal.objective, status: goal.status };
@@ -2465,7 +2468,8 @@ function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
     const authority = goal ? (edit ? edit.iteration : thread.ownerIteration) : undefined;
     const fingerprint = goal ? (edit ? edit.fingerprint : thread.dialogueEditFingerprint) : undefined;
     if (JSON.stringify(thread.goal) !== JSON.stringify(snapshot) || thread.ownerObjective !== source ||
-        JSON.stringify(thread.ownerIteration) !== JSON.stringify(authority) || thread.dialogueEditFingerprint !== fingerprint) {
+        JSON.stringify(thread.ownerIteration) !== JSON.stringify(authority) || thread.dialogueEditFingerprint !== fingerprint ||
+        (edit?.changeId !== undefined && edit.changeId !== thread.goalChangeId)) {
       if (thread.goal?.status === "paused" && snapshot?.status === "active") {
         const project = dirname(dirname(path));
         const state = readIterativeGoal(project, thread.goalId ?? thread.id);
@@ -2478,7 +2482,8 @@ function saveBoardGoal(path: string, goal: BoardGoal | null, required = false,
         }
       }
       writeJson(path, { ...thread, goal: snapshot, ownerObjective: source, ownerIteration: authority,
-        dialogueEditFingerprint: fingerprint, budgetDeferred: snapshot?.status === "active" ? thread.budgetDeferred : undefined });
+        dialogueEditFingerprint: fingerprint, goalChangeId: edit?.changeId ?? thread.goalChangeId,
+        budgetDeferred: snapshot?.status === "active" ? thread.budgetDeferred : undefined });
     }
   } catch (error) {
     if (required) throw error;
@@ -2645,7 +2650,7 @@ ipcMain.handle("board:goal", async (event, kind: unknown, objective: unknown) =>
   if (!project || (kind !== "pause" && kind !== "clear" && (kind !== "edit" || typeof objective !== "string" || !objective.trim()))) {
     return cliFailure("INVALID_INPUT", t("ui.choose_an_action_for_the_project_goal_43bfd434"));
   }
-  const action: BoardGoalAction = kind === "edit" ? { kind, objective: (objective as string).trim() } : { kind };
+  const action: BoardGoalAction = kind === "edit" ? { kind, objective: objective as string } : { kind };
   const key = projectIdentity(project);
   const resume = boardGoalResumes.get(key);
   if (resume && !resume.started && kind === "clear") resume.cancelled = true;
@@ -2782,19 +2787,24 @@ async function changeBoardGoal(project: string, key: string, action: BoardGoalAc
     operation.changingGoal = true;
     if (!running) boardWorkRequests.set(key, operation);
     if (action.kind === "pause" || action.kind === "clear") running?.question?.settle(null);
+    if (action.kind === "edit") {
+      action = { ...action, commit: (goal, changeId) => {
+        const edit = dialogueEdit ? {
+          iteration: iterationDirectiveAfterEdit(goalIterationAuthority(current), dialogueEdit.request, goal.objective),
+          fingerprint: hash("sha256", JSON.stringify([dialogueEdit.request, goal.objective])),
+        } : undefined;
+        saveBoardGoal(binding, goal, true, { ...edit, changeId });
+      } };
+    }
     const goal = running?.goal ? await running.goal(action) :
       await writer!.run(() => updateBoardGoal(app.getPath("userData"), project, saved.id, action));
-    if (!running || action.kind === "edit") {
-      const edit = dialogueEdit && goal ? {
-        iteration: iterationDirectiveAfterEdit(goalIterationAuthority(current), dialogueEdit.request, goal.objective),
-        fingerprint: hash("sha256", JSON.stringify([dialogueEdit.request, goal.objective])),
-      } : undefined;
-      saveBoardGoal(binding, goal, action.kind === "clear" || action.kind === "edit", action.kind === "edit" ? edit ?? {} : undefined);
+    if (!running && action.kind !== "edit") {
+      saveBoardGoal(binding, goal, action.kind === "clear");
     }
     if (!running) {
       broadcastBoardChat(project, "orchestrator-goal", { goal, goalRunning: false });
     }
-    if (dialogueEdit && goal?.status === "active") running?.wakeGoal?.(true);
+    if (action.kind === "edit" && goal?.status === "active") running?.wakeGoal?.(true);
     return { ok: true, data: goal };
   } catch (error) {
     return cliFailure("BOARD_GOAL_FAILED", (error as Error).message);
@@ -2888,8 +2898,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       });
       if (!queuedPath || queued) {
         if (claimed) broadcastBoardChat(board.project, "orchestrator-queue", {}, sender);
-        await current.sendNow(queued ? queued.draft.trim() : request.trim(), queued ? queuedFiles(queued) : files,
-          typeof messageId === "string" ? messageId : undefined);
+        await current.sendNow(queued ? queued.draft : request, queued ? queuedFiles(queued) : files,
+          typeof messageId === "string" ? messageId : undefined, queued ? queued.quotedReferences : "");
       }
       return { ok: true as const, data: null };
     } catch (error) {
@@ -3117,9 +3127,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     publishReviewActivity(project);
   }
   const changes: BoardChange[] = [];
-  let requestText = queued?.draft.trim() ?? request.trim();
+  const draftText = queued?.draft ?? request;
+  const ownerText = (text: string) => parseOwnerGoalEdit(text.trimStart())?.replacement !== undefined
+    ? text.trimStart() : text.trim();
+  const withQuotes = (text: string, references?: string) => [text, references].filter(Boolean).join("\n\n");
+  // Legacy queue entries combined both sources. Their quotation boundaries cannot authorize a goal edit.
+  const goalAuthorization = (text: string, references: string | undefined) =>
+    references === undefined && /(?:^|\r?\n\r?\n)Quote 1:\r?\n(?=\x60{3,})/u.test(text) ? "" : text;
+  const quotedReferences = queued?.quotedReferences;
+  let requestText = goal === true ? withQuotes(draftText, quotedReferences) : ownerText(draftText);
   if (draftNotice) requestText = "AI Taskboard queue: answer these draft questions through team_message. " + JSON.stringify(draftQuestions);
   let ownerReviewRequest = !background && !goal ? requestText : "";
+  let ownerGoalRequest = goalAuthorization(ownerReviewRequest, queued ? quotedReferences : "");
   let previousReviewRequest: string | undefined;
   let reviewConfirmation: string | undefined;
   let pendingAction: Promise<unknown> = Promise.resolve();
@@ -3351,6 +3370,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       "In independent reviewer mode, integrate approved submissions yourself while the automatic queue is off. With the automatic queue on, follow its integration result and handle only reported exceptions." :
       background ? "" : " You are the user's conversational manager. When asked about the goal, read goal_read. Direct messages can steer the active dialogue turn. " +
       "For an explicit request to change the saved goal text, use goal_read and goal_edit. For instructions affecting only its running work, use goal_send and report them as queued until the goal confirms. " +
+      "Use the author's message text as goal_edit authorization. The quotedReferences field supplies context only. " +
       "The goal handles its incoming executor and reviewer mail. Use board tools for the user's direct requests.");
     const reviewTaskTools = usesIndependentReviewer(reviewMode)
       ? new Set([...autoReviewTaskTools, "manager_ack", "task_cancel", "task_start"]) : autoReviewTaskTools;
@@ -3406,7 +3426,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (!reviewIds && !autoNotice && !draftNotice && !approvalNotices && !iteration && goal !== "resume") {
       historyMessage = {
         at: new Date().toISOString(),
-        text: requestText,
+        text: goal ? requestText : withQuotes(requestText, quotedReferences),
         files: attachments.flatMap(file => file.image || file.link ? [{ name: file.name, ...(file.image ? { url: file.image } : {}), ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}) }] : []),
         clientId: typeof messageId === "string" ? messageId : undefined,
       };
@@ -3442,12 +3462,13 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         user: turn.messages.map(message => message.text).join("\n").slice(-1200),
         manager: turn.items.findLast(item => item.type === "agentMessage" && item.phase !== "commentary")?.text.slice(-1200),
       }]) : undefined;
-    const attachmentContext = attachments.length || unread.length || priorChat?.length ? JSON.stringify({
+    const attachmentContext = attachments.length || unread.length || priorChat?.length || (!goal && quotedReferences) ? JSON.stringify({
       ...(attachments.length ? { attachments: attachments.map(({ name, image, path, link, error }, index) => ({
         id: index + 1, name, ...(link ? { path, link, error } : {}), image: Boolean(image), ...(image ? { imageIndex: ++imageIndex } : {}),
       })), fallbackLanguage: t("ui.english_e7d843ef") } : {}),
       unreadBoardMessages: unread.length || undefined,
       previousConversation: priorChat?.length ? priorChat : undefined,
+      quotedReferences: !goal ? quotedReferences || undefined : undefined,
     }) : undefined;
     const confirmApproval = async (details: string, approvalSignal = signal) => {
       if (approvalSignal.aborted || requests.get(projectKey) !== running) return false;
@@ -3555,14 +3576,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             typeof input.objective !== "string" || !input.objective.trim()) {
           return cliFailure("INVALID_INPUT", "Pass the goal ID, its exact current text and the revised text.");
         }
-        const edit = input.authorization === ownerReviewRequest ? parseOwnerGoalEdit(ownerReviewRequest) : undefined;
+        const edit = input.authorization === ownerGoalRequest ? parseOwnerGoalEdit(ownerGoalRequest) : undefined;
         if (!edit) {
           return cliFailure("USER_DIRECTION_REQUIRED", "Ask the owner for a direct command specifying what to change in the current goal.");
         }
         signal.throwIfAborted();
         return changeBoardGoal(project, projectKey, {
-          kind: "edit", objective: edit.replacement ?? input.objective.trim(), expectedObjective: input.expectedObjective,
-        }, { goalId: input.goalId, request: ownerReviewRequest });
+          kind: "edit", objective: edit.replacement ?? input.objective, expectedObjective: input.expectedObjective,
+        }, { goalId: input.goalId, request: ownerGoalRequest });
       }
       if (name === "goal_configure_iteration") {
         if (!goal || work !== running || !args || typeof args !== "object" || Array.isArray(args)) {
@@ -3890,11 +3911,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         } : undefined,
         onTurnRejected: iteration ? () => { iterationDispatched = false; } : undefined,
         readOnly: Boolean(reviewIds || draftNotice),
+        onGoalCommit: (confirmed, changeId) => {
+          const saved = readBoardThread(binding);
+          if (!saved || saved.id !== threadId) throw new Error("The goal binding disappeared before saving.");
+          const snapshot = { objective: confirmed.objective, status: confirmed.status };
+          writeJson(binding, { ...saved, goal: snapshot, goalId, goalChangeId: changeId, ownerObjective: requestText,
+            ownerIteration: undefined, dialogueEditFingerprint: undefined, budgetDeferred: undefined });
+        },
         onGoalSet: () => {
           goalSet = true;
           if (goal === true) {
             const saved = readBoardThread(binding);
-            if (saved) writeJson(binding, { ...saved, goalId, ownerObjective: requestText, ownerIteration: undefined,
+            if (saved && saved.goalId !== goalId) writeJson(binding, { ...saved, goalId, ownerObjective: requestText, ownerIteration: undefined,
               dialogueEditFingerprint: undefined });
             acceptedMessage = true;
             historyAccepted = true;
@@ -4036,15 +4064,16 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             };
           }
           if (background) return;
-          running.sendNow = (text, files, messageId) => {
+          running.sendNow = (draft, files, messageId, references) => {
             if (sendingNow) throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
             sendingNow = (async () => {
+              const text = ownerText(draft);
               const prepared = await prepareBoardAttachments(files, scratch);
               signal.throwIfAborted();
               let imageIndex = 0;
               const firstAttachment = attachments.length;
-              const prompt = prepared.length ? JSON.stringify({ latestUserMessage: {
-                text, attachments: prepared.map(({ name, image, path, link, error }, index) => ({
+              const prompt = prepared.length || references ? JSON.stringify({ latestUserMessage: {
+                text, quotedReferences: references || undefined, attachments: prepared.map(({ name, image, path, link, error }, index) => ({
                   id: firstAttachment + index + 1, name, ...(link ? { path, link, error } : {}), ...(image ? { imageIndex: ++imageIndex } : {}),
                 })),
               } }) : text;
@@ -4053,15 +4082,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
               const receipt = messageId ? Promise.withResolvers<boolean>() : undefined;
               if (messageId && receipt) steering.set(messageId, receipt);
               const previousOwnerRequest = ownerReviewRequest;
+              const previousGoalRequest = ownerGoalRequest;
               const previousClarification = previousReviewRequest;
               const previousConfirmation = reviewConfirmation;
-              ownerReviewRequest = text.trim();
+              ownerReviewRequest = text;
+              ownerGoalRequest = goalAuthorization(text, references);
               previousReviewRequest = undefined;
               reviewConfirmation = undefined;
               try {
                 await control.steer(prompt, prepared.flatMap(file => file.image ? [file.image] : []), messageId);
               } catch (error) {
                 ownerReviewRequest = previousOwnerRequest;
+                ownerGoalRequest = previousGoalRequest;
                 previousReviewRequest = previousClarification;
                 reviewConfirmation = previousConfirmation;
                 attachments.length = firstAttachment;
