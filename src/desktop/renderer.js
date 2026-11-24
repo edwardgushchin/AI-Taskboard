@@ -2205,6 +2205,7 @@ function draftComposer() {
   let managerRun;
   let managerBusy = false;
   let queueRetry;
+  let workBudgetRetry;
   let managerWork;
   let startingWork = false;
   let disposed = false;
@@ -2451,7 +2452,6 @@ function draftComposer() {
   }
   function readVisibleMessages() {
     clearTimeout(readRetry);
-    clearTimeout(queueRetry);
     if (!canBrowseHistory() || !api.readManagerMessages || !unread.size || readFrame || readingMessages) return;
     readFrame = requestAnimationFrame(async () => {
       readFrame = undefined;
@@ -3352,6 +3352,8 @@ function draftComposer() {
     disposed = true;
     quoteDraft.close();
     clearTimeout(readRetry);
+    clearTimeout(queueRetry);
+    clearTimeout(workBudgetRetry);
     cancelAnimationFrame(readFrame);
     readObserver.disconnect();
     dialogueViewport.dispose();
@@ -3879,6 +3881,9 @@ function draftComposer() {
       status.append(element("span", () => t("ui.sending_15dba7c5")));
       return;
     }
+    if (job.waitForBudget) {
+      status.append(element("span", () => t("task_chat.waiting_for_limit")));
+    }
     if (job.failed) {
       status.append(element("span", () => t(job.historyPending ? "ui.manager_history_pending" : "ui.not_sent_28bb3764"), "board-queued-failed"));
     }
@@ -4078,7 +4083,7 @@ function draftComposer() {
   };
   function sendWorkNext() {
     const next = queued.find(job => job.goal);
-    if (disposed || refreshingQueue || movingQueue || queueRetry || managerBusy || active || startingWork ||
+    if (disposed || refreshingQueue || movingQueue || queueRetry || workBudgetRetry || managerBusy || active || startingWork ||
         !next || next.failed || next.editing || next.sending || next.inFlight) return;
     startingWork = true;
     syncViews();
@@ -4096,6 +4101,15 @@ function draftComposer() {
       if (!result.ok && result.error.code === "BOARD_REQUEST_IN_PROGRESS") {
         renderQueuedActions(next);
         retryQueue();
+        return;
+      }
+      if (!result.ok && result.error.code === "BOARD_CODEX_BUDGET") {
+        next.waitForBudget = true;
+        renderQueuedActions(next);
+        workBudgetRetry = setTimeout(() => {
+          workBudgetRetry = undefined;
+          sendWorkNext();
+        }, 1000);
         return;
       }
       if (!result.ok) throw new Error(boardError(result.error));
@@ -5858,6 +5872,7 @@ function boardSettings() {
     { name: "executorLimit", type: "number", label: () => t("limits.work"), value: current.taskLimits?.executor },
     { name: "reviewerLimit", type: "number", label: () => t("limits.review"), value: current.taskLimits?.reviewer },
     { name: "codexDailyTokens", label: () => t("limits.board.setting"), value: current.codexDailyTokens },
+    { name: "codexDailyResetTime", label: () => t("limits.board.reset_time"), value: current.codexDailyResetTime ?? "09:00" },
     { name: "managerAccess", label: () => (t("ui.access_mode_on_this_computer_d6a20a28")),
       value: managerAccess, options: [
         ["ask", t("ui.ask_for_approval_cc8bdc3b")],
@@ -5871,6 +5886,11 @@ function boardSettings() {
       return;
     }
     const codexDailyTokens = daily === "" ? null : Number(daily);
+    const codexDailyResetTime = values.codexDailyResetTime;
+    if (!/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(codexDailyResetTime)) {
+      notice(t("limits.board.reset_time_invalid"));
+      return;
+    }
     const agents = {};
     const taskLimits = {};
     for (const [role, title] of roles) {
@@ -5891,6 +5911,7 @@ function boardSettings() {
       ...(values.reviewMode !== reviewMode ? { reviewMode: values.reviewMode } : {}),
       ...(roles.some(([role]) => taskLimits[role] !== current.taskLimits?.[role]) ? { taskLimits } : {}),
       ...(codexDailyTokens !== (current.codexDailyTokens ?? null) ? { codexDailyTokens } : {}),
+      ...(codexDailyResetTime !== (current.codexDailyResetTime ?? "09:00") ? { codexDailyResetTime } : {}),
       ...agents,
     })) {
       if (values.managerAccess !== managerAccess) {
@@ -6575,7 +6596,7 @@ function update(next) {
       byId("settings-menu").matches(":popover-open")) byId("settings-menu").hidePopover();
   if (next.localization) localization.install(next.localization);
   frame = next;
-  window.renderProviderLimits?.(frame.dailyBudget);
+  window.renderProviderLimits?.(frame.dailyBudget, frame.project);
   const languageSelect = byId("language-select");
   if (languageSelect) languageSelect.value = next.localization?.preference ?? "system";
   if (languageChanged) {

@@ -41,8 +41,13 @@ if (typeof document !== "undefined") {
   panel.tabIndex = -1;
   let providers = [];
   let boardBudget;
+  let project;
+  let displayedLocale;
+  let resettingCodex = false;
+  let codexResetOutcome = "";
   function render() {
     if (!localization.state().english) return;
+    displayedLocale = localization.locale;
     const label = t("limits.label");
     panel.setAttribute("aria-label", label);
     const now = Date.now();
@@ -134,32 +139,72 @@ if (typeof document !== "undefined") {
         }
         group.append(list);
       }
+      if (count > 0 && snapshot.resetAccount) {
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.disabled = resettingCodex;
+        reset.textContent = t("limits.reset_codex");
+        reset.addEventListener("click", async () => {
+          if (resettingCodex) return;
+          resettingCodex = true;
+          reset.disabled = true;
+          codexResetOutcome = "";
+          try {
+            const outcome = await window.taskboard.resetCodexLimits(snapshot.resetAccount);
+            if (outcome !== "cancelled") codexResetOutcome = outcome;
+          } catch {
+            codexResetOutcome = "failed";
+          } finally {
+            resettingCodex = false;
+            render();
+          }
+        });
+        group.append(reset);
+      }
+    }
+    if (codexResetOutcome) {
+      const status = document.createElement("p");
+      status.setAttribute("role", "status");
+      status.textContent = t("limits.reset_result." + codexResetOutcome);
+      content.append(status);
     }
     if (boardBudget) {
-      const { limit, spent, remaining, resetsAt, reason } = boardBudget;
-      const format = new Intl.NumberFormat(localization.locale);
+      const { limit, remaining, resetsAt } = boardBudget;
       const quota = document.createElement("section");
       quota.className = "limits-window";
+      quota.dataset.boardBudget = "";
       const title = document.createElement("strong");
       title.textContent = t("limits.board.title");
-      const details = document.createElement("p");
-      details.textContent = t("limits.board.tokens", {
-        limit: format.format(limit), spent: format.format(spent), remaining: format.format(remaining),
-      });
       const meter = document.createElement("meter");
       meter.max = limit;
       meter.value = remaining;
-      meter.setAttribute("aria-label", details.textContent);
+      meter.dataset.resetsAt = String(resetsAt);
+      meter.setAttribute("aria-label", title.textContent);
       const reset = document.createElement("small");
       reset.className = "limits-reset";
       reset.textContent = t("limits.reset", { time: new Date(resetsAt).toLocaleString(localization.locale) });
-      quota.append(title, details, meter, reset);
-      if (reason) {
-        const waiting = document.createElement("p");
-        waiting.textContent = t("limits.board." + reason);
-        quota.append(waiting);
-      }
+      quota.append(title, meter, reset);
       content.append(quota);
+    }
+    if (project) {
+      const openedProject = project;
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.textContent = t("limits.board.reset");
+      reset.addEventListener("click", async () => {
+        reset.disabled = true;
+        try {
+          if (!await window.taskboard.resetBoardBudget(openedProject)) {
+            reset.textContent = t("limits.board.reset_failed");
+          }
+        } catch (error) {
+          console.error(error);
+          reset.textContent = t("limits.board.reset_failed");
+        } finally {
+          reset.disabled = false;
+        }
+      });
+      content.append(reset);
     }
     panel.replaceChildren(content);
   }
@@ -172,6 +217,7 @@ if (typeof document !== "undefined") {
     const open = event.newState === "open";
     control.setAttribute("aria-expanded", String(open));
     if (open) {
+      render();
       panel.focus();
       if (providers.some(provider => provider.state === "error")) {
         void refresh();
@@ -183,7 +229,21 @@ if (typeof document !== "undefined") {
   control.setAttribute("aria-controls", panel.id);
   control.setAttribute("aria-expanded", "false");
   window.taskboard.onProviderLimitsChanged(() => { providers = []; render(); void refresh(); });
-  window.renderProviderLimits = budget => {
+  function applyBoardBudget(budget) {
+    boardBudget = budget;
+    if (!panel.matches(":popover-open")) return;
+    const meter = panel.querySelector("[data-board-budget] meter");
+    if (meter && budget && meter.max === budget.limit &&
+        meter.dataset.resetsAt === String(budget.resetsAt)) meter.value = budget.remaining;
+    else if (Boolean(meter) !== Boolean(budget) || meter) render();
+  }
+  window.taskboard.onBoardBudgetChanged(applyBoardBudget);
+  window.renderProviderLimits = (budget, openedProject) => {
+    if (project === openedProject && displayedLocale === localization.locale) {
+      applyBoardBudget(budget);
+      return;
+    }
+    project = openedProject;
     boardBudget = budget;
     render();
   };

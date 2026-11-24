@@ -144,7 +144,7 @@ export interface TaskEvent {
   attachment?: string;
   from?: TaskState;
   to?: TaskState;
-  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[] };
+  chat?: ChatSettings & { files?: string[]; usage?: ChatUsage; commentary?: string[]; requestId?: string };
   previousCodexThreadId?: string;
   runThreadId?: string;
   run?: RunActivity[];
@@ -158,6 +158,7 @@ export interface GitHubMilestone {
 }
 
 export const scheduleTimePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+export const defaultCodexDailyResetTime = "09:00";
 
 export type TaskScheduleRule =
   | ({ time: string; everyMinutes?: never } & (
@@ -227,6 +228,7 @@ export interface Task {
   draftConfirmed?: boolean;
   reviewModeOverride?: { mode: ReviewMode; version: number };
   draftDiscussion?: ({ phase: "queued" | "running" } | { phase: "failed"; reason: string }) & { managerReply?: number };
+  pendingLimitChat?: number[];
   draftManagerReplyThrough?: number;
   expertId?: string;
   expertTeam?: { work?: ExpertPhase; review?: ExpertPhase };
@@ -295,6 +297,7 @@ export interface BoardSettings {
   reviewer?: BoardAgentSettings | null;
   taskLimits?: Partial<AgentLimits>;
   codexDailyTokens?: number;
+  codexDailyResetTime?: string;
   reviewMode?: ReviewMode;
   reviewModeVersion?: number;
   autoReview?: boolean;

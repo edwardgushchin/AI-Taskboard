@@ -227,6 +227,17 @@ function withNewAttachments(
 export function addChatMessage(store: BoardStore, task: Task, input: Record<string, unknown>): Task {
   const draftDiscussion = input.draftDiscussion === true;
   const actor = actorFor(input, "user");
+  const { requestId, waitForLimit } = input;
+  if (requestId !== undefined && (actor !== "user" || typeof requestId !== "string" ||
+      !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/.test(requestId)) ||
+      waitForLimit !== undefined && (actor !== "user" || typeof waitForLimit !== "boolean")) {
+    throw new TaskboardError("INVALID_INPUT", "Invalid queued chat message.");
+  }
+  if (requestId && task.history.some(event => event.actor === "user" && event.chat?.requestId === requestId)) {
+    return task;
+  }
+  const pending = task.pendingLimitChat;
+  let repliesToPending = false;
   const pendingManagerReply = task.draftDiscussion?.managerReply;
   const managerReply = draftDiscussion && input.managerReply !== undefined
     ? number(input.managerReply, "managerReply") : undefined;
@@ -247,7 +258,6 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       throw new TaskboardError("CHAT_CHANGED", "The manager reply is no longer awaiting discussion.");
     }
   }
-  requireRevision(task, input.revision, draftDiscussion);
   const at = input.at;
   if (at !== undefined && (actor !== "agent" || typeof at !== "string" ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at) ||
@@ -271,14 +281,25 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
       (input.confirmsDraft && input.awaitingAnswer))) {
     throw new TaskboardError("INVALID_INPUT", "Only a draft dialogue reply without an open question can confirm the draft.");
   }
+  let queuedDuringReply = false;
   if (!draftDiscussion && actor === "agent") {
     const last = task.history.findLastIndex(event => event.chat);
-    if (last !== number(input.replyTo, "replyTo", 0) || task.history[last]?.actor !== "user") {
+    const replyTo = number(input.replyTo, "replyTo", 0);
+    repliesToPending = pending?.[0] === replyTo;
+    const newerPending = (pending ?? []).filter(index => index > replyTo);
+    const onlyQueuedMessages = newerPending.length > 0 && task.history.slice(replyTo + 1).every((event, offset) =>
+      !event.chat || newerPending.includes(replyTo + offset + 1));
+    const startedBeforeQueue = onlyQueuedMessages && pending![0] > replyTo;
+    if ((!repliesToPending && !startedBeforeQueue && (last !== replyTo || pending?.length)) ||
+        !task.history[replyTo]?.chat || task.history[replyTo]?.actor !== "user") {
       throw new TaskboardError("CHAT_CHANGED", "The last chat message changed before the reply was saved.");
     }
+    queuedDuringReply = onlyQueuedMessages && typeof input.revision === "number" &&
+      task.revision === input.revision + newerPending.length;
   }
-  if (!draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false) {
-    requireRevision(task, input.revision, true);
+  if (!queuedDuringReply) {
+    const revisableDraftReply = !draftDiscussion && actor === "agent" && task.status === "draft" && input.awaitingAnswer === false;
+    requireRevision(task, input.revision, draftDiscussion || revisableDraftReply);
   }
   const requiresChoice = managerReply !== undefined && task.history[managerReply - 1].draftDependencyRequiresChoice;
   const awaitingAnswer = requiresChoice ? true : input.awaitingAnswer;
@@ -290,6 +311,7 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
   const run = actor === "agent" && input.run !== undefined ? parseRunEntries(input.run) : undefined;
   const chat = {
     model, effort,
+    ...(typeof requestId === "string" ? { requestId } : {}),
     ...(commentary.length ? { commentary } : {}),
     ...(usage ? { usage: { used: number(usage.used, "used", 0), limit: number(usage.limit, "limit") } } : {}),
   };
@@ -298,6 +320,11 @@ export function addChatMessage(store: BoardStore, task: Task, input: Record<stri
     const current = attachments.length
       ? invalidateDraftDiscussion({ ...task, attachments: [...task.attachments, ...attachments] })
       : { ...task };
+    if (actor === "user" && (waitForLimit || pending?.length)) {
+      current.pendingLimitChat = [...(pending ?? []), task.history.length];
+    } else if (repliesToPending) {
+      current.pendingLimitChat = pending!.length > 1 ? pending!.slice(1) : undefined;
+    }
     if (actor === "user" && task.status === "draft") {
       // Keep the proof for an unchanged brief while awaiting the outcome of the dialogue.
       current.draftConfirmed = current.draftConfirmed === true || hasDraftConfirmation(current);

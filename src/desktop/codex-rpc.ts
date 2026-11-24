@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { debuglog } from "node:util";
 
 let onQuotaExceeded: (() => void) | undefined;
+export const dailyBudgetInterruption = new Error("Board Codex budget exhausted");
 
 export function watchCodexQuotaExceeded(listener: () => void) {
   onQuotaExceeded = listener;
@@ -123,6 +124,7 @@ export function codexRpc(child: ChildProcess,
   return {
     send,
     fail,
+    drain: () => processing,
     get failed() { return Boolean(failure); },
     close: () => {
       fail(new Error("The Codex session ended."));
