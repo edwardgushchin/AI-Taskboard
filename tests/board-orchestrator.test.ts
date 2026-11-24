@@ -272,6 +272,8 @@ function fixture(t: TestContext) {
       assert.ok(instructions.includes(russianWriting));
       assert.match(instructions, /link cards on this board as #T-0013/);
       assert.match(instructions, /#Board name\/T-0013, with the actual board name/);
+      assert.match(instructions, /inline code when the board name starts with a task ID/);
+      assert.ok(instructions.includes("`#T-0001 Свод/T-0002`"));
       const manualTurn = instructions.includes("Обычная доска личных дел");
       const reviewTurn = Boolean(session.readOnly || session.separateTurn);
       const cleanupTurn = instructions.includes("private maintenance run");

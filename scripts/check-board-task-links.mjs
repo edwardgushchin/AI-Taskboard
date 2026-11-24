@@ -39,7 +39,10 @@ const sourceTitle = "Карточка исходной доски";
 const targetTitle = "Карточка другой доски";
 const mixed = "Сверьте #T-0001 по пути План/Факт/T-0002. Затем (#" + boardName + "/" + task + ").";
 const missing = "Проверка #Отсутствующая доска/T-0001.";
-const reply = [mixed, missing].join("\n\n");
+const unseenBoard = "T-0001 Свод";
+const unseenTask = "T-0002";
+const unseen = `Ссылка на доску из другого профиля: (\`#${unseenBoard}/${unseenTask}\`).`;
+const reply = [mixed, missing, unseen].join("\n\n");
 const results = [];
 
 function cli(project, args, input) {
@@ -164,6 +167,16 @@ async function capture(window, name) {
   writeFileSync(join(artifacts, name), image.toPNG());
 }
 
+async function expectUnseenBoard(window) {
+  const before = await frame(window);
+  assert.ok(!before.boardReferenceNames.includes(unseenBoard));
+  const remembered = await evaluateWith(window, name => {
+    return localStorage.getItem("taskboard.board-reference-name:" + name);
+  }, unseenBoard);
+  assert.equal(remembered, null);
+  await expectRefusal(window, unseenBoard, "недоступна", unseenTask);
+}
+
 async function run() {
   dialog.showMessageBox = async (_window, options) => {
     assert.equal(options.type, "warning");
@@ -220,7 +233,7 @@ async function run() {
     editor.requestSubmit();
   })()`);
   try {
-    await until(() => evaluate(window, "document.querySelectorAll(" + JSON.stringify(links) + ").length === 3"), "ссылки в новом ответе");
+    await until(() => evaluate(window, "document.querySelectorAll(" + JSON.stringify(links) + ").length === 4"), "ссылки в новом ответе");
   } catch (error) {
     const dialogue = await evaluate(window, "document.querySelector(" + JSON.stringify(log) + ")?.innerHTML");
     console.error(dialogue);
@@ -229,6 +242,8 @@ async function run() {
   assert.equal(await evaluate(window, "document.querySelector(" + JSON.stringify(localLink) + ").closest('p').textContent"), mixed.replaceAll("#", ""));
   await capture(window, "dialogue.png");
   await expectRefusal(window, "Отсутствующая доска", "недоступна");
+  await expectUnseenBoard(window);
+  results.push("Первый ответ в чистом профиле сохранил название «T-0001 Свод» и номер T-0002. Enter показал причину, локальная T-0001 осталась закрытой.");
   await open(window, duplicate);
   await select(window, source);
   await openChat(window);
@@ -254,7 +269,7 @@ async function run() {
   await open(other, target);
   await select(other, source);
   await openChat(other);
-  await until(() => evaluate(other, "document.querySelectorAll(" + JSON.stringify(links) + ").length === 3"), "ответ из сохранённой истории");
+  await until(() => evaluate(other, "document.querySelectorAll(" + JSON.stringify(links) + ").length === 4"), "ответ из сохранённой истории");
   assert.equal(await evaluate(other, "document.querySelector(" + JSON.stringify(localLink) + ").closest('p').textContent"), mixed.replaceAll("#", ""));
   const historyFrame = await frame(other);
   await activate(other, localLink, true);
@@ -262,6 +277,7 @@ async function run() {
   await capture(other, "local-card.png");
   await evaluate(other, "document.querySelector('#close-sheet').click()");
   await expectRefusal(other, "Отсутствующая доска", "недоступна");
+  await expectUnseenBoard(other);
   results.push("Сохранённый ответ прочитан в новом окне. Enter на короткой ссылке открыл исходную карточку с тем же ID.");
 
   await closeTab(other, source);
@@ -329,7 +345,7 @@ async function run() {
   await expectCard(other, target, targetTitle, restored, 2);
   results.push("После восстановления исходного названия работает первоначальная ссылка на «План/Факт».");
 
-  const prefixedName = "T-0001 Свод";
+  const prefixedName = "T-0001 Свод по релизу";
   const secondTitle = "Вторая карточка другой доски";
   cli(target, ["settings"], { name: prefixedName });
   const secondTask = cli(target, ["create"], plannedDraft({ title: secondTitle })).id;
@@ -372,7 +388,7 @@ async function run() {
   await expectCard(other, target, secondTitle, titled, 2, secondTask);
   await capture(other, "prefixed-card.png");
   assert.equal((await frame(window)).project, target);
-  results.push("Ссылка на «T-0001 Свод» сохранила название и T-0002 после переименования и перезагрузки окна. Показана причина, локальная T-0001 не открылась. После восстановления имени Enter открыл T-0002. Короткая T-0001 перед «по пути План/Факт/T-0002» открыла исходную карточку.");
+  results.push(`Ссылка на «${prefixedName}» сохранила название и T-0002 после переименования и перезагрузки окна. Показана причина, локальная T-0001 не открылась. После восстановления имени Enter открыл T-0002. Короткая T-0001 перед «по пути План/Факт/T-0002» открыла исходную карточку.`);
 
   await open(other, source);
   await closeTab(other, target);
@@ -386,7 +402,7 @@ async function run() {
   const recentPrefixed = await frame(other);
   await activate(other, prefixedLink, true);
   await expectCard(other, target, secondTitle, recentPrefixed, 2, secondTask);
-  results.push("Ссылка на закрытую «T-0001 Свод» из списка недавних открыла T-0002 в исходной позиции вкладки.");
+  results.push(`Ссылка на закрытую «${prefixedName}» из списка недавних открыла T-0002 в исходной позиции вкладки.`);
 
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
   const version = execFileSync(process.env.TASKBOARD_CHECK_NODE, ["--version"], { encoding: "utf8", windowsHide: true }).trim();

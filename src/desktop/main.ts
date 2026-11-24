@@ -4189,7 +4189,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
       }, requestTools, instructions +
       "\nIn chat replies, link cards on this board as #T-0013. For another board use #Board name/T-0013, with the actual board name as displayed in its tab. " +
-      "When the name contains # or Markdown punctuation, put the whole reference in inline code to preserve the name. " + (recovery ?
+      "Put the whole cross-board reference in inline code when the board name starts with a task ID or contains # or Markdown punctuation. " +
+      "For example, write `#T-0001 Свод/T-0002`, including the backticks, even if the board is unavailable. " + (recovery ?
         "\nRecover the owner's saved request. Inspect current state before answering. Some actions may already have happened. " +
         "Report what is confirmed and which actions still need a new explicit request. This recovery is read-only." : "") +
         (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
