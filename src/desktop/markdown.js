@@ -129,9 +129,8 @@ function createChatMarkdown() {
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   const quotedBoardReference = /^#(?<board>[^\s\0][^\r\n\0]*?)\/(?<foreignTask>T-\d{4,})$/u;
   const shortTaskReference = String.raw`#?T-\d{4,}`;
+  const leadingTaskId = /^T-\d{4,}(?=[\s,;:!?)]|\.(?![\p{L}\p{N}]))/u;
   const references = [
-    // Punctuation attached to a short ID ends the reference before a nearby path.
-    String.raw`${shortTaskReference}(?=[,;:!?)]|\.(?![\p{L}\p{N}]))`,
     String.raw`#(?<board>[^#\s\0][^#\r\n\0]*?)\/(?<foreignTask>T-\d{4,})`,
     shortTaskReference,
     String.raw`v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?`,
@@ -169,7 +168,10 @@ function createChatMarkdown() {
           const type = id ? "chat_task" : fullDigest.test(value) || shortCommit.test(value) ? "code_inline" : "chat_version";
           const part = new state.Token(type, type === "code_inline" ? "code" : "", 0);
           part.content = id ?? value;
-          if (match.groups.board) part.meta = { board: match.groups.board };
+          if (match.groups.board) {
+            const localId = quoted ? undefined : leadingTaskId.exec(match.groups.board)?.[0];
+            part.meta = { board: match.groups.board, localId };
+          }
           parts.push(part);
           cursor = match.index + value.length;
         }
@@ -187,8 +189,15 @@ function createChatMarkdown() {
     const { content: id, meta } = tokens[index];
     const escape = chatMarkdown.utils.escapeHtml;
     const label = meta ? meta.board + "/" + id : id;
+    const icon = '<i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>';
+    if (meta?.localId) {
+      const { localId } = meta;
+      const candidate = `data-candidate-board="${escape(meta.board)}" data-candidate-task="${id}" data-local-task="${localId}"`;
+      const local = `<a class="chat-task-reference" href="#${localId}" data-task="${localId}" ${candidate}>${icon}${localId}</a>`;
+      return local + "<span>" + escape(label.slice(localId.length)) + "</span>";
+    }
     const board = meta ? ' data-task-board="' + escape(meta.board) + '"' : "";
-    return `<a class="chat-task-reference" href="#${escape(label)}" data-task="${id}"${board}><i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>${escape(label)}</a>`;
+    return `<a class="chat-task-reference" href="#${escape(label)}" data-task="${id}"${board}>${icon}${escape(label)}</a>`;
   };
   chatMarkdown.renderer.rules.chat_version = (tokens, index) =>
     `<span class="chat-version"><i class="icon codicon codicon-milestone" aria-hidden="true"></i>${chatMarkdown.utils.escapeHtml(tokens[index].content)}</span>`;
@@ -491,6 +500,24 @@ function showHexColors(block, plainText = false) {
   }
 }
 
+function syncBoardReferenceLinks(container, names) {
+  for (const link of container.querySelectorAll("[data-candidate-board]")) {
+    const { candidateBoard, candidateTask, localTask } = link.dataset;
+    const qualified = names.includes(candidateBoard.trim().normalize("NFC"));
+    const board = qualified ? candidateBoard : undefined;
+    if (link.dataset.taskBoard === board) continue;
+
+    const id = qualified ? candidateTask : localTask;
+    const label = qualified ? board + "/" + id : id;
+    if (qualified) link.dataset.taskBoard = board;
+    else delete link.dataset.taskBoard;
+    link.dataset.task = id;
+    link.setAttribute("href", "#" + label);
+    link.lastChild.textContent = label;
+    link.nextElementSibling.hidden = qualified;
+  }
+}
+
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
   const markdown = context.taskWork ? workMarkdown : chatMarkdown;
@@ -518,6 +545,7 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
   } else {
     block.innerHTML = markup;
   }
+  syncBoardReferenceLinks(block, typeof frame === "undefined" ? [] : frame.boardReferenceNames ?? []);
   formatReportReferences(block);
   for (const link of block.querySelectorAll("a[href]")) {
     const path = localPngPath(link.getAttribute("href"));

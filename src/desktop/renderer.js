@@ -6763,6 +6763,7 @@ function update(next) {
   const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
+  const referenceNamesChanged = JSON.stringify(frame.boardReferenceNames) !== JSON.stringify(next.boardReferenceNames);
   if (projectChanged) byId("board-composer").firstChild?.suspendBoardView?.();
   let cardLayout;
   if (!projectChanged && frame.board && next.board && !archiveView && !reducedMotion.matches && !document.hidden) {
@@ -6823,6 +6824,9 @@ function update(next) {
   }
   render(cardLayout);
   syncBoardNotice(projectChanged);
+  if (projectChanged || referenceNamesChanged) {
+    syncBoardReferenceLinks(document, frame.boardReferenceNames ?? []);
+  }
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);
   if (sheetKind === "review" && sheet.open && taskInSheet?.acceptanceRepair) {

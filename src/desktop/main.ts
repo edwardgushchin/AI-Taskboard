@@ -174,9 +174,19 @@ const themes = {
 type Theme = keyof typeof themes;
 let theme: Theme = "system";
 let recentBoards: string[] = [];
+let recentBoardNames = new Map<string, string>();
+
+function readBoardReferenceName(path: string): string {
+  try {
+    return readBoardSettings(runtimeLocation(path)).name?.trim() || basename(path);
+  } catch {
+    return subscriptions.get(path)?.board.settings.name?.trim() || basename(path);
+  }
+}
 
 function loadRecentBoards(): void {
   recentBoards = readRecentBoards(app.getPath("appData"), app.getPath("userData")) ?? recentBoards;
+  recentBoardNames = new Map(recentBoards.map(path => [path, readBoardReferenceName(path)]));
 }
 
 function rememberBoard(path: string, current: ProjectTab): void {
@@ -185,6 +195,9 @@ function rememberBoard(path: string, current: ProjectTab): void {
   } catch {
     recentBoards = normalizeRecentBoards([path, ...recentBoards]);
   }
+  const name = current.board?.settings.name?.trim() || basename(path);
+  recentBoardNames.set(path, name);
+  recentBoardNames = new Map(recentBoards.map(path => [path, recentBoardNames.get(path) ?? readBoardReferenceName(path)]));
   for (const state of windowStates.values()) {
     if (state.window !== current.window) send(state.active);
   }
@@ -367,6 +380,14 @@ function frame(state: ProjectTab) {
       return log ? [[task.id, log]] : [];
     }) ?? []),
     recentBoards: recentBoards.map(path => ({ name: basename(path) || path, path })),
+    boardReferenceNames: [...new Set([
+      ...recentBoards.map(path => {
+        const board = subscriptions.get(path)?.board;
+        return board ? board.settings.name?.trim() || basename(path) : recentBoardNames.get(path);
+      }),
+      ...[...subscriptions.values()].filter(watch => watch.tabs.size)
+        .map(({ board }) => board.settings.name?.trim() || basename(board.project)),
+    ].filter(name => name !== undefined).map(name => name.normalize("NFC")))].sort(),
   };
 }
 
@@ -424,6 +445,9 @@ function unbind(state: ProjectTab): void {
 
 function releaseWatch(project: string, watch: BoardWatch): void {
   if (!watch.tabs.size && !watch.listeners.size) {
+    if (recentBoards.includes(project)) {
+      recentBoardNames.set(project, watch.board.settings.name?.trim() || basename(project));
+    }
     watch.stop();
     subscriptions.delete(project);
     releaseBoardUsage(project);
@@ -5084,16 +5108,8 @@ ipcMain.handle("board:follow-reference", async (event, origin: unknown, name: un
     const identity = projectIdentity(path);
     if (!projects.has(identity)) projects.set(identity, path);
   }
-  const matches = [...projects.values()].filter(path => {
-    let title: string | undefined;
-    try {
-      title = readBoardSettings(runtimeLocation(path)).name;
-    } catch {
-      // A missing recent directory can still be identified by its folder name.
-      title = subscriptions.get(path)?.board.settings.name;
-    }
-    return normalizeName(title?.trim() || basename(path)) === requestedName;
-  });
+  const matches = [...projects.values()].filter(path =>
+    normalizeName(recentBoardNames.get(path) ?? readBoardReferenceName(path)) === requestedName);
   if (matches.length > 1) {
     return cliFailure("AMBIGUOUS_BOARD", t("ui.task_reference_board_ambiguous", { name }));
   }
