@@ -192,12 +192,42 @@ export class CodexTokenUsage {
         !current.totalUncertain && !current.cacheUncertain && !current.cacheGap && current.confirmed?.tokens) return;
     const input = createReadStream(path);
     const lines = createInterface({ input, crlfDelay: Infinity });
-    const recovered = new CodexTokenUsage(sample => this.observeConfirmed?.({ ...sample, historical: true }));
+    const checkpoint = this.recoverConfirmed?.(threadId, turn.id);
+    const baseline = checkpoint && uncachedTokens(checkpoint.counters);
+    let previous: TokenCounts | undefined;
+    let hasEarlierSample = false;
+    let checkpointTokens: number | undefined;
+    const recovered = new CodexTokenUsage(sample => {
+      let tokens = sample.tokens;
+      if (checkpoint && baseline != null && sample.counters) {
+        const { totalTokens, cachedInputTokens } = sample.counters;
+        const priorTotal = checkpoint.counters.totalTokens!;
+        const priorCached = checkpoint.counters.cachedInputTokens!;
+        if (totalTokens !== null && cachedInputTokens !== null) {
+          if (totalTokens <= priorTotal && cachedInputTokens <= priorCached && totalTokens < priorTotal) {
+            hasEarlierSample = true;
+          }
+          const increase = totalTokens - cachedInputTokens - baseline;
+          if (totalTokens >= priorTotal && cachedInputTokens >= priorCached && increase >= 0) {
+            const confirmed = checkpoint.tokens + increase;
+            if (Number.isSafeInteger(confirmed)) {
+              // A fragment's last count can overlap the saved checkpoint.
+              // Keep an independently reconstructed prefix when available.
+              if (previous || hasEarlierSample) {
+                tokens = Math.max(tokens, confirmed);
+              } else {
+                tokens = checkpointTokens = confirmed;
+              }
+            }
+          }
+        }
+      }
+      this.observeConfirmed?.({ ...sample, tokens, historical: true });
+    });
     recovered.track(threadId, current?.model ?? null, true);
     let verified = false;
     let active: string | undefined;
     let firstTurn: string | undefined;
-    let previous: TokenCounts | undefined;
     let found = false;
     let finished = false;
     let completedAt = turn.completedAt;
@@ -265,8 +295,11 @@ export class CodexTokenUsage {
     if (found) {
       const status = turn.status === "inProgress" && finished ? "completed" : turn.status;
       const report = recovered.completeTurn(threadId, { ...turn, status, completedAt }) ?? recovered.finish(true);
-      if (!finished) {
-        for (const record of report?.records ?? []) record.dailyRecoveryPending = true;
+      for (const record of report?.records ?? []) {
+        if (checkpointTokens !== undefined && record.dailyTokens != null) {
+          record.dailyTokens = checkpointTokens;
+        }
+        if (!finished) record.dailyRecoveryPending = true;
       }
       return report;
     }

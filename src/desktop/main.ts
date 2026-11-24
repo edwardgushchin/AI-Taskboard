@@ -1230,7 +1230,7 @@ function recoverBoardUsage(watch: BoardWatch) {
     const write = usageWriter(project, async report => saveDailyUsage(project, charge.role ?? "manager", report, charge.task));
     const usage = new CodexTokenUsage(sample => {
       if (subscriptions.get(project) === watch && !closingProjects.has(project)) write.observe?.(sample);
-    });
+    }, write.recover);
     const report = await usage.recoverRollout(thread.path, charge.threadId, {
       id: charge.turnId,
       status: charge.completedAt === undefined ? "inProgress" : "completed",

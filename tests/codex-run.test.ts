@@ -645,14 +645,17 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   function writeRollout(...tail: object[]) {
     writeFileSync(path, [...events, ...tail].map(event => JSON.stringify(event)).join("\n") + "\n");
   }
-  function rolloutSample(time: number, total: number, cached: number) {
+  function rolloutSample(time: number, total: number, cached: number, lastTotal = total, lastCached = cached) {
     const counters = { total_tokens: total, cached_input_tokens: cached };
     return {
       type: "event_msg",
       timestamp: new Date(time).toISOString(),
       payload: {
         type: "token_count",
-        info: { total_token_usage: counters, last_token_usage: counters },
+        info: {
+          total_token_usage: counters,
+          last_token_usage: { total_tokens: lastTotal, cached_input_tokens: lastCached },
+        },
       },
     };
   }
@@ -695,13 +698,13 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     assert.equal(candidate?.threadId, thread);
     assert.equal(candidate.turnId, "turn-1");
     assert.equal(candidate.completedAt, undefined);
-    const usage = new CodexTokenUsage(sample => reopened.observe(sample));
+    const usage = new CodexTokenUsage(sample => reopened.observe(sample), (...key) => reopened.recover(...key));
     const recovered = await usage.recoverRollout(path, candidate.threadId, { id: candidate.turnId, status: "inProgress" });
     assert.ok(recovered);
     return recovered;
   }
-  const second = rolloutSample(lateAt, 145, 60);
-  writeRollout(first, second);
+  const second = rolloutSample(lateAt, 145, 60, 25, 10);
+  writeRollout(second, second);
   const partial = await recoverLate();
   assert.equal(partial.records[0].completedAt, undefined);
   assert.equal(partial.records[0].dailyRecoveryPending, true);
@@ -709,13 +712,14 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   assert.equal(reopened.get(85, lateAt, resetTime).reason, "exhausted");
   assert.equal(reopened.reconcile(partial).records.length, 0);
   assert.equal(reopened.reconcile(await recoverLate()).records.length, 0);
-  writeRollout(first, second, {
+  writeRollout(second, {
     type: "event_msg",
     timestamp: new Date(lateAt).toISOString(),
     payload: { type: "task_complete", turn_id: "turn-1" },
   });
   const final = await recoverLate();
   assert.equal(final.records[0].completedAt, lateAt);
+  assert.equal(final.records[0].dailyTokens, 85);
   assert.equal(reopened.reconcile(final).records.length, 0);
   const saved = new BoardCodexUsage(folder);
   assert.equal(saved.get(85, lateAt, resetTime).spent, 85);

@@ -526,6 +526,49 @@ for (const legacy of [true, false]) {
   });
 }
 
+test("rollout recovery preserves earlier timestamps and charges only an extension of the saved baseline", async t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-checkpoint-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const at = new Date(2026, 10, 24, 9).getTime();
+  const path = join(project, "rollout.jsonl");
+  const ledger = new BoardCodexUsage(project);
+  ledger.observe({
+    threadId: "thread", turnId: "turn", tokens: 70, observedAt: at,
+    counters: { ...emptyTokenCounts(), totalTokens: 120, cachedInputTokens: 50 },
+  });
+  assert.equal(ledger.flush(), true);
+  const reopened = new BoardCodexUsage(project);
+  const usage = new CodexTokenUsage(sample => reopened.observe(sample), (...key) => reopened.recover(...key));
+  const total = (offset: number, full: number, cached?: number) => ({
+    type: "event_msg",
+    timestamp: new Date(at + offset).toISOString(),
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { total_tokens: full, cached_input_tokens: cached },
+        last_token_usage: { total_tokens: full, cached_input_tokens: cached },
+      },
+    },
+  });
+  const events = [
+    { type: "session_meta", payload: { id: "thread" } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "other" } },
+    total(-3000, 10, 2),
+    { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+    total(-2000, 100, 40),
+    total(-1000, 120, 50),
+    total(1000, 145),
+    total(2000, 145, 60),
+  ];
+  writeFileSync(path, events.map(event => JSON.stringify(event)).join("\n") + "\n");
+  const result = await usage.recoverRollout(path, "thread", { id: "turn", status: "inProgress" });
+  assert.ok(result);
+  assert.equal(reopened.get(100, at - 1).spent, 70);
+  assert.equal(reopened.get(100, at + 2000).spent, 15);
+  assert.equal(reopened.flush(), true);
+});
+
 test("a dated zero baseline keeps a recent unconfirmed turn available after restart", t => {
   const project = mkdtempSync(join(tmpdir(), "codex-budget-zero-base-"));
   t.after(() => rmSync(project, { recursive: true, force: true }));
