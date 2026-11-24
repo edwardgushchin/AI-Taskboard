@@ -3325,6 +3325,7 @@ function draftComposer() {
   const historyRunHeights = new WeakMap();
   let savedLogWidth;
   let recentTurns;
+  let recentDelivered;
   let recentNodes = [];
   let historyUnmounted = false;
   const previewUrls = [];
@@ -3514,44 +3515,52 @@ function draftComposer() {
         if (disposed || reloadAfterHistory || !canBrowseHistory()) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
         void refreshGoalAvailability();
-        const generation = historyGeneration;
-        const canInstall = () => !disposed && !reloadAfterHistory &&
-          generation === historyGeneration && canBrowseHistory();
-        // A large saved reply can monopolize the renderer while the user starts typing.
         const turns = result.data.turns;
         const needsLiveState = active || turns.some(turn => turn.recovery);
-        const prepared = needsLiveState ? undefined : await prepareRecentHistory(turns, canInstall);
-        if (!canInstall()) {
-          if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
-          return;
-        }
-        const oldImages = [...log.querySelectorAll(".chat-attachments img")];
-        let delivered;
-        dialogueViewport.update(() => {
-          const previousReplies = new Set([...log.querySelectorAll("[data-message-id], .board-manager-message[data-item]")].map(node =>
-            node.dataset.messageId ?? node.dataset.item.slice("message:".length)));
-          historyGeneration++;
-          olderNodes.length = 0;
-          olderPages.length = 0;
-          recentTurns = turns;
-          recentCursor = olderCursor = result.data.nextCursor;
-          seenMessages.clear();
-          const next = prepared ?? renderHistoryPage(recentTurns);
-          if (prepared) rememberMessages(next.page);
-          recentNodes = [...next.page.children];
-          historyUnmounted = false;
-          delivered = next.delivered;
-          if (hasDialogueHistory) for (const reply of next.page.querySelectorAll("[data-message-id]")) {
-            if (!previousReplies.has(reply.dataset.messageId)) reply.setAttribute("data-enter", "");
+        // A focus refresh still reads disk. Keep the mounted page and reading anchor
+        // when the stored dialogue and pagination boundary have not changed.
+        const unchanged = !needsLiveState && !historyUnmounted && recentDelivered &&
+          recentCursor === result.data.nextCursor && JSON.stringify(turns) === JSON.stringify(recentTurns);
+        let delivered = recentDelivered;
+        let oldImages = [];
+        if (!unchanged) {
+          const generation = historyGeneration;
+          const canInstall = () => !disposed && !reloadAfterHistory &&
+            generation === historyGeneration && canBrowseHistory();
+          // A large saved reply can monopolize the renderer while the user starts typing.
+          const prepared = needsLiveState ? undefined : await prepareRecentHistory(turns, canInstall);
+          if (!canInstall()) {
+            if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
+            return;
           }
-          log.replaceChildren(olderHistory, greeting, next.page);
-          for (const binding of prepared?.bindings ?? []) localizedBindings.add(binding);
-          if (active?.entry) log.append(active.entry);
-          if (active) log.append(active.container, active.thinking);
-          updateOlderHistory();
-          greeting.hidden = log.childElementCount > 2;
-          updateUnreadMessages();
-        });
+          oldImages = [...log.querySelectorAll(".chat-attachments img")];
+          dialogueViewport.update(() => {
+            const previousReplies = new Set([...log.querySelectorAll("[data-message-id], .board-manager-message[data-item]")].map(node =>
+              node.dataset.messageId ?? node.dataset.item.slice("message:".length)));
+            historyGeneration++;
+            olderNodes.length = 0;
+            olderPages.length = 0;
+            recentTurns = turns;
+            recentCursor = olderCursor = result.data.nextCursor;
+            seenMessages.clear();
+            const next = prepared ?? renderHistoryPage(recentTurns);
+            if (prepared) rememberMessages(next.page);
+            recentNodes = [...next.page.children];
+            historyUnmounted = false;
+            delivered = next.delivered;
+            recentDelivered = active || needsLiveState ? undefined : delivered;
+            if (hasDialogueHistory) for (const reply of next.page.querySelectorAll("[data-message-id]")) {
+              if (!previousReplies.has(reply.dataset.messageId)) reply.setAttribute("data-enter", "");
+            }
+            log.replaceChildren(olderHistory, greeting, next.page);
+            for (const binding of prepared?.bindings ?? []) localizedBindings.add(binding);
+            if (active?.entry) log.append(active.entry);
+            if (active) log.append(active.container, active.thinking);
+            updateOlderHistory();
+            greeting.hidden = log.childElementCount > 2;
+            updateUnreadMessages();
+          });
+        }
         await restoreQueue().catch(() => {});
         for (const job of [...queued]) {
           if (!delivered.has(job.id) || job.sending) continue;
