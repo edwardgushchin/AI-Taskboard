@@ -3380,11 +3380,12 @@ function draftComposer() {
   };
   function deferHistoryRunLayout(node, height) {
     node.style.contentVisibility = "auto";
-    node.style.containIntrinsicBlockSize = "auto " + height + "px";
+    // Chromium retains the measured size after it lays out the reply near the viewport.
+    node.style.containIntrinsicBlockSize = `auto ${height ?? 480}px`;
   }
 
   function deferMountedHistoryLayout(nodes) {
-    // Measure the installed page before changing styles so offscreen replies keep their space.
+    // An older page is inserted above the current anchor. Keep its measured size.
     const measured = [];
     for (const node of nodes) {
       const turn = historyRuns.get(node);
@@ -3395,7 +3396,7 @@ function draftComposer() {
     for (const { node, height } of measured) deferHistoryRunLayout(node, height);
   }
 
-  function* renderHistoryTurns(turns, page, delivered, messages, reuseHeights) {
+  function* renderHistoryTurns(turns, page, delivered, messages, reuseHeights, deferLayout = false) {
     const liveIds = new Set(active?.items?.map(item => item.id));
     let markdownCache = historyMarkup.get(turns);
     if (!markdownCache) {
@@ -3434,7 +3435,9 @@ function draftComposer() {
       if (!container.hidden) {
         historyRuns.set(container, turn);
         const height = reuseHeights ? historyRunHeights.get(turn) : undefined;
-        if (height) deferHistoryRunLayout(container, height);
+        if (height || (deferLayout && !turn.recovery)) {
+          deferHistoryRunLayout(container, height);
+        }
         page.append(container);
       }
       yield;
@@ -3465,7 +3468,7 @@ function draftComposer() {
       }
     };
     let deadline = performance.now() + 8;
-    for (const _ of renderHistoryTurns(turns, page, delivered, messages, false)) {
+    for (const _ of renderHistoryTurns(turns, page, delivered, messages, false, true)) {
       if (performance.now() >= deadline) {
         saveBindings();
         await scheduler.yield();
@@ -3592,7 +3595,6 @@ function draftComposer() {
             greeting.hidden = log.childElementCount > 2;
             updateUnreadMessages();
           });
-          if (prepared) deferMountedHistoryLayout(recentNodes);
         }
         await restoreQueue().catch(() => {});
         for (const job of [...queued]) {
