@@ -454,12 +454,14 @@ body:has(> .project-tabs:not([hidden]))::before {
 .board-draft[data-resizing] .board-chat { transition: none; }
 .board-chat-bar {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 6px; flex: none;
+  grid-template-rows: minmax(32px, auto);
   padding: 7px var(--board-chat-inset); margin-bottom: 8px;
 }
 .board-chat-bar, .task-chat > .chat-header {
   border-block-end: 1px solid var(--border);
 }
 .board-chat-pin.button {
+  grid-column: 3;
   justify-self: end; width: 30px; height: 30px; min-height: 0; padding: 0; border-color: transparent; color: var(--muted);
 }
 .board-chat-pin[aria-pressed="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -474,6 +476,7 @@ body:has(> .project-tabs:not([hidden]))::before {
 .board-chat-views .board-work-toggle.working { color: var(--blue); }
 .board-work-timeline { display: grid; gap: 10px; }
 .board-chat-resize {
+  grid-column: 2;
   display: grid; place-items: center; width: 56px; height: 28px; border-radius: 6px; cursor: ns-resize; touch-action: none;
 }
 .board-chat-resize:focus-visible { outline-offset: -2px; }
