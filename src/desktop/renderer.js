@@ -4287,7 +4287,8 @@ function draftComposer() {
     const row = element("div", undefined, "board-queued-row");
     row.setAttribute("role", "listitem");
     const handle = goal ? undefined : reorderHandle();
-    row.append(handle ?? icon("target"));
+    const preview = element("span", undefined, "board-queued-preview");
+    row.append(handle ?? icon("target"), preview);
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
       const thumbnail = button("", () => previewImages(images, images[0]), "quiet board-queued-thumbnail");
@@ -4301,9 +4302,8 @@ function draftComposer() {
       row.append(icon("file"));
     }
     if (messageFiles.length) row.title = messageFiles.map(file => file.name).join("\n");
-    const preview = element("span", undefined, "board-queued-preview");
     const status = element("div", undefined, "board-queued-status");
-    row.append(preview, status);
+    row.append(status);
     queue.append(row);
     const job = { id, row, preview, status, handle, draft, quotedReferences, goal, submitted, messageFiles,
       failed, inFlight, recovery, historyPending };
