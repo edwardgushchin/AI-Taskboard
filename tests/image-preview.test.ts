@@ -27,6 +27,7 @@ function preview(count = 5, initialSrc: string | null = "image-0") {
     hidden = false;
     disabled = false;
     open = false;
+    popoverOpen = false;
     alt = "";
     textContent = "";
     value = "";
@@ -76,6 +77,12 @@ function preview(count = 5, initialSrc: string | null = "image-0") {
     }
     addEventListener(name: string, listener: (event?: any) => void) { this.events.set(name, listener); }
     showModal() { this.open = true; }
+    matches(selector: string) {
+      assert.equal(selector, ":popover-open");
+      return this.popoverOpen;
+    }
+    showPopover() { this.popoverOpen = true; }
+    hidePopover() { this.popoverOpen = false; }
     close() { this.open = false; this.events.get("close")?.(); }
     getBoundingClientRect() { return { left: 0, top: 0 }; }
     scrollBy() {}

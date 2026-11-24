@@ -508,6 +508,7 @@ test("quit can retry a locked package and handles vetoes of a confirmed installa
       windowStates: new Map([[1, { closing: scenario === "window closing", tabs: [] }]]),
       quitting: false,
       quitPending: false,
+      boardUsage: new Map(),
       updateBusy: () => scenario === "busy" || (scenario === "busy after close confirmation" && confirmCalls > 0),
       confirmProjectClose: async () => {
         confirmCalls++;

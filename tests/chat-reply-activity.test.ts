@@ -1,4 +1,4 @@
-import { activeManagerGoal } from "../src/cli/manager-goal.ts";
+import { activeManagerGoal, managerGoalState } from "../src/cli/manager-goal.ts";
 import localization from "../src/desktop/localization.cjs";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
 import assert from "node:assert/strict";
@@ -8,14 +8,18 @@ import { basename, extname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
+import { serialize } from "node:v8";
 import ts from "typescript";
 import { changeTask, createTask } from "../src/cli/tasks.ts";
-import { TaskboardError, type RunActivity } from "../src/cli/model.ts";
+import { TaskboardError, reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion, usesIndependentReviewer, type RunActivity } from "../src/cli/model.ts";
 import { projectLabels } from "../src/desktop/project-tabs.ts";
 import { createAgentSlots } from "../src/desktop/agent-limits.ts";
 import type { RuntimeEntry } from "../src/desktop/board-runtime.ts";
 import { matchesQueuedExecutor } from "../src/desktop/board-runtime.ts";
-import { taskChatActions } from "../src/desktop/chat-actions.ts";
+import { reviewModeConfirmation, reviewModeQuestion, taskChatActions } from "../src/desktop/chat-actions.ts";
+import { CodexQuotaExceeded, dailyBudgetInterruption } from "../src/desktop/codex-rpc.ts";
+import { launchableTasks, nextReadyTask } from "../src/desktop/auto-queue.ts";
+import { pendingReviewApprovals } from "../src/desktop/automation-delivery.ts";
 
 const source = readFileSync(new URL("../src/desktop/main.ts", import.meta.url), "utf8");
 const parsed = ts.createSourceFile("main.ts", source, ts.ScriptTarget.Latest, true);
@@ -26,6 +30,10 @@ const names = new Set([
   "discussionActivityByTask", "publishDiscussionActivity",
   "managerQuestion", "executorLimit",
   "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations",
+  "releaseBoardUsage", "boardUsage", "budgetPublications", "interruptedForLimit", "dailyBudgetFailure",
+  "reviewRetryFor", "reviewRetryBinding",
+  "canScheduleAutoReview", "autoReviewTab", "availableReviewSlots", "readyReviews", "reviewAttempt",
+  "scheduleAutoBoard", "autoBoards", "managerNoticeKey", "nextDeferredExecutor", "launchDeferredExecutor",
 ]);
 // Exercise the main-process lifecycle without starting Electron or a real provider.
 const activitySource = parsed.statements.filter(node => {
@@ -54,14 +62,23 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const runtime = runInNewContext(stripTypeScriptTypes(activitySource.replace("function scheduleAgentWork() {", "function scheduleAgentWork() { if (!subscriptions.size) { noteSchedule(); return; }")) +
     "\n({ sendChat, stopChat, returnTaskToDraft, activeAgents, frame, windowStates, runningTasks, launchingTasks, notifyRunChange, chatRuns, replyingTasks, scheduleAgentWork })", {
     currentActiveGoal: activeManagerGoal,
+    currentManagerGoal: managerGoalState,
+    reviewsAcceptanceRepair, taskReviewMode, taskReviewModeVersion, usesIndependentReviewer,
+    reviewModeConfirmation, reviewModeQuestion,
+    CodexQuotaExceeded, dailyBudgetInterruption, serialize,
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
     boardCodexBudget: () => undefined, boardBudgetFailure: () => undefined, saveDailyUsage: () => {},
+    usageWriter: (_project: string, write: unknown) => write,
+    clearTimeout,
     applicationUpdates: { installing: false },
     agentSlots: { ...slots, entries: (project: string) => sharedRuns.get(project) ?? [] },
     registerRuntime: () => () => {}, matchesQueuedExecutor, activeRunSummary, basename, extname, join, performance, projectLabels, AbortController, AbortSignal, wait, subscriptions,
     isManual: () => options.manual, runtimeLocation: (project: string) => project, readBoardSettings: () => ({}),
     noteSchedule: () => scheduled.push(true), setImmediate: (callback: () => void) => callback(), reserveAgent: slots.acquire,
-    scheduleAutoReview: () => {}, scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
+    scheduleAutoReview: () => {}, scheduleDraftDiscussions: () => {},
+    scheduleLimitChat: () => {},
+    launchableTasks, nextReadyTask, pendingReviewApprovals,
+    broadcastBoardChat: (_project: string, _type: string, { error }: { error: string }) => assert.fail(error),
     executorBusy: (project: string, id: string) => runtime.chatRuns.has(project + "\0" + id),
     launchTask: async () => {
       launches.push(task.revision);
@@ -80,6 +97,7 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
       taskChatActions(project, structuredClone(card), text, changed, callback),
     maxAttachmentBytes: 64 * 1024 * 1024,
     callCli: async (_project: string, args: string[], input: { actor?: string; text?: string; model?: string; effort?: string; replyTo?: number; revision?: number; reason?: string; retryAt?: number }) => {
+      if (args[0] === "list") return { ok: true, data: subscriptions.get(_project).board };
       if (args[0] === "review") return { ok: true, data: { revision: task.revision, targetHead: null, settings: { reviewMode: "human" } } };
       if (args[0] === "request-changes") {
         if (options.returnFailure) return { ok: false, error: { code: "STORAGE_ERROR" } };
@@ -133,9 +151,10 @@ function fixture(options: { writeFailure?: boolean; attachmentFailure?: boolean;
   const windows = ["project-a", "project-a", "project-b"].map((project, index) => {
     const updates: string[][] = [];
     const discussion: unknown[] = [];
-    const state = { project, board: { project, tasks: [task, { ...task, id: "T-0002" }] }, window: {
+    const state = { project, board: { project, settings: {}, tasks: [task, { ...task, id: "T-0002" }] }, window: {
       isDestroyed: () => false, setTitle: () => {}, webContents: {
         id: index,
+        isLoadingMainFrame: () => false,
         send: (channel: string, frame: { replyingTasks: string[]; items?: RunActivity[]; type?: string }) => {
           if (channel === "chat:update") {
             assert.equal(frame.type, "discussion");
@@ -170,7 +189,7 @@ test("review correction hands off after the last chat write and respects occupie
     const release = occupied ? f.slots.acquire("project-a", "executor") : undefined;
     const pending = f.run();
     await f.started;
-    f.subscriptions.set("project-a", { board: { ...f.windows[0].state.board, settings: {} }, listeners: [] });
+    f.subscriptions.set("project-a", { board: f.windows[0].state.board, listeners: [], tabs: new Set() });
     const reason = "Включить решётку в гиперссылку вместе с номером задачи.";
     const [result, duplicate] = await Promise.all([f.action({ reason }), f.action({ reason })]);
     assert.equal(result.ok, true);
@@ -187,12 +206,14 @@ test("review correction hands off after the last chat write and respects occupie
     assert.equal((await pending).result.ok, true);
     assert.deepEqual(f.corrections, [reason]);
     assert.equal(f.runtime.chatRuns.size, 0);
+    await wait(0);
     assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).waitingTasks), occupied ? [f.task.id] : []);
     assert.equal(f.slots.available("project-a", "executor"), occupied ? 0 : 1);
     assert.deepEqual(f.launches, occupied ? [] : [f.task.revision]);
     release?.();
     f.runtime.scheduleAgentWork();
     f.runtime.scheduleAgentWork();
+    await wait(0);
     assert.deepEqual(f.launches, [f.task.revision]);
   }
 });
@@ -394,7 +415,8 @@ test("messages and stop target a board execution in the same project and task", 
     steer: async (prompt: string) => f.delivered.push(JSON.parse(prompt).latestUserMessage.text),
     interrupt: async () => { interrupted = true; },
   } });
-  assert.equal((await f.run()).result.ok, true);
+  const reply = await f.run();
+  assert.equal(reply.result.ok, true, JSON.stringify(reply.result));
   assert.deepEqual(f.delivered, ["Discuss"]);
   assert.deepEqual(f.active(), []);
   assert.deepEqual(Array.from(f.runtime.frame(f.windows[0].state).runningTasks), ["T-0001"]);

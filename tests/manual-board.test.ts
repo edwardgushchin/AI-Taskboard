@@ -1,4 +1,4 @@
-import { plannedDraft } from "./fixtures/planned-draft.ts";
+import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -34,9 +34,9 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
       assert.equal(created.history.some((e: { action: string }) => e.action === "start"), false);
     }
     cli(manual, "create", undefined, { actor: "user", title: "Missing column", initialStatus: "manual:removed" }, "INVALID_INPUT");
-    cli(manual, "create", undefined, { actor: "manager", title: "Not a user move", initialStatus: work.id }, "MANUAL_BOARD");
+    cli(manual, "create", undefined, { actor: "manager", title: "Not a user move", tags: ["Week"], initialStatus: work.id }, "MANUAL_BOARD");
     const attachmentPath = join(root, "shopping.txt"); writeFileSync(attachmentPath, "Milk and bread");
-    let card = cli(manual, "create", undefined, { title: "Buy groceries", actor: "manager", attachmentSources: [{ path: attachmentPath }] });
+    let card = cli(manual, "create", undefined, { title: "Buy groceries", actor: "manager", tags: ["Week"], attachmentSources: [{ path: attachmentPath }] });
     const attachments = card.attachments;
     assert.equal(card.status, first.id);
     const second = cli(manual, "create", undefined, { title: "Plan the week" });
@@ -47,8 +47,10 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
     card = cli(manual, "update", card.id, { actor: "manager", revision: card.revision, description: "Milk and bread" });
     card = cli(manual, "update", card.id, { actor: "user", revision: card.revision, criteria: ["For the week"] });
     assert.equal(card.status, work.id);
-    const chat = taskChatActions(manual, card, "Change the description", () => {});
-    const chatEdit = await chat("task_update", { authorization: "Change the description", description: "Milk, bread and fruit" });
+    const authorization = "Change the description";
+    card = cli(manual, "chat", card.id, { actor: "user", model: "fixture", effort: "low", text: authorization });
+    const chat = taskChatActions(manual, card, authorization, () => {});
+    const chatEdit = await chat("task_update", { authorization, description: "Milk, bread and fruit" });
     assert.equal(chatEdit.ok, true, JSON.stringify(chatEdit));
     card = cli(manual, "show", card.id);
     assert.equal(card.status, work.id);
@@ -80,8 +82,9 @@ test("weekly manual board: public CLI, reloads, transitions, columns and neighbo
     cli(agent, "create", undefined, { actor: "user", title: "Wrong process", initialStatus: work.id }, "INVALID_INPUT");
     const legacyPath = join(agent, ".tasks", "board.json");
     const legacy = JSON.parse(readFileSync(legacyPath, "utf8")); delete legacy.settings.boardType; writeFileSync(legacyPath, JSON.stringify(legacy));
-    cli(agent, "create", undefined, { title: "Legacy missing plan" }, "EXPERT_PLAN_REQUIRED");
+    cli(agent, "create", undefined, { title: "Legacy missing plan", tags: ["Week"] }, "EXPERT_PLAN_REQUIRED");
     const task = cli(agent, "create", undefined, plannedDraft({ title: "Agent work", criteria: ["Works"] }));
+    confirmFixtureDraft(agent, task.id);
     assert.equal(cli(agent, "approve", task.id, { actor: "user" }).status, "ready");
     cli(agent, "settings", undefined, { boardType: "manual" }, "IMMUTABLE_BOARD_TYPE");
     assert.equal(cli(manual, "settings").autoMode, false);

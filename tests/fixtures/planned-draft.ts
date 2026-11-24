@@ -4,7 +4,7 @@ export function confirmFixtureDraft(project: string, id: string): void {
   onBoard(locateBoard(project), store => {
     const task = store.card(id);
     if (task.status === "draft" && task.awaitingAnswer === undefined) {
-      store.save({ ...task, awaitingAnswer: false, draftDiscussion: undefined });
+      store.save({ ...task, awaitingAnswer: false, draftConfirmed: true, draftDiscussion: undefined });
     }
   });
 }

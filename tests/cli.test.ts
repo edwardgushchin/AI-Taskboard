@@ -596,7 +596,10 @@ test("a neutral dialogue preserves confirmation only for the unchanged draft", t
     const draft = cli(root, ["create"], { title: legacy ? "Legacy export" : "Reviewed export" });
     const id = draft.id;
     if (legacy) {
-      confirmFixtureDraft(root, id);
+      onBoard(locateBoard(root), store => {
+        const task = store.card(id);
+        store.save({ ...task, awaitingAnswer: false, draftConfirmed: undefined, draftDiscussion: undefined });
+      });
       assert.equal(cli(root, ["show", id]).draftConfirmed, undefined);
     } else {
       const running = cli(root, ["draft-discussion", id], { revision: draft.revision, phase: "running" });
@@ -2425,7 +2428,7 @@ test("the board tag catalog migrates older tasks and shares names and colors acr
   cli(root, ["update", active.id], { tags: ["Stale tag"], revision: active.revision }, "REVISION_CONFLICT");
   cli(root, ["tag", "set"], { name: "ошибки", color: "#91B6F9" });
   assert.deepEqual(cli(root, ["show", active.id]), { ...updated, artifacts: [],
-    approvalRequirements: [], expertStageStatus: { work: [], review: [] } });
+    approvalRequirements: [], openOwnerQuestionSequences: [], expertStageStatus: { work: [], review: [] } });
   cli(root, ["update", active.id], { tags: [], revision: updated.revision });
   const empty = cli(root, ["list", "--tag", name]);
   assert.deepEqual(empty.tasks, []);
@@ -2934,7 +2937,11 @@ test("watch streams compact cards and sees new messages without a revision chang
     const recolored = cli(root, ["tag", "set"], { name: tag.name, color: "#91B6F9" });
     assert.deepEqual((await frame()).data.tags, [hexTag, recolored]);
     const ready = approveFixture(root, ["approve", task.id]);
-    assert.equal((await frame()).data.tasks[0].status, "ready");
+    let approved = (await frame()).data.tasks[0];
+    if (approved.status === "draft" && approved.draftConfirmed) {
+      approved = (await frame()).data.tasks[0];
+    }
+    assert.equal(approved.status, "ready");
     cli(root, ["start", task.id], { revision: ready.revision - 1 }, "REVISION_CONFLICT");
     assert.ok(!existsSync(join(root, ".git")));
     const started = cli(root, ["start", task.id]);
@@ -3984,7 +3991,7 @@ test("an interrupted worktree recovery refuses a registered but incomplete check
 
   // Model an interruption after the index was written but before the file was fully populated.
   git(worktree, "read-tree", "HEAD");
-  git(worktree, "restore", "--source=HEAD", "--", ".gitignore");
+  git(worktree, "restore", "--source=HEAD", "--", ".gitignore", "AGENTS.md");
   writeFileSync(source, "partial");
   assert.equal(git(worktree, "status", "--porcelain", "--untracked-files=no"), "M source.txt");
   refuse();

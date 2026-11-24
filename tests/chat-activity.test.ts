@@ -8,6 +8,9 @@ import type { BoardActivity } from "../src/desktop/codex-chat.ts";
 
 const source = ["source-files.cjs", "markdown.js", "chat.js"].map(name =>
   readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
+const rowKeySource = readFileSync(new URL("../src/desktop/renderer.js", import.meta.url), "utf8")
+  .match(/^const activityRowKey = .*;$/m)?.[0];
+assert.ok(rowKeySource);
 const action = (id: string, type = "commandExecution", status = "completed", title = "git status", text = "output"): RunActivity =>
   ({ id, type, status, title, text });
 
@@ -46,7 +49,7 @@ function fixture(russian = true) {
   const reads: string[] = [];
   const saves: string[] = [];
   const openedTasks: string[] = [];
-  const { renderRunActivity, boardWaitStatus } = runInNewContext(source + ";({ renderRunActivity, boardWaitStatus })", {
+  const { renderRunActivity, boardWaitStatus } = runInNewContext(source + "\n" + rowKeySource + "\n({ renderRunActivity, boardWaitStatus })", {
     window: {}, document, frame, taskInSheet: undefined,
     t: (key: string, parameters = {}) => localization.text(key, parameters, frame.russian ? "ru" : "en"), localization: { ...localization, get locale() { return frame.russian ? "ru" : "en"; } }, bindLocalized: (node: any, property: string, render: () => string, attribute = false) => { const value = render(); if (attribute) node.setAttribute(property, value); else node[property] = value; return value; },
     element: (tag: string, text?: string, className?: string) => new Node(tag, text, className),
@@ -58,15 +61,16 @@ function fixture(russian = true) {
     IntersectionObserver: class { observe() {} },
   }) as {
     renderRunActivity: (container: Node, items: RunActivity[], completed?: boolean, durationMs?: number, taskId?: string,
-      context?: { dialogue?: boolean; managerWork?: boolean }) => void;
+      context?: { dialogue?: boolean; managerWork?: boolean; liveIds?: Set<string> }) => void;
     boardWaitStatus: (item?: RunActivity) => string | undefined;
   };
   const container = new Node("li");
   const row = (id: string) => container.querySelectorAll("details").find(node => node.dataset.item === "item:" + id)!;
   return {
     render: (items: RunActivity[], completed = false, durationMs?: number,
-      context?: { dialogue?: boolean; managerWork?: boolean }) =>
-      renderRunActivity(container, items, completed, durationMs, "T-0042", context),
+      context?: { dialogue?: boolean; managerWork?: boolean }) => {
+      renderRunActivity(container, items, completed, durationMs, "T-0042", context && { ...context, liveIds: new Set<string>() });
+    },
     boardWaitStatus, container, document, row, frame, previews, reads, saves, openedTasks,
   };
 }

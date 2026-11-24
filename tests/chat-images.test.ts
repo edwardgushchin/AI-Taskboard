@@ -75,8 +75,9 @@ test("image failures and stale replies do not save part of an agent reply", asyn
   const source = join(root, "source.png");
   writeFileSync(source, png);
   const reply = { ...settings, actor: "agent", text: "Variants", replyTo: sent.history.length - 1 };
+  const savedMessage = store.card(task.id);
   const unchanged = () => {
-    assert.deepEqual(store.card(task.id), sent);
+    assert.deepEqual(store.card(task.id), savedMessage);
     assert.deepEqual(store.card(task.id).attachments, []);
   };
   assert.throws(() => addChatMessage(store, sent, { ...reply, attachmentSources: [{ path: source }, { path: root }] }),
@@ -97,8 +98,9 @@ test("image failures and stale replies do not save part of an agent reply", asyn
   unchanged();
   assert.deepEqual(readdirSync(join(store.location.directory, "attachments", task.id)), []);
   const answered = addChatMessage(store, sent, { ...reply, attachmentSources: [{ path: source }] });
+  const savedReply = store.card(task.id);
   assert.throws(() => addChatMessage(store, answered, { ...reply, attachmentSources: [{ path: source }] }), { code: "CHAT_CHANGED" });
-  assert.deepEqual(store.card(task.id), answered);
+  assert.deepEqual(store.card(task.id), savedReply);
 
   let attempt = 0;
   const output = () => { const folder = join(root, "attempt-" + attempt++); mkdirSync(folder); return folder; };
@@ -141,7 +143,7 @@ test("standalone attachments keep exact event references after reopening and arc
   task = addAttachment(store, task, { path: source, name: "same.png", actor: "user" });
   const expected = task.attachments.map(file => file.file);
   assert.deepEqual(task.history.filter(event => event.action === "attach").map(event => event.attachment), expected);
-  assert.deepEqual(readTask(new BoardStore(store.location), task.id), task);
+  assert.deepEqual(readTask(new BoardStore(store.location), task.id), JSON.parse(JSON.stringify(task)));
   const invalid = structuredClone(task);
   invalid.history.at(-1)!.attachment = "missing";
   assert.throws(() => validateCard(invalid, task.id), { code: "CORRUPT_STORAGE" });
@@ -154,7 +156,7 @@ test("standalone attachments keep exact event references after reopening and arc
   store.index.settings.archiveAfterDays = 0;
   store.saveIndex();
   assert.deepEqual(sweepArchives(store).archived, [task.id]);
-  assert.deepEqual(readTask(new BoardStore(store.location), task.id), closed);
+  assert.deepEqual(readTask(new BoardStore(store.location), task.id), JSON.parse(JSON.stringify(closed)));
   expected.forEach(file => {
     const saved = readAttachment(store, task.id, { file });
     assert.ok("base64" in saved);

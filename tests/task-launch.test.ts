@@ -13,6 +13,7 @@ import { changeTask, createTask } from "../src/cli/tasks.ts";
 import { reviewsAcceptanceRepair, taskIdPattern, taskReviewMode, usesIndependentReviewer } from "../src/cli/model.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import { missingCodexThread } from "../src/desktop/codex-run.ts";
+import { dailyBudgetInterruption } from "../src/desktop/codex-rpc.ts";
 import { createAgentSlots, parseAgentLimits } from "../src/desktop/agent-limits.ts";
 import type { DeferredExecutor } from "../src/desktop/board-runtime.ts";
 import { deferExecutor, forgetExecutor, linkQueuedExecutor, matchesQueuedExecutor, prepareQueuedTurn, rememberExecutor, runtimeEntries } from "../src/desktop/board-runtime.ts";
@@ -26,7 +27,8 @@ const names = new Set(["launchTask", "recordRunFailure", "publishRunActivity", "
   "activeAgents", "chatRuns", "windowStates", "executorBusy", "reserveAgent", "scheduleAgentWork", "scheduleRecurringTasks",
   "queuedRecoveryDelay", "schedulingAgentWork", "taskRunLimit", "acceptanceWork", "continueAcceptance",
   "scheduleAutoBoard", "autoBoards", "nextDeferredExecutor", "launchDeferredExecutor", "discussionActivityByTask", "managerNoticeKey",
-  "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations"]);
+  "returnTaskToDraft", "returningDrafts", "reviewOperations", "managerReviewOperations", "taskOperations", "steeringOperations",
+  "releaseBoardUsage", "boardUsage", "budgetPublications", "interruptedForLimit", "dailyBudgetFailure"]);
 const lifecycle = parsed.statements.filter(node => {
   if (ts.isFunctionDeclaration(node)) return node.name && names.has(node.name.text);
   return ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
@@ -72,11 +74,14 @@ function fixture(outcome: "busy" | "missing" | "failed" | "started" | "recovered
   const runtime = runInNewContext(stripTypeScriptTypes(lifecycle) + "\n({launchTask, returnTaskToDraft, scheduleAgentWork, scheduleRecurringTasks, beginOperation, confirmProjectClose, projectOperations, runningTasks, activeAgents})", {
     applicationUpdates: { installing: false },
     quotaWait: undefined, quotaInterruption: new Error("Fixture quota pause"), refreshQuota: async () => [],
+    dailyBudgetInterruption,
     boardBudgetFailure: () => undefined, saveDailyUsage: () => {},
+    usageWriter: (_project: string, write: unknown) => write,
     AbortController, AbortSignal, wait, performance, setTimeout, clearTimeout, setImmediate, subscriptions, agentSlots: slots,
     isManual, runtimeLocation: (project: string) => project,
     readBoardSettings: (project: string) => savedSettings.get(project) ?? subscriptions.get(project)?.board.settings ?? {},
     scheduleMaintenance: async () => {}, scheduleAutoReview: () => {}, scheduleDraftDiscussions: () => {},
+    scheduleLimitChat: () => {},
     launchableTasks, nextReadyTask, pendingReviewApprovals, reviewsAcceptanceRepair, taskReviewMode, usesIndependentReviewer,
     currentActiveGoal: () => undefined, backgroundManagerRequests: new Map(),
     projectIdentity: (project: string) => project, matchesQueuedExecutor,
