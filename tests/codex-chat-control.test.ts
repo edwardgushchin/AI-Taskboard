@@ -180,8 +180,9 @@ test("board activity extracts actual coordination messages from successful calls
 });
 
 test("board history recovers a steering message and its attachment in the middle of a turn", async () => {
+  const quotedReferences = "Quote 1:\n```\nПояснение\n```";
   const content = [{ type: "text", text: JSON.stringify({ latestUserMessage: {
-    text: "Уточнение", attachments: [{ name: "preview.png", imageIndex: 1 }],
+    text: "Уточнение", quotedReferences, attachments: [{ name: "preview.png", imageIndex: 1 }],
   } }) }, { type: "image", url: "data:image/png;base64,eA==" }];
   const row = (id: string, type: string, payload: object) => ({ turnId: "one-turn", ...(type === "agentMessage" ? { startedAtMs: 123 } : {}), item: { id, type, ...payload } });
   const pages = [
@@ -223,7 +224,8 @@ test("board history recovers a steering message and its attachment in the middle
     messages: turn.messages, items: turn.items.map((item: { id: string }) => item.id),
   })))), [
     { messages: [{ text: "Начинай", files: [] }], items: ["command"] },
-    { messages: [{ text: "Уточнение", files: [{ name: "preview.png", url: content[1].url }], clientId: "queue-id" }], items: ["answer"] },
+    { messages: [{ text: "Уточнение\n\n" + quotedReferences, files: [{ name: "preview.png", url: content[1].url }],
+      clientId: "queue-id" }], items: ["answer"] },
   ]);
 });
 

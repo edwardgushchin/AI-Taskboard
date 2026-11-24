@@ -11,7 +11,7 @@ import { runtimeEntries } from "../src/desktop/board-runtime.ts";
 import { electronCheck } from "./electron-check.mjs";
 
 const { scratch, artifacts } = electronCheck(import.meta.url, "long-goal", 70_000, [[], ["--restart"]]);
-const { app, BrowserWindow } = await import("electron");
+const { app, BrowserWindow, ipcMain } = await import("electron");
 process.on("unhandledRejection", error => {
   console.error(error);
   app.exit(1);
@@ -28,7 +28,8 @@ const original = "Проверь условия длинной цели.\n[Сп�
   "Проверочный абзац сохраняется целиком.\n".repeat(110) + "Последняя строка исходной цели.";
 const revised = original.replace("Проверь условия длинной цели.", "Правка после переоткрытия доски.") +
   "\nСохрани дополнительный результат.";
-const fromDialogue = "    " + revised + "\nВключи итеративный режим.\n\n\t  ";
+const fromDialogue = "    " + revised + "\n\nQuote 1:\n```md\nАвторский пример.\n```" +
+  "\n\nВключи итеративный режим.\n\n\t  ";
 const authorization = "Замени текст цели на: " + fromDialogue;
 const wire = join(project, "wire.jsonl");
 const denyBinding = join(scratch, "deny-binding-write");
@@ -96,7 +97,8 @@ function fixtureProvider() {
           goalId: data.goalId, expectedObjective: data.goal.objective,
           objective: text.slice("Замени текст цели на: ".length), authorization: text,
         });
-        fs.writeFileSync("fixture-tool-result.json", JSON.stringify({ read, edit }));
+        const context = JSON.parse(params.additionalContext?.ai_taskboard_attachments?.value ?? "{}");
+        fs.writeFileSync("fixture-tool-result.json", JSON.stringify({ read, edit, text, context }));
       }
       const goal = goals[activeThread];
       if (goal) {
@@ -176,7 +178,10 @@ function writeJson(path, data) {
     ['from "./codex-chat.ts";', "from " + JSON.stringify(pathToFileURL(chat).href) + ";"],
     ["withProjectRulesLock, writeJson }", "withProjectRulesLock, writeJson as originalWriteJson }"],
   ], failure);
+  const handle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, handler) => handle(channel, channel === "menu:manager-edit" ? () => true : handler);
   require(main);
+  ipcMain.handle = handle;
 }
 
 async function until(probe, label) {
@@ -268,16 +273,42 @@ async function run() {
   await until(() => saved().goal.objective === revised, "edit saved");
   await show(revised, "long-goal-after-reopen.png");
   assert.equal(existsSync(previousFile), false);
-  const dialogue = await api("boardRequest", authorization, [], project, false);
-  assert.equal(dialogue.ok, true, JSON.stringify(dialogue));
-  const tools = JSON.parse(readFileSync(join(project, "fixture-tool-result.json"), "utf8"));
+  const postDialogue = text => evaluate(`{
+    const form = document.querySelector('#board-draft');
+    const input = form.querySelector('textarea[name=request]');
+    input.value = ${JSON.stringify(text)};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    form.querySelector('.chat-send').click();
+  }`);
+  await postDialogue("Справка для отдельной цитаты");
+  const message = `[...document.querySelectorAll('.board-chat-log:not(.board-work) .chat-text')]
+    .find(item => item.textContent.includes('Справка для отдельной цитаты'))`;
+  await until(() => evaluate("!!(" + message + ")"), "reference message in dialogue");
+  await evaluate(`{
+    const source = ${message};
+    const range = document.createRange();
+    range.selectNodeContents(source);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    source.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+  }`);
+  const quote = "document.querySelector('.chat-quote-editor:popover-open button')";
+  await until(() => evaluate("!!" + quote), "editor for the interface quote");
+  await evaluate(quote + ".click()");
+  await until(() => evaluate("!!document.querySelector('.chat-quote-draft:not([hidden])')"), "attached interface quote");
+  await postDialogue(authorization);
+  const toolResult = join(project, "fixture-tool-result.json");
+  await until(() => existsSync(toolResult), "literal edit from quoted dialogue");
+  const tools = JSON.parse(readFileSync(toolResult, "utf8"));
+  assert.equal(tools.text, authorization);
+  assert.match(tools.context.quotedReferences, /Quote 1:[\s\S]*Справка для отдельной цитаты/);
   assert.equal(tools.read.success, true, JSON.stringify(tools.read));
   assert.equal(JSON.parse(tools.read.contentItems[0].text).data.goal.objective, revised);
   assert.equal(tools.edit.success, true, JSON.stringify(tools.edit));
   assert.equal(saved().goal.objective, fromDialogue);
   assert.equal(saved().ownerObjective, fromDialogue);
   assert.equal(saved().ownerIteration.enabled, true);
-  assert.equal(await evaluate(editor + ".value"), fromDialogue);
+  await until(() => evaluate(editor + ".value === " + JSON.stringify(fromDialogue)), "literal objective displayed");
   const literalFile = join(project, providerGoal().objective.split(String.fromCharCode(96))[1]);
   assert.equal(readFileSync(literalFile, "utf8"), fromDialogue);
 
@@ -308,6 +339,7 @@ async function run() {
     "PASS: the reopened panel restores the objective, saves an edit and shows the edited text.",
     "PASS: Markdown and binding write failures keep the previous goal and the text in the editor. The provider rolls back the refused edit. Retrying saves the revision and removes the previous Markdown.",
     "PASS: goal_read supplies the full prior version. The new binding, Markdown and renderer all match the literal goal_edit, including the first-line indent and trailing whitespace. Iteration authority remains available.",
+    "PASS: an authored Quote 1 header and Markdown fence are preserved. A quote attached with the composer crosses IPC in a separate context field.",
     "PASS: the App Server exits after acknowledging the new goal. After reconnecting both copies show the previous goal, the source draft stays in the queue, and the retry replaces the previous version.",
     "The provider is a deterministic process speaking App Server JSON-RPC. Linux and macOS GUI runs are outside this report.",
     "Tested worktree bytes (SHA-256):",

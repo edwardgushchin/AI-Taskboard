@@ -833,7 +833,8 @@ function boardMessage(content: { type: string; text?: string; url?: string }[]) 
       const files = latestUserMessage.attachments.map((file: { name: string; imageIndex?: number; link?: import("../cli/attachment-links.ts").FileLink; error?: string }) => ({
         name: file.name, ...(file.link ? { link: file.link, size: file.link.size, error: file.error } : {}), url: file.imageIndex ? safeImage(images[file.imageIndex - 1]?.url) : undefined,
       })) as { name: string; url?: string }[];
-      return { text: latestUserMessage.text as string, files };
+      const references = typeof latestUserMessage.quotedReferences === "string" ? latestUserMessage.quotedReferences : "";
+      return { text: [latestUserMessage.text, references].filter(Boolean).join("\n\n"), files };
     }
   } catch {}
   return { text, files: images.map((image, index) => ({ name: "Image " + (index + 1), url: safeImage(image.url) })) };

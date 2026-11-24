@@ -3724,8 +3724,8 @@ function draftComposer() {
     }).catch(() => {});
   }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
-  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId) => {
-    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId);
+  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences) => {
+    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences);
     if (!result.ok) throw new Error(boardError(result.error));
     return result.data;
   };
@@ -3801,19 +3801,22 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false, inFlight } of jobs) {
+      for (const { id, draft, quotedReferences, goal, files, failed = false, inFlight } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight);
+          const submitted = files.map(file => file.link
+            ? { ...file, size: file.link.size }
+            : new File([file.bytes], file.name, { type: file.type }));
+          enqueue(id, draft, goal, submitted, failed, inFlight, quotedReferences);
           continue;
         }
         const changedFlight = job.inFlight !== inFlight;
         job.inFlight = inFlight;
         if (!job.editing && !job.sending) {
-          if (draft !== job.draft) {
+          if (draft !== job.draft || quotedReferences !== job.quotedReferences) {
             job.draft = draft;
-            job.request = job.goal ? draft : draft.trim();
+            job.quotedReferences = quotedReferences;
             updateQueuedPreview(job);
           }
           if (failed !== job.failed || changedFlight) {
@@ -3912,7 +3915,6 @@ function draftComposer() {
           validate();
         }
         job.draft = edit.value;
-        job.request = job.goal ? edit.value : edit.value.trim();
         updateQueuedPreview(job);
       }
       job.preview.hidden = false;
@@ -3924,7 +3926,9 @@ function draftComposer() {
     };
     const saveButton = button(() => t("ui.save_7eea8139"), () => finish(true), "quiet");
     const cancel = button(() => t("ui.cancel_4c6dcc32"), () => finish(false), "quiet");
-    const validate = () => { saveButton.disabled = !edit.value.trim() && (job.goal || !job.submitted.length); };
+    const validate = () => {
+      saveButton.disabled = !edit.value.trim() && !job.quotedReferences && (job.goal || !job.submitted.length);
+    };
     edit.addEventListener("input", validate);
     edit.addEventListener("keydown", event => {
       if (event.isComposing) return;
@@ -4179,7 +4183,7 @@ function draftComposer() {
     event.preventDefault();
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const text = input.value;
-    const draft = quoteMessage(text, quotes);
+    const quotedReferences = quoteMessage("", quotes);
     const goal = goalMode;
     const submitted = [...files];
     const replies = log.querySelectorAll(".board-manager-message[data-message-id]");
@@ -4192,7 +4196,7 @@ function draftComposer() {
     quoteDraft.sync();
     try {
       await restoreQueue();
-      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted), reviewModeQuestionId);
+      id = await queueStorage("add", undefined, text, goal, await pasteFiles(submitted), reviewModeQuestionId, quotedReferences);
     } catch (error) {
       if (!disposed) message(error.message);
       return;
@@ -4215,7 +4219,7 @@ function draftComposer() {
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
     if (active?.id !== id && !queued.some(job => job.id === id)) {
-      enqueue(id, draft, goal, submitted);
+      enqueue(id, text, goal, submitted, false, false, quotedReferences);
     }
     openChat();
     showWork(goal);
@@ -4223,12 +4227,13 @@ function draftComposer() {
     syncAction();
   });
   function updateQueuedPreview(job) {
+    const message = [job.draft, job.quotedReferences].filter(Boolean).join("\n\n");
+    job.request = job.goal ? message : message.trim();
     job.preview.textContent = job.request.replace(/\s+/g, " ") || job.messageFiles.map(file => file.name).join(", ");
     job.preview.title = job.preview.textContent.slice(0, 180);
     if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false) {
-    const request = goal ? draft : draft.trim();
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, quotedReferences) {
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
@@ -4256,7 +4261,7 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight };
+    const job = { id, row, preview, status, handle, draft, quotedReferences, goal, submitted, messageFiles, failed, inFlight };
     queued.push(job);
     if (handle) {
       handle.type = "button";
