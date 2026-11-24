@@ -127,8 +127,9 @@ function createChatMarkdown() {
   const agentReferences = new RegExp(String.raw`(?<![\p{L}\p{N}_#.\\/:])(?:${patterns.join("|")})(?![\p{L}\p{N}_\\/])`, "gu");
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
+  const quotedBoardReference = /^#(?<board>[^\s\0][^\r\n\0]*?)\/(?<foreignTask>T-\d{4,})$/u;
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
-    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:#(?<board>[^#\/\\\s][^#\/\\\r\n]*?)\/(?<foreignTask>T-\d{4,})|#?T-\d{4,}|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
+    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:#?T-\d{4,}|#(?<board>[^#\s\0][^#\r\n\0]*?)\/(?<foreignTask>T-\d{4,})|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
       let inLink = false;
@@ -141,7 +142,9 @@ function createChatMarkdown() {
         if (inLink || !["text", "code_inline"].includes(token.type)) return [token];
         const parts = [];
         let cursor = 0;
-        for (const match of token.content.matchAll(reference)) {
+        const quoted = token.type === "code_inline" && quotedBoardReference.exec(token.content);
+        const matches = quoted ? [quoted] : token.content.matchAll(reference);
+        for (const match of matches) {
           const value = match[0];
           if (shortCommit.test(value) && !commitContext.test(before + token.content.slice(0, match.index))) continue;
           if (token.type === "code_inline" && value !== token.content) continue;

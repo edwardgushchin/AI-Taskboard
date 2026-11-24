@@ -4164,7 +4164,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         };
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
       }, requestTools, instructions +
-      "\nIn chat replies, link cards on this board as #T-0013. For another board use #Board name/T-0013, with the actual board name as displayed in its tab, including spaces. " + (recovery ?
+      "\nIn chat replies, link cards on this board as #T-0013. For another board use #Board name/T-0013, with the actual board name as displayed in its tab. " +
+      "When the name contains # or Markdown punctuation, put the whole reference in inline code to preserve the name. " + (recovery ?
         "\nRecover the owner's saved request. Inspect current state before answering. Some actions may already have happened. " +
         "Report what is confirmed and which actions still need a new explicit request. This recovery is read-only." : "") +
         (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
@@ -5070,7 +5071,7 @@ ipcMain.handle("board:follow-reference", async (event, origin: unknown, name: un
   if (!source.project || origin !== source.project || owner.closing) {
     return cliFailure("BOARD_CHANGED", t("ui.task_reference_board_changed"));
   }
-  if (typeof name !== "string" || !name.trim() || /[/\\#\x00-\x1f]/u.test(name)) {
+  if (typeof name !== "string" || /[\r\n\0]/u.test(name) || !name.trim()) {
     return cliFailure("INVALID_INPUT", t("ui.task_reference_board_unavailable", { name: String(name) }));
   }
   loadRecentBoards();

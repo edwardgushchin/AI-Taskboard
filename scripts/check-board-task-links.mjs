@@ -33,11 +33,11 @@ app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrot
 const source = join(scratch, "Source");
 const target = join(scratch, "Target");
 const duplicate = join(scratch, "Duplicate");
-const boardName = "Полевые работы";
+const boardName = "План/Факт";
 const task = "T-0001";
 const sourceTitle = "Карточка исходной доски";
 const targetTitle = "Карточка другой доски";
-const mixed = "Сверьте #T-0001, затем (#Полевые работы/T-0001).";
+const mixed = "Сверьте #T-0001, затем (#" + boardName + "/" + task + ").";
 const missing = "Проверка #Отсутствующая доска/T-0001.";
 const reply = [mixed, missing].join("\n\n");
 const results = [];
@@ -235,7 +235,7 @@ async function run() {
   await expectCard(window, target, targetTitle, sameWindow, 1);
   assert.equal((await frame(window)).tabs[1].path, source);
   await capture(window, "foreign-card.png");
-  results.push("Новый ответ: кириллица, пробел и пунктуация сохранены. Мышь открыла карточку другой доски в позиции исходной вкладки. Другая вкладка сохранила исходную доску.");
+  results.push("Новый ответ: кириллица, косая черта в имени и соседняя пунктуация сохранены. Мышь открыла карточку другой доски в позиции исходной вкладки. Другая вкладка сохранила исходную доску.");
 
   await select(window, source);
   await closeTab(window, target);
@@ -300,6 +300,28 @@ async function run() {
   await activate(window, boardLink(boardName), true);
   await expectCard(window, target, targetTitle, corrected, 2);
   results.push("После устранения совпадения имён та же ссылка открыла нужную карточку.");
+
+  const quotedName = "Полевые работы #1\\свод";
+  cli(target, ["settings"], { name: quotedName });
+  persist(source, "Открой доску с новым названием", item("Ссылка " + "`" + "#" + quotedName + "/" + task + "`" + "."));
+  await open(other, source);
+  await openChat(other);
+  const quotedLink = boardLink(quotedName);
+  await until(() => evaluateWith(other, selector => Boolean(document.querySelector(selector)), quotedLink), "ссылка с решёткой и обратной косой чертой");
+  assert.equal(await evaluateWith(other, selector => document.querySelector(selector).textContent, quotedLink), quotedName + "/" + task);
+  const renamed = await frame(other);
+  await activate(other, quotedLink, true);
+  await expectCard(other, target, targetTitle, renamed, 2);
+  results.push("Сохранённая ссылка в строчном коде сохраняет пробел, решётку и обратную косую черту. Enter открыл ту же карточку после переименования доски.");
+
+  cli(target, ["settings"], { name: boardName });
+  await open(other, source);
+  await openChat(other);
+  await expectRefusal(other, quotedName, "недоступна");
+  const restored = await frame(other);
+  await activate(other, boardLink(boardName), true);
+  await expectCard(other, target, targetTitle, restored, 2);
+  results.push("После восстановления исходного названия работает первоначальная ссылка на «План/Факт».");
 
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
   const version = execFileSync(process.env.TASKBOARD_CHECK_NODE, ["--version"], { encoding: "utf8", windowsHide: true }).trim();
