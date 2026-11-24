@@ -87,6 +87,11 @@ function fixtureProvider() {
       }
       output(id, { goal });
     } else if (method === "turn/start") {
+      if (fs.existsSync("reject-next-turn")) {
+        fs.unlinkSync("reject-next-turn");
+        process.stdout.write(JSON.stringify({ id, error: { code: -32602, message: "Fixture rejected turn/start" } }) + "\n");
+        return;
+      }
       const turn = { id: "fixture-turn", status: "inProgress" };
       output(id, { turn });
       const text = params.input[0].text;
@@ -327,6 +332,29 @@ async function run() {
   await evaluate(failed + ".parentElement.querySelector('button').click()");
   await until(() => saved().goal.objective === retryText && !existsSync(literalFile), "goal retry confirmed");
   assert.equal(readFileSync(join(project, "fixture-read.md"), "utf8"), retryText);
+
+  const firstShort = "Проверь прежнюю короткую цель.";
+  const nextShort = "Проверь новую короткую цель.";
+  await postGoal(firstShort);
+  await until(() => saved().goal.objective === firstShort && saved().goal.status === "paused", "short goal confirmed");
+  const confirmedShort = providerGoal();
+  const confirmedShortId = saved().goalId;
+  writeFileSync(join(project, "reject-next-turn"), "");
+  await postGoal(nextShort);
+  await until(() => evaluate("!!" + failed), "rejected short goal retained in the queue");
+  const shortQueue = await api("boardQueue", project, "list");
+  assert.equal(shortQueue.ok, true, JSON.stringify(shortQueue));
+  assert.equal(shortQueue.data.find(job => job.goal)?.draft, nextShort);
+  assert.deepEqual(providerGoal(), confirmedShort);
+  assert.equal(saved().goal.objective, firstShort);
+  assert.equal(saved().goal.status, "paused");
+  assert.equal(saved().goalId, confirmedShortId);
+  await until(() => evaluate(editor + ".value === " + JSON.stringify(firstShort)), "previous short goal displayed");
+  await evaluate(failed + ".parentElement.querySelector('button').click()");
+  await until(() => saved().goal.objective === nextShort && saved().goal.status === "paused", "short goal retry confirmed");
+  assert.equal(providerGoal().objective, nextShort);
+  await until(() => evaluate(editor + ".value === " + JSON.stringify(nextShort)), "new short goal displayed");
+  await until(async () => (await api("boardQueue", project, "list")).data.every(job => !job.goal), "confirmed short goal removed from queue");
   const paths = ["src/desktop/codex-chat.ts", "src/desktop/goal-objective.ts", "src/desktop/main.ts",
     "src/desktop/renderer.js", "src/desktop/preload.cjs", "scripts/check-long-goal.mjs",
     "scripts/electron-check.mjs", "tests/codex-chat-control.test.ts"];
@@ -341,6 +369,7 @@ async function run() {
     "PASS: goal_read supplies the full prior version. The new binding, Markdown and renderer all match the literal goal_edit, including the first-line indent and trailing whitespace. Iteration authority remains available.",
     "PASS: an authored Quote 1 header and Markdown fence are preserved. A quote attached with the composer crosses IPC in a separate context field.",
     "PASS: the App Server exits after acknowledging the new goal. After reconnecting both copies show the previous goal, the source draft stays in the queue, and the retry replaces the previous version.",
+    "PASS: turn/start rejects a short replacement after goal/set. Both copies retain the previous paused short goal, and the original queued draft is delivered only on retry.",
     "The provider is a deterministic process speaking App Server JSON-RPC. Linux and macOS GUI runs are outside this report.",
     "Tested worktree bytes (SHA-256):",
     ...paths.map(path => hash("sha256", readFileSync(join(root, path))) + "  " + path), "",

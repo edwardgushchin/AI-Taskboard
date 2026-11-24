@@ -3877,7 +3877,6 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         bindProvider: stages?.bind,
         stageReporter: stages,
         goal: goal === true ? requestText : undefined,
-        previousObjective: goal === true ? stored?.goal?.objective : undefined,
         resumeGoal: goal === "resume",
         iterativeGoal: Boolean(iteration),
         finishGoalTurn: goal && !iteration

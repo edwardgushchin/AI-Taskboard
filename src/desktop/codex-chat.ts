@@ -18,7 +18,7 @@ import type { BoardChange } from "./board-actions.ts";
 import { boardToolContent, withBoardMcp } from "./board-mcp.ts";
 import { openComputerUse } from "./computer-use.ts";
 import { goalTaskWaitSeconds } from "./board-actions.ts";
-import { discardGoalObjective, finishGoalChange, fullGoalObjective, goalChangeCommitted, needsGoalFile, readGoalChange,
+import { discardGoalObjective, finishGoalChange, fullGoalObjective, goalChangeCommitted, readGoalChange,
   stageGoalChange } from "./goal-objective.ts";
 import { boardAgentInstructions, boardCodexArgs, managerCodexArgs, boardWorklog, worklogReminder, worklogTool } from "./board-agent-hooks.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -587,7 +587,6 @@ interface BoardSession {
   attachmentContext?: string;
   saveGeneratedImage?: (image: ChatImage) => Promise<string | undefined>;
   goal?: string;
-  previousObjective?: string;
   resumeGoal?: boolean;
   iterativeGoal?: boolean;
   finishGoalTurn?: () => boolean;
@@ -973,9 +972,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
     }
     let currentGoal: BoardGoal | null | undefined;
     let launchChange: ReturnType<typeof stageGoalChange> | undefined;
-    const fileGoalLaunch = Boolean(session?.goal && (needsGoalFile(session.goal) ||
-      (session.previousObjective && needsGoalFile(session.previousObjective))));
-    let stagingGoal = fileGoalLaunch;
+    let stagingGoal = Boolean(session?.goal);
     let followingGoal = false;
     let goalChange: Promise<BoardGoal | null> | undefined;
     const updateGoal = (goal: BoardGoal | null) => {
@@ -1061,13 +1058,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
         if (goal) updateGoal(goal);
         session.onGoalSet?.();
       } else if (session?.goal) {
-        if (fileGoalLaunch) {
-          const previous = existing ? await readGoal(request, thread.id, notify) : null;
-          launchChange = stageGoalChange(project, thread.id, session.goal, previous);
-        }
-        const goal = await setGoal(request, thread.id, launchChange?.next ?? session.goal, "active", notify);
+        const previous = existing ? await readGoal(request, thread.id, notify) : null;
+        launchChange = stageGoalChange(project, thread.id, session.goal, previous);
+        const goal = await setGoal(request, thread.id, launchChange.next, "active", notify);
         updateGoal(goal);
-        if (!fileGoalLaunch) session.onGoalSet?.();
       } else if (existing) {
         const saved = await readGoal(request, thread.id, notify).catch(() => undefined);
         if (session?.iterativeGoal && saved?.status !== "active") {
