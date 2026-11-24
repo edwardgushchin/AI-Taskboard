@@ -249,7 +249,7 @@ async function phase() {
     await until("pending write", () => writeRejected);
     const held = await evaluate(first, `(() => {
       const input = document.querySelector('#task-chat-input');
-      const attachments = document.querySelector('.draft-attachments');
+      const attachments = input.closest('.task-chat').querySelector('.draft-attachments');
       return { text: input.value, readOnly: input.readOnly, files: attachments.textContent };
     })()`);
     assert.equal(held.text, messages.budget);
