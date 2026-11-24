@@ -372,7 +372,7 @@ async function phase() {
     { label: "оба лимита", budget: true, quota: true },
   ]) {
     const firstMessage = messages.running + " " + limits.label;
-    const secondMessage = messages.followup + " " + limits.label;
+    const secondMessage = `Диалог: следующий файл (${limits.label}).`;
     const complete = Promise.withResolvers();
     gates.set(firstMessage, complete);
     await send(first, firstMessage, false, false);
@@ -405,7 +405,7 @@ async function phase() {
       [firstMessage, []],
       [secondMessage, ["fixture attachment"]],
     ]);
-    pass(`Успешный ответ сохранён один раз при задержке следующего вложения. Исчерпан ${limits.label}. После сброса следующая реплика получила ответ и вложение.`);
+    pass(`При задержке следующего вложения готовый ответ сохранён один раз. Проверка охватила ${limits.label}. После сброса агент получил следующую реплику с вложением и ответил на неё.`);
   }
 
   gates.set(messages.interrupted, Promise.withResolvers());
