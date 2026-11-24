@@ -1228,7 +1228,9 @@ test("manager grants and revokes executor access for a task", async t => {
   const accepted = (await f.cli(["approve", card.id])).data;
   const started = (await f.cli(["start", card.id])).data.task;
   assert.equal(started.status, "in_progress");
-  const request = await f.cli(["message", card.id], { kind: "question", text: "Electron fails its sandbox startup check. Can I use full access?" });
+  const request = await f.cli(["expert-message", card.id], {
+    to: "manager", kind: "question", text: "Electron fails its sandbox startup check. Can I use full access?",
+  });
   assert.ok(request.ok);
   const reply = await f.run("Handle executor requests", async act => {
     const inbox = await act("manager_inbox", { replay: true });
@@ -1239,6 +1241,23 @@ test("manager grants and revokes executor access for a task", async t => {
     const granted = await act("task_set_executor_access", args);
     assert.deepEqual(granted.data, { ...args, appliesOn: "next-run" });
     assert.equal((await act("task_show", { id: card.id })).data.executorFullAccess, true);
+    const question = inbox.data.find((entry: { sequence: number }) => entry.sequence === request.data.sequence);
+    assert.equal(question.expertMessage.from, card.id);
+    assert.equal(question.expertMessage.to, "manager");
+    const answer = { id: card.id, replyTo: question.sequence, text: "Full access granted." };
+    const incorrect = await act("task_message", answer);
+    assert.equal(incorrect.error.code, "INVALID_INPUT");
+    assert.match(incorrect.error.message, /Use team_message/);
+    assert.deepEqual((await f.cli(["messages", card.id])).data, []);
+    assert.equal((await act("manager_ack", { id: card.id, through: question.sequence })).ok, true);
+    const stillOpen = (await act("manager_inbox", { replay: true })).data;
+    assert.ok(stillOpen.some((entry: { sequence: number }) => entry.sequence === question.sequence));
+    const sent = await act("team_message", { ...answer, to: question.expertMessage.from });
+    assert.ok(sent.ok, JSON.stringify(sent.error));
+    assert.deepEqual((await act("manager_inbox", { replay: true })).data, []);
+    const mail = await f.cli(["expert-inbox", card.id], { afterSequence: question.sequence });
+    assert.deepEqual(mail.data.messages.map(({ sequence, replyTo, text }: { sequence: number; replyTo: number; text: string }) =>
+      ({ sequence, replyTo, text })), [{ sequence: sent.data.sequence, replyTo: question.sequence, text: answer.text }]);
     const revoked = await act("task_set_executor_access", { ...args, fullAccess: false });
     assert.equal(revoked.data.fullAccess, false);
     assert.equal((await act("task_show", { id: card.id })).data.executorFullAccess, false);

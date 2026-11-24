@@ -1,5 +1,3 @@
-const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
-
 const sourceLocation = new RegExp(sourceFile.source.replace(/\$$/, ":[1-9]\\d*(?::\\d+)?$"), "i");
 const fullDigest = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const shortCommit = /^[0-9a-f]{4,39}$/i;
@@ -25,7 +23,10 @@ function localPngPath(value) {
   } catch {}
 }
 
-if (chatMarkdown) {
+function createChatMarkdown() {
+  const chatMarkdown = window.markdownit?.({ breaks: true, linkify: true, html: false });
+  if (!chatMarkdown) return;
+
   const web = url => /^https?:\/\//i.test(url);
   const inlineImage = url => /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url);
   chatMarkdown.validateLink = url => web(url) || /^mailto:/i.test(url) || inlineImage(url) ||
@@ -226,7 +227,12 @@ if (chatMarkdown) {
   });
   chatMarkdown.renderer.rules.task_checkbox = (tokens, index) =>
     "<input type=\"checkbox\" disabled" + (tokens[index].markup === " " ? "" : " checked") + "> ";
+  return chatMarkdown;
 }
+
+const chatMarkdown = createChatMarkdown();
+// Provider commentary sometimes starts with a tab. In work logs, code blocks use fences.
+const workMarkdown = createChatMarkdown()?.disable("code");
 
 function showCoordinationCommands(block) {
   const shellCommand = /^(?:&[ \t]+(?:['"$.]|\w)|(?:pwsh|powershell|dotnet|git|npm|node|python3?|bash|sh|cmd)(?:\.exe)?[ \t]+\S)/i;
@@ -472,7 +478,8 @@ function showHexColors(block, plainText = false) {
 
 function chatText(text, context = { taskId: taskInSheet?.id }) {
   const block = element("div", undefined, "chat-text");
-  if (!chatMarkdown) {
+  const markdown = context.taskWork ? workMarkdown : chatMarkdown;
+  if (!markdown) {
     block.innerText = text;
     return block;
   }
@@ -482,7 +489,7 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
   const cache = report && !context.coordination ? context.markdownCache : undefined;
   const markup = cache?.get(text);
   if (markup === undefined) {
-    block.innerHTML = chatMarkdown.render(text, { agent, report: report || context.coordination, coordination: context.coordination });
+    block.innerHTML = markdown.render(text, { agent, report: report || context.coordination, coordination: context.coordination });
     if (context.coordination) {
       showCoordinationCommands(block);
       showCoordinationEvidence(block);

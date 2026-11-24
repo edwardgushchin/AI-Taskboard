@@ -42,6 +42,7 @@ if (typeof document !== "undefined") {
   let providers = [];
   let boardBudget;
   let project;
+  let boardReset = { pending: false, failed: false };
   let displayedLocale;
   let resettingCodex = false;
   let codexResetOutcome = "";
@@ -168,45 +169,67 @@ if (typeof document !== "undefined") {
       status.textContent = t("limits.reset_result." + codexResetOutcome);
       content.append(status);
     }
-    if (boardBudget) {
-      const { limit, remaining, resetsAt } = boardBudget;
+    let resetButton;
+    if (project) {
+      const openedProject = project;
+      const action = boardReset;
       const quota = document.createElement("section");
       quota.className = "limits-window";
       quota.dataset.boardBudget = "";
       const title = document.createElement("strong");
-      title.textContent = t("limits.board.title");
-      const meter = document.createElement("meter");
-      meter.max = limit;
-      meter.value = remaining;
-      meter.dataset.resetsAt = String(resetsAt);
-      meter.setAttribute("aria-label", title.textContent);
-      const reset = document.createElement("small");
-      reset.className = "limits-reset";
-      reset.textContent = t("limits.reset", { time: new Date(resetsAt).toLocaleString(localization.locale) });
-      quota.append(title, meter, reset);
-      content.append(quota);
-    }
-    if (project) {
-      const openedProject = project;
+      title.textContent = t(boardBudget ? "limits.board.title" : "limits.board.usage");
+      quota.append(title);
+      if (boardBudget) {
+        const { limit, remaining, resetsAt } = boardBudget;
+        const meter = document.createElement("meter");
+        meter.max = limit;
+        meter.value = remaining;
+        meter.dataset.resetsAt = String(resetsAt);
+        meter.setAttribute("aria-label", title.textContent);
+        const schedule = document.createElement("small");
+        schedule.className = "limits-reset";
+        schedule.textContent = t("limits.reset", { time: new Date(resetsAt).toLocaleString(localization.locale) });
+        quota.append(meter, schedule);
+      }
+      const row = document.createElement("div");
+      row.className = "limits-board-actions";
+      const status = document.createElement("p");
+      status.setAttribute("role", "status");
+      status.textContent = action.failed ? t("limits.board.reset_failed") : "";
       const reset = document.createElement("button");
       reset.type = "button";
+      reset.className = "button quiet limits-board-reset";
       reset.textContent = t("limits.board.reset");
+      reset.setAttribute("aria-label", t("limits.board.reset_label"));
+      reset.setAttribute("aria-disabled", String(action.pending));
       reset.addEventListener("click", async () => {
-        reset.disabled = true;
+        if (action !== boardReset || action.pending) return;
+        action.pending = true;
+        action.failed = false;
+        reset.setAttribute("aria-disabled", "true");
+        status.textContent = "";
         try {
-          if (!await window.taskboard.resetBoardBudget(openedProject)) {
-            reset.textContent = t("limits.board.reset_failed");
-          }
+          action.failed = !await window.taskboard.resetBoardBudget(openedProject);
         } catch (error) {
           console.error(error);
-          reset.textContent = t("limits.board.reset_failed");
+          action.failed = true;
         } finally {
-          reset.disabled = false;
+          action.pending = false;
+          if (action === boardReset) {
+            const currentReset = panel.querySelector(".limits-board-reset");
+            currentReset.setAttribute("aria-disabled", "false");
+            currentReset.nextElementSibling.textContent = action.failed ? t("limits.board.reset_failed") : "";
+          }
         }
       });
-      content.append(reset);
+      resetButton = reset;
+      row.append(reset, status);
+      quota.append(row);
+      content.append(quota);
     }
+    const restoreResetFocus = document.activeElement?.matches("#provider-limits .limits-board-reset");
     panel.replaceChildren(content);
+    if (restoreResetFocus) resetButton?.focus({ preventScroll: true });
   }
   async function refresh() {
     try { providers = await window.taskboard.providerLimits(); }
@@ -243,6 +266,7 @@ if (typeof document !== "undefined") {
       applyBoardBudget(budget);
       return;
     }
+    if (project !== openedProject) boardReset = { pending: false, failed: false };
     project = openedProject;
     boardBudget = budget;
     render();

@@ -1139,13 +1139,14 @@ function quotaLabel() {
     : t("ui.waiting_for_provider_quota");
 }
 
-function card(task) {
-  const audience = task.questionAudience;
-  const questionDescription = audience === "owner" ? "task_question.open_dialogue" : "task_question.waiting_for_manager";
+function cardCover(task) {
   const showCover = archiveView || frame.board.settings?.showCardPreviews !== false;
-  const cover = showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
+  return showCover ? selectedCover(task, (task.attachments ?? []).filter(isImageAttachment)) : undefined;
+}
+
+function cardSignature(task, cover) {
   // Only visible card data belongs in this key: chat/log/revision updates must not rebuild it.
-  const signature = JSON.stringify([frame.localization?.locale, task.title, task.description,
+  return JSON.stringify([frame.localization?.locale, task.title, task.description,
     task.tags?.map(name => boardTags.get(tagKey(name)) ?? { name }), cover?.file,
     frame.runningTasks?.includes(task.id) ?? false, frame.waitingTasks?.includes(task.id) ?? false,
     frame.reviewingTasks?.[task.id], frame.waitingReviewTasks?.includes(task.id), frame.routingRetries?.[task.id],
@@ -1153,8 +1154,15 @@ function card(task) {
     task.acceptanceWaitUnchanged, Boolean(task.codexThreadId),
     task.reviewModeOverride?.mode ?? frame.board?.settings.reviewMode, task.reviewApproved,
     task.unfinishedDependencies, task.blocked, task.subtasks?.map(entry => entry.done),
-    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, audience,
+    task.attachments?.length, task.priority, task.dueDate, task.milestone, task.schedule, task.questionAudience,
     manualColumns().find(c => c.id === task.status)]);
+}
+
+function card(task) {
+  const audience = task.questionAudience;
+  const questionDescription = audience === "owner" ? "task_question.open_dialogue" : "task_question.waiting_for_manager";
+  const cover = cardCover(task);
+  const signature = cardSignature(task, cover);
   const previous = boardCards.get(task.id);
   if (previous?.signature === signature) return previous.node;
   const card = previous?.node ?? button("", () => showTask(task.id, card.dataset.awaitingAnswer === "true"));
@@ -1622,7 +1630,6 @@ function laneTools(state, title, tasks, total, count, content) {
   const create = manualBoard() ? button("Создать задачу", () => createManualTask(state), "quiet lane-create") : undefined;
   if (create) create.prepend(icon("plus"));
   function renderBatch() {
-    fitted = undefined;
     const children = matching.slice(0, visibleLimit).map(card);
     if (matching.length > visibleLimit) {
       const remaining = matching.length - visibleLimit;
@@ -1647,13 +1654,21 @@ function laneTools(state, title, tasks, total, count, content) {
     if (focused?.parentElement !== content || !focused.classList.contains("task-card")) return 0;
     return matching.findIndex(task => boardCards.get(task.id)?.node === focused) + 1;
   }
+  function nextCardKey() {
+    const next = matching[visibleLimit];
+    if (!next) return null;
+    return JSON.stringify([next.id, matching.length - visibleLimit, cardSignature(next, cardCover(next))]);
+  }
   function fit(availableHeight, bounds) {
     if (collapsed || !matching.length) return;
     const focused = document.activeElement;
     const firstNew = visibleLimit;
     const minimum = Math.min(matching.length, Math.max(1, manualLimit, activeCount, focusedCardPosition()));
+    // A background update can change a card without changing the batch's geometry.
+    // Keep the last fit if the next card and the number of hidden cards also match.
     if (fitted?.availableHeight === availableHeight && fitted.width === bounds.width &&
-        fitted.height === bounds.height && fitted.minimum === minimum) return;
+        fitted.height === bounds.height && fitted.minimum === minimum &&
+        fitted.limit === visibleLimit && visibleLimit <= matching.length && fitted.next === nextCardKey()) return;
     let height = bounds.height;
     const renderAndMeasure = () => {
       renderBatch();
@@ -1680,7 +1695,7 @@ function laneTools(state, title, tasks, total, count, content) {
       const next = more.isConnected ? more : content.children[firstNew];
       next?.focus({ preventScroll: true });
     }
-    fitted = { availableHeight, width: bounds.width, height, minimum };
+    fitted = { availableHeight, width: bounds.width, height, minimum, limit: visibleLimit, next: nextCardKey() };
   }
   updateCards();
   updateCollapse();
@@ -1729,10 +1744,10 @@ function captureCardMoves(affectedLanes) {
   const moves = [];
   for (const { content } of affectedLanes) {
     if (content.hidden) continue;
-    for (const node of content.children) {
+    for (const [index, node] of Array.from(content.children).entries()) {
       if (!node.classList.contains("task-card")) continue;
       const before = node.getBoundingClientRect();
-      if (before.width) moves.push({ node, content, before, offsetTop: node.offsetTop });
+      if (before.width) moves.push({ node, content, index, before, offsetTop: node.offsetTop });
     }
   }
   return moves;
@@ -1760,7 +1775,7 @@ function animateCardMoves(moves) {
   }
 }
 
-function render(previousBoard) {
+function render({ affectedLanes = [], added = [], moves = [] } = {}) {
   // Writing lang invalidates inherited styles throughout the board and chat.
   if (document.documentElement.lang !== localization.locale) {
     document.documentElement.lang = localization.locale;
@@ -1804,6 +1819,7 @@ function render(previousBoard) {
   byId("board-composer").hidden = archiveView;
   if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
   const composer = byId("board-composer").firstChild;
+  composer.resumeBoardView();
   composer.localize();
   composer.updateManagerBusy(frame.managerBusy);
   composer.updateManagerRun(frame.managerRun);
@@ -1821,9 +1837,6 @@ function render(previousBoard) {
     return;
   }
   const visible = [...board.tasks].sort(recentlyUpdatedFirst);
-  const { affectedLanes, added } = previousBoard && !reducedMotion.matches && !document.hidden ?
-    cardLayoutChanges(previousBoard, visible) : { affectedLanes: [], added: [] };
-  const moves = captureCardMoves(affectedLanes);
   const focused = document.activeElement;
   const toolsKey = JSON.stringify([frame.localization?.locale, [...boardTags], manualColumns()]);
   const columns = (manualBoard() ? manualColumns().map(c => [c.id, c.name]) : lanes).map(([state, labelKey]) => {
@@ -1860,8 +1873,11 @@ function render(previousBoard) {
   laneSizes.observe(byId("board-composer"));
   for (const lane of boardLanes.values()) laneSizes.observe(lane.column);
   if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
-  // An incoming card can temporarily push a visible neighbor out of the current batch.
-  if (affectedLanes.length) fitLanes(affectedLanes);
+  // Fit synchronously if an insertion or move can push a neighbor out of the batch.
+  // When the batch order stays the same, laneTools already schedules the normal fit.
+  if (added.length || moves.some(({ node, content, index }) => content.children[index] !== node)) {
+    fitLanes(affectedLanes);
+  }
   animateCardMoves(moves);
   for (const id of added) {
     const node = boardCards.get(id)?.node;
@@ -2062,7 +2078,7 @@ function chatViewport(list) {
   let restoring = false;
   const hasViewport = () => !suspended && list.clientHeight && visible(list);
   let position = { end: true, top: 0, anchors: [] };
-  const atEnd = () => suspended ? position.end : list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
+  const atEnd = () => hasViewport() ? list.scrollHeight - list.scrollTop - list.clientHeight <= 1 : position.end;
   let restoredTop;
   let folds;
   function remember() {
@@ -2165,10 +2181,10 @@ function chatViewport(list) {
       resize.disconnect();
       observed.clear();
       for (const anchor of position.anchors) delete anchor.node;
-      change();
+      change?.();
     },
     resume(change) {
-      change();
+      change?.();
       if (!suspended) return;
       applyFolds(folds);
       folds = undefined;
@@ -2501,21 +2517,35 @@ function draftComposer() {
     readVisibleMessages();
   }
   const readObserver = new ResizeObserver(showDialoguePosition);
+  const workPanel = element("div", undefined, "board-work-panel");
+  workPanel.hidden = true;
   const work = element("section", undefined, "board-chat-log board-work");
   const workViewport = chatViewport(work);
-  work.hidden = true;
   work.tabIndex = 0;
   const workTimeline = element("div", undefined, "chat-run board-work-timeline");
-  const workError = element("p", undefined, "muted");
+  const workError = element("div", undefined, "board-work-error");
   workError.hidden = true;
+  const workErrorMessage = element("p", undefined, "muted");
+  workErrorMessage.setAttribute("role", "alert");
+  const workRetry = button(
+    () => t("ui.retry_loading_d44dbc69"),
+    () => void loadWork(failedWorkCursor),
+    "quiet board-work-retry",
+  );
+  workError.append(workErrorMessage, workRetry);
   const workStatus = element("p", undefined, "muted");
   workStatus.setAttribute("role", "status");
   workStatus.hidden = true;
   bindLocalized(workStatus, "textContent", () => t("ui.loading_2ad65fd8"));
-  const workOlder = button(() => t("ui.earlier_activity_e8606f75"), () => void loadWork(workCursor), "quiet board-chat-older");
+  const workOlderLabel = () => t(workOlderLoading ? "ui.loading_2ad65fd8" : "ui.earlier_activity_e8606f75");
+  const workOlder = button("", () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
-  work.append(workOlder, workStatus, workTimeline, workError);
+  work.append(workOlder, workStatus, workTimeline);
+  workPanel.append(work, workError);
   let workCursor;
+  let failedWorkCursor;
+  let workOlderLoading = false;
+  let workStatusTimer;
   let workLoading = false;
   let workReload = false;
   let workLivePending = false;
@@ -2526,20 +2556,30 @@ function draftComposer() {
   let savedWork = [];
   let olderWorkLoaded = false;
   let hasWorkHistory = false;
+  bindLocalized(workOlder, "textContent", workOlderLabel);
   function renderGoalTimeline() {
     renderActivity(workTimeline, goalTimeline(savedWork, liveWork, pendingWork.values()), true, {
       managerWork: true, liveIds: new Set(liveWork.map(item => item.id)),
     });
   }
   async function loadWork(cursor = null) {
-    if (disposed || work.hidden || !canBrowseHistory()) return;
+    if (disposed || workPanel.hidden || !canBrowseHistory()) return;
     if (workLoading) {
       if (!cursor) workReload = true;
       return;
     }
     workLoading = true;
     workOlder.disabled = true;
-    workStatus.hidden = false;
+    workRetry.disabled = true;
+    if (cursor) {
+      workOlderLoading = true;
+      workOlder.setAttribute("aria-busy", "true");
+      bindLocalized(workOlder, "textContent", workOlderLabel);
+    } else if (!hasWorkHistory && workTimeline.childElementCount === 0 && workError.hidden) {
+      workStatusTimer = setTimeout(() => {
+        if (!workPanel.hidden && workTimeline.childElementCount === 0) workStatus.hidden = false;
+      }, 200);
+    }
     try {
       let next = cursor;
       const visited = new Set();
@@ -2553,11 +2593,11 @@ function draftComposer() {
       do {
         visited.add(next);
         const result = await api.boardHistory(project, next, "work");
-        if (disposed || work.hidden || !canBrowseHistory()) return;
+        if (disposed || workPanel.hidden || !canBrowseHistory()) return;
         if (!result.ok) throw new Error(boardError(result.error));
         if (visited.size === 1 && revision === goalRevision) {
           editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
-          if (work.hidden) return;
+          if (workPanel.hidden) return;
         }
         turns.unshift(...result.data.turns);
         reachedOldest ||= result.data.turns.some(turn =>
@@ -2568,6 +2608,7 @@ function draftComposer() {
         if (visited.has(next)) next = null;
       } while (next && (!reachedOldest || !turns.length));
       workViewport.update(() => {
+        workStatus.hidden = true;
         // Pages arrive newest first, while turns within each page are chronological.
         if (cursor) savedWork.unshift(...turns);
         else savedWork = turns;
@@ -2581,22 +2622,30 @@ function draftComposer() {
         workOlder.hidden = !workCursor;
         workError.hidden = true;
         renderGoalTimeline();
-      });
+      }, true);
       if (!hasWorkHistory) workViewport.followEnd();
       hasWorkHistory = true;
       editor.refreshWork();
     } catch (error) {
-      if (!disposed && canBrowseHistory()) {
+      if (!disposed && !workPanel.hidden && canBrowseHistory()) {
         workViewport.update(() => {
-          workError.textContent = error.message;
+          workStatus.hidden = true;
+          failedWorkCursor = cursor;
+          workErrorMessage.textContent = error.message;
           workError.hidden = false;
-          workOlder.hidden = false;
           renderGoalTimeline();
-        });
+        }, true);
       }
     } finally {
       workLoading = false;
+      clearTimeout(workStatusTimer);
       workOlder.disabled = false;
+      workRetry.disabled = false;
+      if (workOlderLoading) {
+        workOlderLoading = false;
+        workOlder.removeAttribute("aria-busy");
+        if (!disposed) bindLocalized(workOlder, "textContent", workOlderLabel);
+      }
       workStatus.hidden = true;
       if (workReload) {
         workReload = false;
@@ -2607,12 +2656,14 @@ function draftComposer() {
   function syncViews() {
     views.hidden = !(goalRunning || startingWork || goalLogAvailable ||
       (currentGoal && currentGoal.status !== "complete"));
-    if (views.hidden && !work.hidden) showWork(false);
+    if (views.hidden && !workPanel.hidden) showWork(false);
   }
   function showWork(show) {
     if (show && views.hidden) return;
-    if (show === !work.hidden) return;
-    work.hidden = !show;
+    if (show === !workPanel.hidden) return;
+    dialogueViewport.remember();
+    workViewport.remember();
+    workPanel.hidden = !show;
     log.hidden = show;
     dialogueToggle.setAttribute("aria-pressed", String(!show));
     workToggle.setAttribute("aria-pressed", String(show));
@@ -2628,7 +2679,7 @@ function draftComposer() {
     editor.refreshWork();
   }
   editor.invalidateWork = () => {
-    if (work.hidden) {
+    if (workPanel.hidden) {
       const revision = goalRevision;
       void api.boardHistory(project, null, "work").then(result => {
         if (!disposed && result.ok && revision === goalRevision) {
@@ -2640,7 +2691,7 @@ function draftComposer() {
     void loadWork();
   };
   editor.refreshWork = async () => {
-    if (disposed || work.hidden || !editor.matches("[data-open], [data-pinned]")) return;
+    if (disposed || workPanel.hidden || !editor.matches("[data-open], [data-pinned]")) return;
     if (workLivePending) {
       workLiveDirty = true;
       return;
@@ -2648,7 +2699,7 @@ function draftComposer() {
     workLivePending = true;
     try {
       const result = await api.boardHistory(project, null, "live");
-      if (disposed || work.hidden || !canBrowseHistory() || !result.ok) return;
+      if (disposed || workPanel.hidden || !canBrowseHistory() || !result.ok) return;
       const previousLive = liveWork;
       liveWork = [...(result.data.work ?? []), ...(result.data.chat ?? [])];
       const liveIds = new Set(liveWork.map(item => item.id));
@@ -2697,7 +2748,7 @@ function draftComposer() {
   const queue = element("div", undefined, "board-chat-queue");
   queue.setAttribute("role", "list");
   log.append(olderHistory, greeting);
-  chat.append(bar, goalPanel, log, work, queue);
+  chat.append(bar, goalPanel, log, workPanel, queue);
   const input = element("textarea");
   input.name = "request";
   input.rows = 1;
@@ -3068,7 +3119,7 @@ function draftComposer() {
     bindLocalized(unreadDivider, "textContent", () => t("ui.new_messages_bb42ec76"));
     bindLocalized(workToggle, "textContent", () => t("ui.goal_activity"));
     work.setAttribute("aria-label", workToggle.textContent);
-    bindLocalized(workOlder, "textContent", () => t("ui.earlier_activity_e8606f75"));
+    bindLocalized(workOlder, "textContent", workOlderLabel);
     bindLocalized(goalText, "aria-label", () => t("ui.goal_objective_c057a817"), true);
     bindLocalized(saveGoal, "textContent", () => t("ui.save_changes_c6c74561"));
     bindLocalized(pauseGoal, "textContent", () => t("ui.pause_2541bca6"));
@@ -3233,9 +3284,9 @@ function draftComposer() {
     syncAction();
   };
   const seenMessages = new Set();
-  const rememberMessages = container => {
+  const rememberMessages = (container, messages = seenMessages) => {
     for (const entry of container.querySelectorAll("[data-coordination-key]")) {
-      seenMessages.add(entry.dataset.coordinationKey);
+      messages.add(entry.dataset.coordinationKey);
     }
   };
   const streamedText = new WeakMap();
@@ -3325,6 +3376,7 @@ function draftComposer() {
   const historyRunHeights = new WeakMap();
   let savedLogWidth;
   let recentTurns;
+  let recentDelivered;
   let recentNodes = [];
   let historyUnmounted = false;
   const previewUrls = [];
@@ -3354,6 +3406,7 @@ function draftComposer() {
     clearTimeout(readRetry);
     clearTimeout(queueRetry);
     clearTimeout(workBudgetRetry);
+    clearTimeout(workStatusTimer);
     cancelAnimationFrame(readFrame);
     readObserver.disconnect();
     dialogueViewport.dispose();
@@ -3364,9 +3417,25 @@ function draftComposer() {
     for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url);
     for (const file of pendingPreviews.keys()) releasePreview(file);
   };
-  function renderHistoryPage(turns, reuseHeights = false) {
-    const page = document.createDocumentFragment();
-    const delivered = new Set();
+  function deferHistoryRunLayout(node, height) {
+    node.style.contentVisibility = "auto";
+    // Chromium retains the measured size after it lays out the reply near the viewport.
+    node.style.containIntrinsicBlockSize = `auto ${height ?? 480}px`;
+  }
+
+  function deferMountedHistoryLayout(nodes) {
+    // An older page is inserted above the current anchor. Keep its measured size.
+    const measured = [];
+    for (const node of nodes) {
+      const turn = historyRuns.get(node);
+      if (!turn || turn.recovery) continue;
+      const height = node.getBoundingClientRect().height;
+      if (height) measured.push({ node, height });
+    }
+    for (const { node, height } of measured) deferHistoryRunLayout(node, height);
+  }
+
+  function* renderHistoryTurns(turns, page, delivered, messages, reuseHeights, deferLayout = false) {
     const liveIds = new Set(active?.items?.map(item => item.id));
     let markdownCache = historyMarkup.get(turns);
     if (!markdownCache) {
@@ -3382,7 +3451,7 @@ function draftComposer() {
       }
       const container = element("div", undefined, "chat-run");
       renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined,
-        { dialogue: true, seenMessages, markdownCache, managerIncomplete: Boolean(turn.recovery) });
+        { dialogue: true, seenMessages: messages, markdownCache, managerIncomplete: Boolean(turn.recovery) });
       if (turn.recovery && !(turn.outcome?.status === "running" && (active || managerBusy))) {
         const status = element("div", undefined, "manager-recovery");
         status.append(element("span", turn.outcome?.reason || (() => t("ui.manager_recovery_unknown"))));
@@ -3401,18 +3470,56 @@ function draftComposer() {
         container.append(status);
         container.hidden = false;
       }
-      rememberMessages(container);
+      rememberMessages(container, messages);
       if (!container.hidden) {
         historyRuns.set(container, turn);
         const height = reuseHeights ? historyRunHeights.get(turn) : undefined;
-        if (height) {
-          container.style.contentVisibility = "auto";
-          container.style.containIntrinsicBlockSize = "auto " + height + "px";
+        if (height || (deferLayout && !turn.recovery)) {
+          deferHistoryRunLayout(container, height);
         }
         page.append(container);
       }
+      yield;
+    }
+  }
+
+  function renderHistoryPage(turns, reuseHeights = false) {
+    const page = document.createDocumentFragment();
+    const delivered = new Set();
+    for (const _ of renderHistoryTurns(turns, page, delivered, seenMessages, reuseHeights)) {
+      // Remounts restore the saved reading anchor in the current frame.
     }
     return { page, delivered };
+  }
+
+  async function prepareRecentHistory(turns, canInstall) {
+    const locale = localization.locale;
+    const page = document.createDocumentFragment();
+    const delivered = new Set();
+    const messages = new Set();
+    const bindings = new Set();
+    const saveBindings = () => {
+      // Board updates prune bindings on detached nodes while this page is still being built.
+      for (const binding of localizedBindings) {
+        if (binding.node.isConnected || !page.contains(binding.node)) continue;
+        localizedBindings.delete(binding);
+        bindings.add(binding);
+      }
+    };
+    let deadline = performance.now() + 8;
+    for (const _ of renderHistoryTurns(turns, page, delivered, messages, false, true)) {
+      if (performance.now() >= deadline) {
+        saveBindings();
+        await scheduler.yield();
+        if (!canInstall() || active || locale !== localization.locale) {
+          for (const tile of page.querySelectorAll(".chat-attachment")) chatPreviews.unobserve(tile);
+          return;
+        }
+        deadline = performance.now() + 8;
+      }
+    }
+    saveBindings();
+    return { page, delivered, bindings };
   }
   const atEndOfHistory = dialogueViewport.atEnd;
   const canBrowseHistory = () => editor.isConnected && editor.matches("[data-open], [data-pinned]");
@@ -3439,16 +3546,19 @@ function draftComposer() {
       const result = await api.boardHistory(project, cursor);
       if (disposed || generation !== historyGeneration || !canBrowseHistory()) return;
       if (!result.ok) throw new Error(boardError(result.error));
+      const nodes = [];
       dialogueViewport.update(() => {
         const { page } = renderHistoryPage(result.data.turns);
+        nodes.push(...page.children);
         olderPages.push(result.data.turns);
-        olderNodes.push(...page.children);
+        olderNodes.push(...nodes);
         greeting.after(page);
         updateUnreadMessages();
         olderCursor = result.data.nextCursor === cursor ? null : result.data.nextCursor;
         updateOlderHistory();
         greeting.hidden = log.childElementCount > 2;
       });
+      deferMountedHistoryLayout(nodes);
       lastScrollTop = log.scrollTop;
     } catch (error) {
       if (!disposed && generation === historyGeneration) message(error.message);
@@ -3479,31 +3589,65 @@ function draftComposer() {
         if (disposed || reloadAfterHistory || !canBrowseHistory()) return;
         if (revision === goalRevision) editor.updateGoal(result.data.goal, result.data.goalRunning, result.data.goalResuming, result.data);
         void refreshGoalAvailability();
-        const oldImages = [...log.querySelectorAll(".chat-attachments img")];
-        let delivered;
-        dialogueViewport.update(() => {
-          const previousReplies = new Set([...log.querySelectorAll("[data-message-id], .board-manager-message[data-item]")].map(node =>
-            node.dataset.messageId ?? node.dataset.item.slice("message:".length)));
-          historyGeneration++;
-          olderNodes.length = 0;
-          olderPages.length = 0;
-          recentTurns = result.data.turns;
-          recentCursor = olderCursor = result.data.nextCursor;
-          seenMessages.clear();
-          const next = renderHistoryPage(recentTurns);
-          recentNodes = [...next.page.children];
-          historyUnmounted = false;
-          delivered = next.delivered;
-          if (hasDialogueHistory) for (const reply of next.page.querySelectorAll("[data-message-id]")) {
-            if (!previousReplies.has(reply.dataset.messageId)) reply.setAttribute("data-enter", "");
+        const turns = result.data.turns;
+        const needsLiveState = active || turns.some(turn => turn.recovery);
+        // A focus refresh still reads disk. Keep the mounted page and reading anchor
+        // when the stored dialogue and pagination boundary have not changed.
+        const unchanged = !needsLiveState && !historyUnmounted && recentDelivered &&
+          recentCursor === result.data.nextCursor && JSON.stringify(turns) === JSON.stringify(recentTurns);
+        let delivered = recentDelivered;
+        let oldImages = [];
+        if (!unchanged) {
+          const deferWhileReading = () => {
+            if (!hasDialogueHistory || atEndOfHistory()) return false;
+            if (recentCursor === result.data.nextCursor && !olderPages.length && !loadingOlder) return false;
+            // Keep the mounted rows and their cursor together until the reader returns to the end.
+            historyInvalidated = true;
+            historyLoaded = true;
+            return true;
+          };
+          if (deferWhileReading()) return;
+          const generation = historyGeneration;
+          const canInstall = () => !disposed && !reloadAfterHistory &&
+            generation === historyGeneration && canBrowseHistory();
+          // A large saved reply can monopolize the renderer while the user starts typing.
+          const prepared = needsLiveState ? undefined : await prepareRecentHistory(turns, canInstall);
+          if (!canInstall()) {
+            if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
+            return;
           }
-          log.replaceChildren(olderHistory, greeting, next.page);
-          if (active?.entry) log.append(active.entry);
-          if (active) log.append(active.container, active.thinking);
-          updateOlderHistory();
-          greeting.hidden = log.childElementCount > 2;
-          updateUnreadMessages();
-        });
+          if (deferWhileReading()) {
+            for (const tile of prepared?.page.querySelectorAll(".chat-attachment") ?? []) chatPreviews.unobserve(tile);
+            return;
+          }
+          oldImages = [...log.querySelectorAll(".chat-attachments img")];
+          dialogueViewport.update(() => {
+            const previousReplies = new Set([...log.querySelectorAll("[data-message-id], .board-manager-message[data-item]")].map(node =>
+              node.dataset.messageId ?? node.dataset.item.slice("message:".length)));
+            historyGeneration++;
+            olderNodes.length = 0;
+            olderPages.length = 0;
+            recentTurns = turns;
+            recentCursor = olderCursor = result.data.nextCursor;
+            seenMessages.clear();
+            const next = prepared ?? renderHistoryPage(recentTurns);
+            if (prepared) rememberMessages(next.page);
+            recentNodes = [...next.page.children];
+            historyUnmounted = false;
+            delivered = next.delivered;
+            recentDelivered = active || needsLiveState ? undefined : delivered;
+            if (hasDialogueHistory) for (const reply of next.page.querySelectorAll("[data-message-id]")) {
+              if (!previousReplies.has(reply.dataset.messageId)) reply.setAttribute("data-enter", "");
+            }
+            log.replaceChildren(olderHistory, greeting, next.page);
+            for (const binding of prepared?.bindings ?? []) localizedBindings.add(binding);
+            if (active?.entry) log.append(active.entry);
+            if (active) log.append(active.container, active.thinking);
+            updateOlderHistory();
+            greeting.hidden = log.childElementCount > 2;
+            updateUnreadMessages();
+          });
+        }
         await restoreQueue().catch(() => {});
         for (const job of [...queued]) {
           if (!delivered.has(job.id) || job.sending) continue;
@@ -3581,7 +3725,28 @@ function draftComposer() {
     workViewport.resume(() => {
       if (savedWork.length || liveWork.length || pendingWork.size) renderGoalTimeline();
     });
-    if (!work.hidden) editor.invalidateWork();
+    if (!workPanel.hidden) editor.invalidateWork();
+  };
+  let boardViewSuspended = false;
+  editor.suspendBoardView = () => {
+    if (!canBrowseHistory()) return;
+    boardViewSuspended = true;
+    dialogueViewport.suspend();
+    workViewport.suspend();
+    clearTimeout(readRetry);
+    cancelAnimationFrame(readFrame);
+    readFrame = undefined;
+    readObserver.disconnect();
+  };
+  editor.resumeBoardView = () => {
+    if (!boardViewSuspended || !canBrowseHistory()) return;
+    boardViewSuspended = false;
+    dialogueViewport.resume();
+    workViewport.resume();
+    lastScrollTop = log.scrollTop;
+    readObserver.observe(log);
+    editor.invalidateHistory();
+    if (!workPanel.hidden) editor.invalidateWork();
   };
   editor.closeChat = () => {
     if (pinned || !editor.hasAttribute("data-open")) return;
@@ -4287,7 +4452,8 @@ function draftComposer() {
     const row = element("div", undefined, "board-queued-row");
     row.setAttribute("role", "listitem");
     const handle = goal ? undefined : reorderHandle();
-    row.append(handle ?? icon("target"));
+    const preview = element("span", undefined, "board-queued-preview");
+    row.append(handle ?? icon("target"), preview);
     const images = messageFiles.filter(file => file.url);
     if (images.length) {
       const thumbnail = button("", () => previewImages(images, images[0]), "quiet board-queued-thumbnail");
@@ -4301,9 +4467,8 @@ function draftComposer() {
       row.append(icon("file"));
     }
     if (messageFiles.length) row.title = messageFiles.map(file => file.name).join("\n");
-    const preview = element("span", undefined, "board-queued-preview");
     const status = element("div", undefined, "board-queued-status");
-    row.append(preview, status);
+    row.append(status);
     queue.append(row);
     const job = { id, row, preview, status, handle, draft, quotedReferences, goal, submitted, messageFiles,
       failed, inFlight, recovery, historyPending };
@@ -6598,7 +6763,13 @@ function update(next) {
   const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
-  const previousBoard = projectChanged ? undefined : frame.board;
+  if (projectChanged) byId("board-composer").firstChild?.suspendBoardView?.();
+  let cardLayout;
+  if (!projectChanged && frame.board && next.board && !archiveView && !reducedMotion.matches && !document.hidden) {
+    cardLayout = cardLayoutChanges(frame.board, next.board.tasks);
+    // Read old card positions before status, chat, and board updates change the DOM.
+    cardLayout.moves = captureCardMoves(cardLayout.affectedLanes);
+  }
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   if (projectChanged && byId("auto-mode-panel").matches(":popover-open")) byId("auto-mode-panel").hidePopover();
   if ((projectChanged || frame.localization?.locale !== next.localization?.locale || Boolean(frame.board) !== Boolean(next.board)) &&
@@ -6650,7 +6821,7 @@ function update(next) {
       void body.querySelector(".expert-team")?.refreshRoleNames?.();
     }
   }
-  render(previousBoard);
+  render(cardLayout);
   syncBoardNotice(projectChanged);
   const tagSettings = byId("tag-settings");
   if (tagsChanged && sheet.open && tagSettings) renderTagSettings(tagSettings);

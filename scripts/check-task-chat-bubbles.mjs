@@ -10,8 +10,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { confirmFixtureDraft, plannedDraft } from "../tests/fixtures/planned-draft.ts";
 import { electronCheck } from "./electron-check.mjs";
+import { checkTaskChatSend } from "./check-task-chat-send.mjs";
 
-const { scratch, artifacts } = electronCheck(import.meta.url, "task-bubbles", 120000, [["--first"], ["--restart"]]);
+const sendCheck = process.argv.includes("--send-check");
+const { scratch, artifacts } = electronCheck(import.meta.url, "task-bubbles", 120000,
+  sendCheck ? [[]] : [["--first"], ["--restart"]]);
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog, nativeTheme } = require("electron");
 const restart = process.argv.includes("--restart");
@@ -20,14 +23,15 @@ const project = join(scratch, "board");
 const staging = join(scratch, "staging");
 if (!restart) mkdirSync(staging);
 process.env.TMPDIR = process.env.TEMP = process.env.TMP = staging;
-const reportPath = join(artifacts, "card-reply-activity-check.txt");
+const reportPath = join(artifacts, sendCheck ? "card-chat-send-check.txt" : "card-reply-activity-check.txt");
 const statePath = join(scratch, "saved.json");
 const settings = { model: "fixture", effort: "low" };
 const question = "Если карточку отменили через CLI при закрытом Electron и без запущенного watch, должна ли рабочая копия удалиться автоматически после завершения сеанса или достаточно убрать её при следующем открытии доски или запуске watch?";
 const answer = "должна удаляться";
 const reply = "Рабочая копия должна удалиться автоматически после отмены карточки. Уточнение записано.";
 const report = restart ? JSON.parse(readFileSync(statePath, "utf8")).report : {
-  command: "node scripts/check-task-chat-bubbles.mjs --artifacts .tasks/qa/T-0255",
+  command: sendCheck ? "node scripts/check-task-chat-bubbles.mjs --send-check --artifacts .tasks/qa/T-0344"
+    : "node scripts/check-task-chat-bubbles.mjs --artifacts .tasks/qa/T-0255",
   revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim(),
   representation: "SHA-256 of UTF-8 source with CRLF normalized to LF (Git text representation)",
   sources: Object.fromEntries([
@@ -36,6 +40,10 @@ const report = restart ? JSON.parse(readFileSync(statePath, "utf8")).report : {
     "src/desktop/codex-run.ts",
     "src/cli/archive.ts", "scripts/check-task-chat-bubbles.mjs", "scripts/electron-check.mjs",
     "tests/task-question.test.ts", "docs/explanation/architecture.md",
+    ...(sendCheck ? [
+      "scripts/check-task-chat-send.mjs", "docs/reference/board.md",
+      "src/desktop/locales/ru.json", "src/desktop/locales/en.json",
+    ] : []),
   ].map(path => [path, createHash("sha256").update(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n")).digest("hex")])),
   environment: { platform: process.platform, node: process.versions.node, electron: process.versions.electron, chromium: process.versions.chrome },
   matrix: { Windows: "Electron runtime checked", Linux: "Not run; shared renderer, no process/path/packaging changes", macOS: "Not run; shared renderer, no process/path/packaging changes" },
@@ -72,11 +80,25 @@ dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [project] });
 
 let provider;
 let executor;
+const control = { calls: [], steering: [] };
+globalThis.taskBubbleCli = async (call, project, args, input, options) => {
+  if (sendCheck && args[0] === "chat" && input?.requestId) {
+    control.calls.push({ id: args[1], requestId: input.requestId });
+    await control.write?.promise;
+  }
+  if (sendCheck && args[0] === "show" && args[1] === control.delayShow?.id) {
+    await control.delayShow.gate.promise;
+  }
+  return call(project, args, input, options);
+};
 globalThis.taskBubbleProvider = async (options, mode) => {
-  options.onControl({ interrupt: async () => provider?.finish.resolve({ interrupted: true }), steer: async () => {} });
-  if (mode === "initial") return { text: JSON.stringify({ questions: question }) };
   const finish = Promise.withResolvers();
-  provider = { publish: options.onActivity, finish, at: new Date().toISOString() };
+  options.onControl({
+    interrupt: async () => finish.resolve({ interrupted: true }),
+    steer: async prompt => { control.steering.push(JSON.parse(prompt).latestUserMessage); },
+  });
+  if (mode === "initial" && !control.holdAnalysis) return { text: JSON.stringify({ questions: question }) };
+  provider = { publish: options.onActivity, finish, mode, at: new Date().toISOString() };
   return finish.promise;
 };
 globalThis.taskBubbleExecutor = async (_client, _project, _cwd, task, onActivity, _onUsage, signal, beforeTurn,
@@ -131,10 +153,12 @@ void (async () => {
     const mainSource = readSource(mainUrl)
       .replace(chatUrl.href, pathToFileURL(chatEntry).href)
       .replace("missingCodexThread, startCodexRun", "missingCodexThread")
-      .replace("codexStatus, configuredCodex,", "codexStatus,");
+      .replace("codexStatus, configuredCodex,", "codexStatus,")
+      .replace("{ callCli, cliChild", "{ callCli as realCallCli, cliChild");
     writeFileSync(entry, compile(`
       const configuredCodex = async () => ({});
       const startCodexRun = globalThis.taskBubbleExecutor;
+      const callCli = (...args) => globalThis.taskBubbleCli(realCallCli, ...args);
       ${mainSource}
     `));
     app.on("web-contents-created", (_event, contents) => contents.setBackgroundThrottling(false));
@@ -150,6 +174,12 @@ void (async () => {
     await until(() => evaluate("localization.locale === 'ru'"), "Russian localization");
     await evaluate("window.taskboard.menuAction('open-project')");
     await until(() => evaluate(`window.taskboard.bootstrap().then(f => !f.loading && f.board?.project === ${JSON.stringify(project)})`), "board");
+    if (sendCheck) {
+      await checkTaskChatSend({
+        window, evaluate, artifacts, cli, until, check, report, settings, control, activeCard, getProvider: () => provider,
+      });
+      return;
+    }
     const saved = restart ? JSON.parse(readFileSync(statePath, "utf8")) : {};
     let card = restart ? cli(["show", saved.id]) : cli(["create"], plannedDraft({
       title: "Диалог карточки: пузыри и время", description: "Уточнить отображение истории.", execution: settings,
@@ -166,7 +196,7 @@ void (async () => {
       const input = document.querySelector('#task-chat-input');
       input.value = ${JSON.stringify(text)};
       input.dispatchEvent(new Event('input'));
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     }`);
     const paint = () => evaluate("document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))");
     const capture = async (file, selector) => {
