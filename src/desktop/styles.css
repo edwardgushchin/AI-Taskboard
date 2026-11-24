@@ -1238,6 +1238,7 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .image-preview-viewport.dragging { cursor: grabbing; }
 .image-preview-stage { position: relative; display: flex; width: max-content; min-width: 100%; min-height: 100%; }
 .image-preview-stage img { flex: none; margin: auto; user-select: none; }
+.image-preview-menu.app-menu-popup { position: fixed; inset: auto; margin: 0; }
 .image-preview-status {
   grid-area: viewport; place-self: center; z-index: 1; max-width: calc(100% - 16px);
   padding: 8px 12px; background: var(--panel); border-radius: 6px; overflow-wrap: anywhere; pointer-events: none;

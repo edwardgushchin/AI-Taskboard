@@ -1,4 +1,5 @@
 {
+  "ui.image_save_as": "Salva con nome",
   "archive.cancelled.action": "Archivia schede annullate",
   "archive.cancelled.count": "Schede archiviate: {count}",
   "archive.cancelled.issues": "Errori:",
