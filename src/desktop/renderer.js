@@ -2319,7 +2319,7 @@ function draftComposer() {
   goalPending.setAttribute("role", "status");
   goalPending.hidden = true;
   const goalActions = element("div", undefined, "board-goal-actions");
-  const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
+  const saveGoal = button("", () => changeGoal("edit", goalText.value), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
   const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
@@ -2367,7 +2367,7 @@ function draftComposer() {
     bindLocalized(goalPending, "textContent", () => t(clearingGoal
       ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
       : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
-    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
+    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
   const showGoal = goal => {
@@ -2412,7 +2412,7 @@ function draftComposer() {
     try {
       const result = await api.boardGoal(kind, objective);
       if (!result.ok) throw new Error(boardError(result.error));
-      if (kind === "edit" && goalText.value.trim() === objective) goalText.value = result.data?.objective ?? "";
+      if (kind === "edit" && goalText.value === objective) goalText.value = result.data?.objective ?? "";
       if (revision === goalRevision) editor.updateGoal(result.data);
     } catch (error) {
       goalError.textContent = error.message;
@@ -3745,8 +3745,8 @@ function draftComposer() {
     }).catch(() => {});
   }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
-  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId) => {
-    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId);
+  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences) => {
+    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences);
     if (!result.ok) throw new Error(boardError(result.error));
     return result.data;
   };
@@ -3822,11 +3822,14 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false, inFlight, recovery, historyPending } of jobs) {
+      for (const { id, draft, quotedReferences, goal, files, failed = false, inFlight, recovery, historyPending } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight, recovery, historyPending);
+          const submitted = files.map(file => file.link
+            ? { ...file, size: file.link.size }
+            : new File([file.bytes], file.name, { type: file.type }));
+          enqueue(id, draft, goal, submitted, failed, inFlight, quotedReferences, recovery, historyPending);
           continue;
         }
         const changedFlight = job.inFlight !== inFlight;
@@ -3834,9 +3837,9 @@ function draftComposer() {
         job.inFlight = inFlight;
         job.historyPending = historyPending;
         if (!job.editing && !job.sending) {
-          if (draft !== job.draft) {
+          if (draft !== job.draft || quotedReferences !== job.quotedReferences) {
             job.draft = draft;
-            job.request = draft.trim();
+            job.quotedReferences = quotedReferences;
             updateQueuedPreview(job);
           }
           if (failed !== job.failed || changedFlight || changedHistory) {
@@ -3939,7 +3942,6 @@ function draftComposer() {
           validate();
         }
         job.draft = edit.value;
-        job.request = edit.value.trim();
         updateQueuedPreview(job);
       }
       job.preview.hidden = false;
@@ -3951,7 +3953,9 @@ function draftComposer() {
     };
     const saveButton = button(() => t("ui.save_7eea8139"), () => finish(true), "quiet");
     const cancel = button(() => t("ui.cancel_4c6dcc32"), () => finish(false), "quiet");
-    const validate = () => { saveButton.disabled = !edit.value.trim() && (job.goal || !job.submitted.length); };
+    const validate = () => {
+      saveButton.disabled = !edit.value.trim() && !job.quotedReferences && (job.goal || !job.submitted.length);
+    };
     edit.addEventListener("input", validate);
     edit.addEventListener("keydown", event => {
       if (event.isComposing) return;
@@ -4209,7 +4213,7 @@ function draftComposer() {
     event.preventDefault();
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const text = input.value;
-    const draft = quoteMessage(text, quotes);
+    const quotedReferences = quoteMessage("", quotes);
     const goal = goalMode;
     const submitted = [...files];
     const replies = log.querySelectorAll(".board-manager-message[data-message-id]");
@@ -4222,7 +4226,7 @@ function draftComposer() {
     quoteDraft.sync();
     try {
       await restoreQueue();
-      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted), reviewModeQuestionId);
+      id = await queueStorage("add", undefined, text, goal, await pasteFiles(submitted), reviewModeQuestionId, quotedReferences);
     } catch (error) {
       if (!disposed) message(error.message);
       return;
@@ -4245,7 +4249,7 @@ function draftComposer() {
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
     if (active?.id !== id && !queued.some(job => job.id === id)) {
-      enqueue(id, draft, goal, submitted);
+      enqueue(id, text, goal, submitted, false, false, quotedReferences);
     }
     openChat();
     showWork(goal);
@@ -4253,12 +4257,13 @@ function draftComposer() {
     syncAction();
   });
   function updateQueuedPreview(job) {
+    const message = [job.draft, job.quotedReferences].filter(Boolean).join("\n\n");
+    job.request = job.goal ? message : message.trim();
     job.preview.textContent = job.request.replace(/\s+/g, " ") || job.messageFiles.map(file => file.name).join(", ");
     job.preview.title = job.preview.textContent.slice(0, 180);
     if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, recovery, historyPending) {
-    const request = draft.trim();
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, quotedReferences, recovery, historyPending) {
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
@@ -4286,7 +4291,8 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight, recovery, historyPending };
+    const job = { id, row, preview, status, handle, draft, quotedReferences, goal, submitted, messageFiles,
+      failed, inFlight, recovery, historyPending };
     queued.push(job);
     if (handle) {
       handle.addEventListener("dragstart", event => {

@@ -229,7 +229,9 @@ function fixture(t: TestContext) {
       if (clearGoalError) throw new Error(clearGoalError);
       if (action.kind === "edit") {
         const { goal } = readJson(binding) as { goal: BoardGoal };
-        return { ...goal, objective: action.objective };
+        const updated = { ...goal, objective: action.objective };
+        action.commit?.(updated, randomUUID());
+        return updated;
       }
       return null;
     },
@@ -311,9 +313,7 @@ function fixture(t: TestContext) {
             : ["goal_read", "goal_send", "goal_edit"])
           : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
-          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
-        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
-          !prompt.startsWith("AI Taskboard queue:") ? ["board_import_project_rules"] : []),
+          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update", "board_import_project_rules"] : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
           !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
           ["task_set_review_mode"] : []),
@@ -330,7 +330,11 @@ function fixture(t: TestContext) {
       if (!session.id) session.save(newThread);
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
-          controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
+          controls: control => session.onGoalControl(async action => {
+            const updated = await control(action);
+            if (action.kind === "edit" && updated) action.commit?.(updated, randomUUID());
+            return updated;
+          }), update: session.onGoal, activity: session.onActivity,
           role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access,
           confirmApproval: session.confirmApproval, finishTurn: session.finishGoalTurn,
           acceptTurn: session.onTurnAccepted, retrying: session.onProviderRetry,
@@ -2539,16 +2543,18 @@ test("send now steers the active manager with attachments and releases its execu
     assert.equal(f.boardListeners.size, 1);
     const id = "00000000-0000-4000-8000-000000000002";
     const attachments = [file("new.png", "image/png", "bytes")];
-    assert.equal((await f.queue("add", id, "Черновик", false, attachments)).ok, true);
+    const quotedReferences = "Quote 1:\n```\nКонтекст.\n```";
+    assert.equal((await f.queue("add", id, "Черновик", false, attachments, undefined, quotedReferences)).ok, true);
     assert.equal((await f.queue("edit", id, "Send this first")).ok, true);
     const [queued] = (await f.queue("list")).data;
     assert.equal(queued.draft, "Send this first");
+    assert.equal(queued.quotedReferences, quotedReferences);
     assert.equal(new TextDecoder().decode(queued.files[0].bytes), "bytes");
     assert.equal((await f.sendNow("Send this first", attachments, id)).ok, true);
     assert.equal((await f.queue("list")).data.length, 0);
     assert.equal(sent.length, 1);
     assert.deepEqual(JSON.parse(sent[0].text).latestUserMessage, {
-      text: "Send this first", attachments: [{ id: 2, name: "new.png", imageIndex: 1 }],
+      text: "Send this first", quotedReferences, attachments: [{ id: 2, name: "new.png", imageIndex: 1 }],
     });
     assert.match(sent[0].images[0], /^data:image\/png;base64,/);
   } finally {
@@ -3851,12 +3857,22 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   const save = (objective: string, id = goalId) => writeJson(f.binding, {
     provider: "codex", id: f.threadId, goalId: id, history: "local", goal: { objective, status: "paused" },
   });
-  const edit = async (authorization: string, objective: string, expectedObjective: string, id = goalId) => {
+  const edit = async (authorization: string, objective: string, expectedObjective: string, id = goalId, quotedReferences?: string | null) => {
     let response: any;
-    const run = await f.run(authorization, async act => {
+    let queuedId: string | undefined;
+    if (quotedReferences !== undefined) {
+      const queued = await f.queue("add", undefined, authorization, false, [], undefined, quotedReferences ?? undefined);
+      assert.equal(queued.ok, true, JSON.stringify(queued));
+      queuedId = queued.data;
+    }
+    const run = await f.run(authorization, async (act, prompt, _images, _thread, context) => {
+      if (quotedReferences) {
+        assert.equal(prompt, authorization);
+        assert.equal(context?.quotedReferences, quotedReferences);
+      }
       response = await act("goal_edit", { goalId: id, expectedObjective, objective, authorization });
       return { text: response.ok ? response.data.objective : response.error.message };
-    });
+    }, [], false, queuedId);
     assert.equal(run.ok, true, JSON.stringify(run));
     return response;
   };
@@ -3884,7 +3900,6 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
     "Замени текст цели на: Сделай формулировку понятной.",
     "Замени текст цели на:\n«Перепиши цель простыми словами»",
     "Replace the goal with: Make the wording easier to understand, please.",
-    "Замени текст цели на:\n\nQuote 1:\n```\nПерепиши текст справки.\n```",
     "Уточни цель: сделай формулировку более понятной, пожалуйста",
     "Уточни цель в части Linux: сделай текст читабельным",
     "Уточни цель: перепиши её более простыми словами",
@@ -3927,9 +3942,13 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   assert.equal((await edit(replace, replacement, original)).error.code, "GOAL_CHANGED");
   assert.equal((await edit(replace, replacement, refined, randomUUID())).error.code, "GOAL_CHANGED");
   assert.deepEqual((await edit(replace, replacement, refined)).data, { objective: replacement, status: "paused" });
-  const multiline = replacement + "\n\nПроверь ссылки и примеры, пожалуйста.";
-  const replaceEnglish = "Replace the goal with:\n" + multiline + "\n\nQuote 1:\n```\nКонтекст обсуждения.\n```";
-  const result = await edit(replaceEnglish, "Обновить справку.", replacement);
+  const quote = "Quote 1:\n```\nПерепиши текст справки.\n```";
+  assert.equal((await edit("Замени текст цели на:", replacement, replacement, goalId, quote)).error.code, "USER_DIRECTION_REQUIRED");
+  const multiline = replacement + "\n\n" + quote + "\n\nПроверь ссылки и примеры, пожалуйста.\n\t  ";
+  const replaceEnglish = "Replace the goal with:\n" + multiline;
+  const ambiguous = await edit(replaceEnglish, "Обновить справку.", replacement, goalId, null);
+  assert.equal(ambiguous.error.code, "USER_DIRECTION_REQUIRED");
+  const result = await edit(replaceEnglish, "Обновить справку.", replacement, goalId, quote);
   assert.deepEqual(result.data, { objective: multiline, status: "paused" });
   const finalObjective = multiline + "\nПроверить журнал ошибок.";
   const explicitEnglish = "Add a check of the error log to the goal, please.";
