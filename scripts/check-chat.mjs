@@ -2439,8 +2439,14 @@ app.whenReady().then(async () => {
       workLog.querySelector('.board-chat-older').click();
       new Promise(resolve => setTimeout(resolve, 100));
     `);
-    await check(`workLog.textContent.includes('History unavailable') && !workLog.querySelector('.board-chat-older').disabled`, 'work error permits retry');
-    await evaluate(`workFailure = false; workLog.querySelector('.board-chat-older').click(); new Promise(resolve => setTimeout(resolve, 100));`);
+    await check(`workLog.textContent.includes('History unavailable') &&
+      workLog.querySelector('.board-work-retry').checkVisibility() &&
+      !workLog.querySelector('.board-work-retry').disabled`, 'work error permits retry');
+    await evaluate(`
+      workFailure = false;
+      workLog.querySelector('.board-work-retry').click();
+      new Promise(resolve => setTimeout(resolve, 100));
+    `);
     const workResult = await evaluate(`({ older: workLog.textContent.includes('older-work'), hidden: workLog.querySelector('.board-chat-older').hidden,
       count: workLog.querySelectorAll('[data-item^="message:"]').length,
       offset: workAnchor.getBoundingClientRect().top - workLog.getBoundingClientRect().top - workOffset,
@@ -2475,8 +2481,12 @@ app.whenReady().then(async () => {
     new Promise(resolve => setTimeout(resolve, 100));
   `);
   await check(`cycleManager.querySelector('.board-work').textContent.includes('Initial history failure') &&
-    !cycleManager.querySelector('.board-work .board-chat-older').hidden`, 'first work history error exposes retry');
-  await evaluate(`initialWorkFailure = false; cycleManager.querySelector('.board-work .board-chat-older').click(); new Promise(resolve => setTimeout(resolve, 100));`);
+    cycleManager.querySelector('.board-work-retry').checkVisibility()`, 'first work history error exposes retry');
+  await evaluate(`
+    initialWorkFailure = false;
+    cycleManager.querySelector('.board-work-retry').click();
+    new Promise(resolve => setTimeout(resolve, 100));
+  `);
   await check(`workCalls.length === 3 && cycleManager.querySelector('.board-work .board-chat-older').hidden`, 'cursor cycle terminates empty history');
   await evaluate(`cycleManager.dispose()`);
 

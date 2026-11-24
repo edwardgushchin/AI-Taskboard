@@ -2506,16 +2506,28 @@ function draftComposer() {
   work.hidden = true;
   work.tabIndex = 0;
   const workTimeline = element("div", undefined, "chat-run board-work-timeline");
-  const workError = element("p", undefined, "muted");
+  const workError = element("div");
   workError.hidden = true;
+  const workErrorMessage = element("p", undefined, "muted");
+  workErrorMessage.setAttribute("role", "alert");
+  const workRetry = button(
+    () => t("ui.retry_loading_d44dbc69"),
+    () => void loadWork(failedWorkCursor),
+    "quiet board-work-retry",
+  );
+  workError.append(workErrorMessage, workRetry);
   const workStatus = element("p", undefined, "muted");
   workStatus.setAttribute("role", "status");
   workStatus.hidden = true;
   bindLocalized(workStatus, "textContent", () => t("ui.loading_2ad65fd8"));
-  const workOlder = button(() => t("ui.earlier_activity_e8606f75"), () => void loadWork(workCursor), "quiet board-chat-older");
+  const workOlderLabel = () => t(workOlderLoading ? "ui.loading_2ad65fd8" : "ui.earlier_activity_e8606f75");
+  const workOlder = button("", () => void loadWork(workCursor), "quiet board-chat-older");
   workOlder.hidden = true;
   work.append(workOlder, workStatus, workTimeline, workError);
   let workCursor;
+  let failedWorkCursor;
+  let workOlderLoading = false;
+  let workStatusTimer;
   let workLoading = false;
   let workReload = false;
   let workLivePending = false;
@@ -2526,6 +2538,7 @@ function draftComposer() {
   let savedWork = [];
   let olderWorkLoaded = false;
   let hasWorkHistory = false;
+  bindLocalized(workOlder, "textContent", workOlderLabel);
   function renderGoalTimeline() {
     renderActivity(workTimeline, goalTimeline(savedWork, liveWork, pendingWork.values()), true, {
       managerWork: true, liveIds: new Set(liveWork.map(item => item.id)),
@@ -2539,7 +2552,16 @@ function draftComposer() {
     }
     workLoading = true;
     workOlder.disabled = true;
-    workStatus.hidden = false;
+    workRetry.disabled = true;
+    if (cursor) {
+      workOlderLoading = true;
+      workOlder.setAttribute("aria-busy", "true");
+      bindLocalized(workOlder, "textContent", workOlderLabel);
+    } else if (!hasWorkHistory && workTimeline.childElementCount === 0 && workError.hidden) {
+      workStatusTimer = setTimeout(() => {
+        if (!work.hidden && workTimeline.childElementCount === 0) workStatus.hidden = false;
+      }, 200);
+    }
     try {
       let next = cursor;
       const visited = new Set();
@@ -2568,6 +2590,7 @@ function draftComposer() {
         if (visited.has(next)) next = null;
       } while (next && (!reachedOldest || !turns.length));
       workViewport.update(() => {
+        workStatus.hidden = true;
         // Pages arrive newest first, while turns within each page are chronological.
         if (cursor) savedWork.unshift(...turns);
         else savedWork = turns;
@@ -2581,22 +2604,30 @@ function draftComposer() {
         workOlder.hidden = !workCursor;
         workError.hidden = true;
         renderGoalTimeline();
-      });
+      }, true);
       if (!hasWorkHistory) workViewport.followEnd();
       hasWorkHistory = true;
       editor.refreshWork();
     } catch (error) {
-      if (!disposed && canBrowseHistory()) {
+      if (!disposed && !work.hidden && canBrowseHistory()) {
         workViewport.update(() => {
-          workError.textContent = error.message;
+          workStatus.hidden = true;
+          failedWorkCursor = cursor;
+          workErrorMessage.textContent = error.message;
           workError.hidden = false;
-          workOlder.hidden = false;
           renderGoalTimeline();
-        });
+        }, true);
       }
     } finally {
       workLoading = false;
+      clearTimeout(workStatusTimer);
       workOlder.disabled = false;
+      workRetry.disabled = false;
+      if (workOlderLoading) {
+        workOlderLoading = false;
+        workOlder.removeAttribute("aria-busy");
+        if (!disposed) bindLocalized(workOlder, "textContent", workOlderLabel);
+      }
       workStatus.hidden = true;
       if (workReload) {
         workReload = false;
@@ -3068,7 +3099,7 @@ function draftComposer() {
     bindLocalized(unreadDivider, "textContent", () => t("ui.new_messages_bb42ec76"));
     bindLocalized(workToggle, "textContent", () => t("ui.goal_activity"));
     work.setAttribute("aria-label", workToggle.textContent);
-    bindLocalized(workOlder, "textContent", () => t("ui.earlier_activity_e8606f75"));
+    bindLocalized(workOlder, "textContent", workOlderLabel);
     bindLocalized(goalText, "aria-label", () => t("ui.goal_objective_c057a817"), true);
     bindLocalized(saveGoal, "textContent", () => t("ui.save_changes_c6c74561"));
     bindLocalized(pauseGoal, "textContent", () => t("ui.pause_2541bca6"));
@@ -3354,6 +3385,7 @@ function draftComposer() {
     clearTimeout(readRetry);
     clearTimeout(queueRetry);
     clearTimeout(workBudgetRetry);
+    clearTimeout(workStatusTimer);
     cancelAnimationFrame(readFrame);
     readObserver.disconnect();
     dialogueViewport.dispose();
