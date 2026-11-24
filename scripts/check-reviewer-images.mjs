@@ -83,7 +83,7 @@ async function run() {
     contents.setBackgroundThrottling(false);
     const evaluate = code => contents.executeJavaScript(code);
     const waitUI = code => waitFor(() => evaluate(code), code);
-    const tile = item => `document.querySelector('[data-item="item:${item}"] .chat-attachment')`;
+    const tile = item => `document.querySelector('#task-chat-work :is([data-item="item:${item}"], [data-item^="item:"][data-item$=":${item}"]) .chat-attachment')`;
     const image = item => `${tile(item)}?.querySelector('img')`;
     const viewer = "document.querySelector('.image-preview[open]')";
     const stage = `${viewer}?.querySelector('.image-preview-stage img:not([hidden])')`;
@@ -91,7 +91,7 @@ async function run() {
       evaluate(`api.runImagePreview(${JSON.stringify(card)}, ${JSON.stringify(path)}, ${reviewer})`);
     async function openHistory() {
       await evaluate(`showTask('${id}')`);
-      await evaluate(`document.querySelector('#task-review-history > summary').click()`);
+      await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
     }
     async function reveal(item) {
       await waitUI(`Boolean(${tile(item)})`);
@@ -116,7 +116,7 @@ async function run() {
       writeFileSync(join(artifacts, name), (await contents.capturePage()).toPNG());
     }
     await openHistory();
-    assert.equal((await evaluate(`api.reviewerChat('${id}')`)).data[0].durationMs, undefined);
+    assert.equal((await evaluate(`api.reviewerChat('${id}')`)).data.attempts[0].durationMs, undefined);
     assert.equal(await getPreview(id, first, true), expected[0]);
     assert.equal(await getPreview(id, join(project, second), true), expected[1]);
     await thumbnails();
@@ -133,7 +133,7 @@ async function run() {
     for (const type of ["keyDown", "keyUp"]) contents.sendInputEvent({ type, keyCode: "Right" });
     await waitUI(`${stage}?.src === ${JSON.stringify(expected[1])}`);
     await evaluate(`${viewer}.close()`);
-    report.push("В разделе «Сообщения ревьюера» клик открыл первое вложение, стрелка вправо — второе.");
+    report.push("Во вкладке «Ход работы» клик открыл первое вложение, стрелка вправо — второе.");
 
     finishReview.resolve();
     await review;
@@ -141,7 +141,7 @@ async function run() {
     assert.equal(await getPreview(id, join(project, second), true), expected[1]);
     await evaluate("sheet.close()");
     await openHistory();
-    assert.equal(typeof (await evaluate(`api.reviewerChat('${id}')`)).data[0].durationMs, "number");
+    assert.equal(typeof (await evaluate(`api.reviewerChat('${id}')`)).data.attempts[0].durationMs, "number");
     await thumbnails();
     await capture("review-image-history.png");
     await reveal("second");
@@ -153,8 +153,6 @@ async function run() {
     await waitUI(`${stage}?.src === ${JSON.stringify(expected[1])}`);
     await evaluate(`${viewer}.close()`);
     await evaluate(`document.querySelector('[aria-controls="task-chat-work"]').click()`);
-    assert.equal(await evaluate(`Boolean(document.querySelector('#task-chat-work [data-item="item:first"]'))`), false);
-    assert.equal(await evaluate(`Boolean(document.querySelector('#task-review-history [data-item="item:executor"]'))`), false);
     await reveal("executor");
     await waitUI(`${image("executor")}?.src === ${JSON.stringify(expected[1])}`);
     report.push("После завершения ревью IPC возвращает оба файла. После повторного открытия карточки обе миниатюры загружаются из сохранённой истории, Enter открывает вторую. Миниатюра исполнителя загружается.");
@@ -179,4 +177,4 @@ async function run() {
   }
 }
 
-run().then(() => app.quit(), error => { console.error(error); app.exit(1); });
+run().then(() => app.exit(0), error => { console.error(error); app.exit(1); });

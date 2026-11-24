@@ -535,6 +535,8 @@ body:has(> .project-tabs:not([hidden]))::before {
 .board-queue-handle[draggable="true"] { cursor: grab; }
 .board-queued-row[data-queue-drop="before"] { box-shadow: inset 0 2px var(--focus); }
 .board-queued-row[data-queue-drop="after"] { box-shadow: inset 0 -2px var(--focus); }
+.project-rule-row > textarea { flex: 1; min-width: 0; }
+.project-rule-controls { display: grid; gap: 4px; justify-items: start; }
 .board-queued-preview {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -883,8 +885,6 @@ body:has(.sheet[open])::after { position: fixed; inset: 0; z-index: 4; content: 
 .task-details-content { margin: 0; padding: 12px 14px 14px; border-top: 1px solid var(--border); }
 .task-details-content h3 { margin: 0 0 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .task-details-content h3:not(:first-child) { margin-top: 12px; }
-.task-review-history { display: grid; gap: 8px; list-style: none; margin: 0; }
-.task-review-history .chat-entry { width: 100%; max-width: none; }
 .task-review-files { list-style: none; margin: 0; padding: 0; }
 .task-review-file.button {
   display: flex; justify-content: space-between; align-items: center; gap: 8px 12px; flex-wrap: wrap;

@@ -126,6 +126,7 @@ export interface TaskEvent {
     agentId: string; sessionId: string; expertId: string; expertRevision: number; items: Record<string, string>;
     outputs?: Record<string, string> };
   expertPhase?: "work" | "review";
+  expertStageStart?: { expertName: string; stageTitle: string };
   expertStageRun?: { phase: "work" | "review"; key: string; state: "running" | "blocked" | "done";
     result?: string; outputs?: Record<string, string>; agentId?: string; sessionId?: string; threadId?: string;
     fallback?: string; targetHead?: string | null };
