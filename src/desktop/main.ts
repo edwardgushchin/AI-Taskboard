@@ -67,8 +67,8 @@ import { routingRetryDelayMs } from "./codex-routing-retry.ts";
 import { reviewDecisionSequence } from "../cli/expert-team.ts";
 import { readReviewerChatPage, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
-import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
-import { backgroundGoalHistory } from "./goal-history-background.ts";
+import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { backgroundDialogueHistory, backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -2745,18 +2745,13 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     const profile = app.getPath("userData");
     const readLegacy = saved && saved.history !== "local"
       ? (next: string | null) => readBoardHistory(profile, project, saved.id, next) : undefined;
-    let data;
-    let goalLogAvailable: boolean | undefined;
-    if (view === "chat") {
-      data = await readManagerView(project, cursor, view, readLegacy);
-    } else {
-      const history = await backgroundGoalHistory(project, cursor, Boolean(readLegacy));
-      goalLogAvailable = history.goalLogAvailable;
-      data = history.local;
-      if (history.providerCutoff !== undefined && readLegacy) {
-        data = await readManagerProviderHistory(cursor, view, history.providerCutoff, readLegacy);
-      }
-    }
+    const history = view === "chat"
+      ? await backgroundDialogueHistory(project, cursor, Boolean(readLegacy))
+      : await backgroundGoalHistory(project, cursor, Boolean(readLegacy));
+    let goalLogAvailable = "goalLogAvailable" in history ? history.goalLogAvailable : undefined;
+    const data = history.providerCutoff !== undefined && readLegacy
+      ? await readManagerProviderHistory(cursor, view, history.providerCutoff, readLegacy)
+      : history.local;
     if (saved && saved.goal === undefined && data && "goal" in data && data.goal !== undefined) {
       saveBoardGoal(boardThreadPath(project), data.goal);
     }
