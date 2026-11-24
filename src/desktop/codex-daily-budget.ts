@@ -87,6 +87,7 @@ export function codexDailyBudget(project: string, limit: number, now = Date.now(
 }
 
 type TurnCharge = Pick<ConfirmedTurnUsage, "tokens" | "counters"> & {
+  counterTokens?: number;
   completedAt?: number;
   latestAt?: number;
   recoveryPending?: boolean;
@@ -164,6 +165,15 @@ export class BoardCodexUsage {
             `);
           });
         }
+        if (!db.prepare("SELECT 1 FROM migration WHERE version = 3").get()) {
+          this.transaction(db, () => {
+            if (db.prepare("SELECT 1 FROM migration WHERE version = 3").get()) return;
+            db.exec(`
+              ALTER TABLE turns ADD COLUMN counter_tokens INTEGER;
+              INSERT INTO migration VALUES (3);
+            `);
+          });
+        }
         this.initialized = true;
       }
       return action(db);
@@ -184,11 +194,12 @@ export class BoardCodexUsage {
   }
 
   private storeTurn(db: DatabaseSync, key: string, turn: TurnCharge) {
-    db.prepare(`INSERT INTO turns (id, tokens, counters, completed, recovery_pending) VALUES (?, ?, ?, ?, ?)
+    db.prepare(`INSERT INTO turns (id, tokens, counters, completed, recovery_pending, counter_tokens) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET tokens = excluded.tokens, counters = excluded.counters,
-        completed = excluded.completed, recovery_pending = excluded.recovery_pending`)
+        completed = excluded.completed, recovery_pending = excluded.recovery_pending,
+        counter_tokens = excluded.counter_tokens`)
       .run(key, turn.tokens, turn.counters ? JSON.stringify(turn.counters) : null, turn.completedAt ?? null,
-        turn.recoveryPending === false ? 0 : 1);
+        turn.recoveryPending === false ? 0 : 1, turn.counterTokens ?? null);
   }
 
   private readTurn(key: string): TurnCharge | undefined {
@@ -196,12 +207,13 @@ export class BoardCodexUsage {
     if (pending) return pending;
     if (!this.initialized && !exists(this.path) && !exists(join(this.folder, "live.json"))) return;
     return this.database(db => {
-      const row = db.prepare(`SELECT tokens, counters, completed, recovery_pending,
+      const row = db.prepare(`SELECT tokens, counters, completed, recovery_pending, counter_tokens,
         (SELECT MAX(at) FROM increments WHERE turn = turns.id) AS latest
         FROM turns WHERE id = ?`).get(key);
       if (row) return {
         tokens: row.tokens as number,
         counters: typeof row.counters === "string" ? JSON.parse(row.counters) as ConfirmedTurnUsage["counters"] : undefined,
+        counterTokens: typeof row.counter_tokens === "number" ? row.counter_tokens : undefined,
         completedAt: typeof row.completed === "number" ? row.completed : undefined,
         latestAt: typeof row.latest === "number" ? row.latest : undefined,
         recoveryPending: row.recovery_pending === 1,
@@ -241,7 +253,9 @@ export class BoardCodexUsage {
 
   recover(threadId: string, turnId: string) {
     const previous = this.readTurn(JSON.stringify([threadId, turnId]));
-    if (previous?.counters) return { tokens: previous.tokens, counters: previous.counters };
+    if (previous?.counters) {
+      return { tokens: previous.counterTokens ?? previous.tokens, counters: previous.counters };
+    }
   }
 
   unresolved(now: number) {
@@ -324,14 +338,22 @@ export class BoardCodexUsage {
     const refined = historical && known?.latestAt !== undefined && known.latestAt > observedAt
       ? this.refineTime(key, Math.min(tokens, previous), observedAt)
       : false;
-    if (tokens < previous || tokens === previous &&
-        (!counters || known?.completedAt !== undefined ||
-          counters.totalTokens === known?.counters?.totalTokens)) return refined;
+    const previousCounters = known?.counters;
+    const updatesCounters = counters && (known?.completedAt === undefined || known.recoveryPending !== false) &&
+      (counters.totalTokens ?? -1) >= (previousCounters?.totalTokens ?? 0) &&
+      (counters.cachedInputTokens ?? -1) >= (previousCounters?.cachedInputTokens ?? 0) &&
+      (counters.totalTokens !== previousCounters?.totalTokens ||
+        counters.cachedInputTokens !== previousCounters?.cachedInputTokens ||
+        tokens !== (known?.counterTokens ?? known?.tokens));
+    if (tokens < previous || tokens === previous && !updatesCounters) return refined;
     const turn = this.pending.get(key) ?? { ...known, tokens: previous, increments: [] };
     const at = Math.min(turn.completedAt ?? observedAt, observedAt);
     const increment = tokens - previous;
     turn.tokens = tokens;
-    if (turn.completedAt === undefined && counters) turn.counters = counters;
+    if (updatesCounters) {
+      turn.counters = counters;
+      turn.counterTokens = tokens;
+    }
     // The first confirmed baseline dates the turn even if it establishes no spend.
     if (increment > 0 || !known) {
       turn.increments.push({ at, tokens: increment });
@@ -367,7 +389,13 @@ export class BoardCodexUsage {
       if (turn.completedAt === final.at && final.tokens <= turn.tokens && turn.recoveryPending === recoveryPending) continue;
       turn.completedAt = final.at;
       turn.recoveryPending = recoveryPending;
-      turn.counters = undefined;
+      if (!recoveryPending) {
+        turn.counters = undefined;
+        turn.counterTokens = undefined;
+      } else if (turn.counters) {
+        // An older row stored the paired amount in tokens. Preserve it before applying the report.
+        turn.counterTokens ??= turn.tokens;
+      }
       if (final.tokens > turn.tokens) {
         turn.increments.push({ at: final.at, tokens: final.tokens - turn.tokens });
         turn.tokens = final.tokens;

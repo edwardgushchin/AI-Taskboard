@@ -431,7 +431,7 @@ test("recovery without counters persists a new baseline and charges later confir
   assert.equal(result.records[0].dailyTokens, null);
   restored.reconcile(result);
   assert.equal(restored.get(100).spent, 15);
-  assert.equal(restored.recover("thread", "turn"), undefined);
+  assert.equal(restored.recover("thread", "turn")?.tokens, 15);
 });
 
 test("a saved completed rollout with no terminal event recovers 110355 observed tokens", async t => {
@@ -568,6 +568,98 @@ test("rollout recovery preserves earlier timestamps and charges only an extensio
   assert.equal(reopened.get(100, at + 2000).spent, 15);
   assert.equal(reopened.flush(), true);
 });
+
+for (const partialTokens of [null, 80]) {
+  test(`a completed turn keeps its saved counters through a partial report of ${partialTokens}`, async t => {
+    const project = mkdtempSync(join(tmpdir(), "codex-budget-partial-final-"));
+    t.after(() => rmSync(project, { recursive: true, force: true }));
+    mkdirSync(join(project, ".tasks"));
+    const path = join(project, "rollout.jsonl");
+    const at = new Date(2026, 10, 24, 11).getTime();
+    const completedAt = at + 3000;
+    const counters = { ...emptyTokenCounts(), totalTokens: 120, cachedInputTokens: 50 };
+    const ledger = new BoardCodexUsage(project);
+    ledger.observe({
+      threadId: "thread",
+      turnId: "turn",
+      tokens: 70,
+      observedAt: at,
+      counters,
+    });
+    assert.equal(ledger.flush(), true);
+    if (partialTokens !== null) {
+      const db = new DatabaseSync(join(project, ".tasks", "codex-daily-usage", "usage.sqlite"));
+      try {
+        db.exec(`
+          ALTER TABLE turns DROP COLUMN counter_tokens;
+          DELETE FROM migration WHERE version = 3;
+        `);
+      } finally {
+        db.close();
+      }
+    }
+    const partial = report("turn", completedAt, partialTokens);
+    const incomplete = {
+      ...partial,
+      records: partial.records.map(record => ({ ...record, dailyRecoveryPending: true as const })),
+    };
+    new BoardCodexUsage(project).reconcile(incomplete);
+
+    function recoverFrom(board: BoardCodexUsage, terminal: boolean) {
+      const history = [
+        { type: "session_meta", payload: { id: "thread" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+      ];
+      const sample = {
+        type: "event_msg",
+        timestamp: new Date(at + 1000).toISOString(),
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { total_tokens: 145, cached_input_tokens: 60 },
+            last_token_usage: { total_tokens: 25, cached_input_tokens: 10 },
+          },
+        },
+      };
+      const events: object[] = [...history, sample, sample];
+      if (terminal) {
+        events.push({
+          type: "event_msg",
+          timestamp: new Date(completedAt).toISOString(),
+          payload: { type: "task_complete", turn_id: "turn" },
+        });
+      }
+      writeFileSync(path, events.map(event => JSON.stringify(event)).join("\n") + "\n");
+      const [candidate] = board.unresolved(completedAt);
+      assert.equal(candidate?.completedAt, completedAt);
+      const usage = new CodexTokenUsage(snapshot => board.observe(snapshot), (...key) => board.recover(...key));
+      return usage.recoverRollout(path, candidate.threadId, {
+        id: candidate.turnId, status: "completed", completedAt: candidate.completedAt / 1000,
+      });
+    }
+
+    const reopened = new BoardCodexUsage(project);
+    assert.deepEqual(reopened.recover("thread", "turn"), { tokens: 70, counters });
+    assert.equal(reopened.get(85, completedAt).spent, partialTokens ?? 70);
+    assert.equal(reopened.get(85, completedAt).reason, undefined);
+    const late = await recoverFrom(reopened, false);
+    assert.ok(late);
+    assert.equal(reopened.get(85, completedAt).spent, 85);
+    assert.equal(reopened.get(85, completedAt).reason, "exhausted");
+    reopened.reconcile(late);
+    const restarted = new BoardCodexUsage(project);
+    assert.equal(restarted.recover("thread", "turn")?.tokens, 85);
+    assert.equal(restarted.recover("thread", "turn")?.counters.totalTokens, 145);
+    const final = await recoverFrom(restarted, true);
+    assert.ok(final);
+    restarted.reconcile(final);
+    restarted.reconcile(incomplete);
+    const saved = new BoardCodexUsage(project);
+    assert.equal(saved.get(85, completedAt).spent, 85);
+    assert.equal(saved.recover("thread", "turn"), undefined);
+    assert.deepEqual(saved.unresolved(completedAt), []);
+  });
+}
 
 test("a dated zero baseline keeps a recent unconfirmed turn available after restart", t => {
   const project = mkdtempSync(join(tmpdir(), "codex-budget-zero-base-"));
