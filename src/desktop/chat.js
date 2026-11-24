@@ -925,7 +925,11 @@ function stageWork(task, panels) {
       const snapshot = JSON.stringify(log);
       if (attempt.snapshot === snapshot) continue;
       attempt.snapshot = snapshot;
-      renderRunActivity(attempt.activity, log, false, undefined, task.id, { taskId: task.id, reviewer: phase === "review" });
+      renderRunActivity(attempt.activity, log, false, undefined, task.id, {
+        taskId: task.id,
+        taskWork: true,
+        reviewer: phase === "review",
+      });
     }
   }
 
@@ -1118,6 +1122,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     registerWorkLog(log, key, items, order, (row, group, boundary) => {
       renderRunActivity(row, group, sequence !== undefined, boundary ? undefined : durationMs, task.id, {
         taskId: task.id,
+        taskWork: true,
         taskRunSequence: sequence,
         taskRunSegment: boundary,
       });
@@ -1397,7 +1402,12 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
         return reviewRank(at, 1, Date.parse(item.at ?? attempt.at) || 0, index);
       };
       registerWorkLog(node.log, rowKey + "1:" + key, items, itemRank, (row, group) => {
-        renderRunActivity(row, group, false, undefined, task.id, { taskId: task.id, reviewer: true, taskRunImages });
+        renderRunActivity(row, group, false, undefined, task.id, {
+          taskId: task.id,
+          taskWork: true,
+          reviewer: true,
+          taskRunImages,
+        });
       });
 
       if (attempt.durationMs === undefined || node.finish) continue;
