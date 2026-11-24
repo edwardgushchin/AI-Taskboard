@@ -13,7 +13,7 @@
 </p>
 <p align="center">
   <a href="https://github.com/edwardgushchin/AI-Taskboard/releases"><strong>Download alpha</strong></a> ·
-  <a href="release-notes/v0.1.4-alpha.md">0.1.4-alpha release notes</a> ·
+  <a href="release-notes/v0.1.5-alpha.md">0.1.5-alpha release notes</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
   <a href="#workflow">Workflow</a> ·
