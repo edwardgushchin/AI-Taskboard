@@ -14,12 +14,6 @@ function appendChatTime(entry, at) {
 }
 
 const chatDrafts = new Map();
-function clearTaskChatDraft(draft) {
-  draft.text = "";
-  draft.files = [];
-  if (draft.quotes) draft.quotes.length = 0;
-}
-
 function matchesTaskChatDraft(draft, message) {
   return message.text === quoteMessage(draft.text, draft.quotes ?? []) &&
     message.files.length === draft.files.length &&
@@ -28,11 +22,16 @@ function matchesTaskChatDraft(draft, message) {
 
 function confirmTaskChatMessage(draft, message) {
   if (draft.waitingForSave === message) {
-    if (matchesTaskChatDraft(draft, message)) clearTaskChatDraft(draft);
+    if (draft.text === message.draftText) draft.text = "";
+    draft.files = draft.files.filter(file => !message.files.includes(file));
+    const quotes = draft.quotes ?? [];
+    const remaining = quotes.filter(quote => !message.quotes.includes(quote));
+    quotes.splice(0, quotes.length, ...remaining);
     delete draft.waitingForSave;
   }
   message.saved = true;
   message.files = [];
+  message.quotes = [];
 }
 
 let lastTaskReview;
@@ -737,7 +736,7 @@ function updateChat({ project, id, type, text, items, requestId, savedRevision, 
       draft.pending = "replying";
     }
     if (open) {
-      byId("task-side").firstElementChild?.refreshOutgoing?.();
+      byId("task-side").firstElementChild?.refreshOutgoing?.(true);
       void protect(() => showTask(id))();
     }
   } else if (type === "changed") {
@@ -1523,7 +1522,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     for (const row of outgoingRows.values()) row.remove();
     outgoingRows.clear();
     for (const message of outgoing.values()) {
-      if (message === draft.waitingForSave) continue;
+      if (message === draft.waitingForSave && message.holdComposer) continue;
       const row = element("li", undefined, "chat-entry");
       row.dataset.actor = "user";
       row.append(element("span", () => t("ui.you_05444001"), "chat-author"));
@@ -1748,7 +1747,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   function hasDraft() { return Boolean(draft.text.trim() || draft.files.length || quotes.length); }
   function stopping() { return working() && !hasDraft(); }
   function sync() {
-    const holdingDraft = Boolean(draft.waitingForSave && draft.saving === draft.waitingForSave);
+    const holdingDraft = Boolean(draft.waitingForSave?.holdComposer && draft.saving === draft.waitingForSave);
     input.readOnly = attach.disabled = microphone.disabled = holdingDraft;
     for (const remove of pendingFiles.querySelectorAll("button")) remove.disabled = holdingDraft;
     const stop = stopping();
@@ -1767,8 +1766,8 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
   }
 
   area.syncAgentState = sync;
-  area.refreshOutgoing = () => {
-    if (!draft.waitingForSave && input.readOnly) {
+  area.refreshOutgoing = (saved = false) => {
+    if (saved) {
       input.value = draft.text;
       quoteDraft.render();
       renderPendingFiles();
@@ -1847,28 +1846,22 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
     if (!retrying && !message) {
       const text = quoteMessage(draft.text, quotes);
       const previous = draft.waitingForSave;
-      const hold = Boolean(frame.quotaWait || frame.dailyBudget?.reason);
       if (previous && !matchesTaskChatDraft(draft, previous)) {
-        outgoing.delete(previous.id);
+        previous.holdComposer = false;
         delete draft.waitingForSave;
       }
       message = draft.waitingForSave ?? {
         id: crypto.randomUUID(),
         text,
+        draftText: draft.text,
         files: [...draft.files],
+        quotes: [...quotes],
         attachmentNames: draft.files.map(file => file.name),
         at: new Date().toISOString(),
       };
       outgoing.set(message.id, message);
-      if (hold) {
-        draft.waitingForSave = message;
-      } else {
-        delete draft.waitingForSave;
-        clearTaskChatDraft(draft);
-        input.value = draft.text;
-        quoteDraft.render();
-        renderPendingFiles();
-      }
+      message.holdComposer = Boolean(frame.quotaWait || frame.dailyBudget?.reason);
+      draft.waitingForSave = message;
     }
     const submission = message ?? {};
     (draft.requests ??= new Set()).add(submission);
@@ -1883,17 +1876,21 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
       const { model, effort } = retrying ? lastMessage.chat : await discussionSettings();
       const files = retrying ? [] : await Promise.all(message.files.map(file => api.filePayload(file)));
       if (frame.project !== project) throw new Error(t("task_chat.project_changed"));
-      const { saved, result } = await api.chatSend(task.id, {
+      const { saved, result, waitForLimit } = await api.chatSend(task.id, {
         model, effort, text: retrying ? "" : message.text, files,
         ...(retrying ? { retryAt } : { requestId: message.id }),
       });
       if (saved && message) confirmTaskChatMessage(draft, message);
       if (!result.ok) {
+        if (!saved && message && waitForLimit && draft.waitingForSave === message) {
+          message.holdComposer = true;
+        }
         throw new Error(boardError(result.error));
       }
     } catch (error) {
-      if (message && !message.saved && message !== draft.waitingForSave) {
+      if (message && !message.saved) {
         message.error = error.message;
+        if (message === draft.waitingForSave && message.holdComposer) draft.error = error.message;
       } else {
         draft.error = error.message;
       }
@@ -1905,7 +1902,7 @@ function taskChat(task, renderStageWork, discussionHandoff, previousWork, hasRev
         draft.commentary = [];
       }
       if (frame.project === project && sheet.open && sheetKind === "task" && taskInSheet?.id === task.id) {
-        byId("task-side").firstElementChild?.refreshOutgoing?.();
+        byId("task-side").firstElementChild?.refreshOutgoing?.(message?.saved);
         await showTask(task.id);
       }
     }

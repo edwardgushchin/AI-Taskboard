@@ -1036,17 +1036,18 @@ function run(
       if (alreadyQueued && (!threadId ||
           task.limitChatContinuation?.index === at && task.limitChatContinuation.threadId === threadId)) return task;
       const message = task.history[at];
+      const later = alreadyQueued ? [] : task.history.slice(at + 1).flatMap((event, offset) =>
+        event.chat ? [{ index: at + offset + 1, actor: event.actor }] : []);
       if (!message?.chat || message.actor !== "user" ||
           (pending[0] !== undefined && pending[0] < at) ||
-          (!alreadyQueued &&
-            !task.history.slice(at + 1).every((event, offset) => !event.chat || pending.includes(at + offset + 1)))) {
+          later.some(event => event.actor !== "user" || (!threadId && !pending.includes(event.index)))) {
         throw new TaskboardError("CHAT_CHANGED", "The saved message is no longer awaiting a reply.");
       }
       return store.save({
         ...task,
         revision: task.revision + 1,
         updatedAt: new Date().toISOString(),
-        pendingLimitChat: alreadyQueued ? pending : [...pending, at].sort((a, b) => a - b),
+        pendingLimitChat: alreadyQueued ? pending : [at, ...later.map(event => event.index)],
         ...(threadId ? { limitChatContinuation: { index: at, threadId } } : {}),
       });
     }

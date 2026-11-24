@@ -992,6 +992,7 @@ imageTypes.set(".jpeg", "image/jpeg");
 const chatRuns = new Set<string>();
 const replyingTasks = new Set<string>();
 interface ActiveAgent {
+  quotaInterrupted?: boolean;
   control: AgentControl;
   directories: Set<string>;
   draftDiscussion?: true;
@@ -1357,7 +1358,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
       });
       saved = reply.ok;
       if (saved) notify({ type: "saved", requestId: request.requestId });
-      if (waitForLimit || (reply.ok && reply.data.pendingLimitChat?.length)) return { saved, result: reply };
+      if (waitForLimit || (reply.ok && reply.data.pendingLimitChat?.length) ||
+          (!reply.ok && (quotaWait || boardBudgetFailure(project)))) {
+        return { saved, result: reply, waitForLimit: true };
+      }
       if (reply.ok && request.requestId &&
           reply.data.history.findLast(event => event.chat)?.chat?.requestId !== request.requestId) {
         return { saved, result: reply };
@@ -1456,7 +1460,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     });
     signal.throwIfAborted();
     if (active) {
-      if (quotaWait || boardBudgetFailure(project)) throw deferReply;
+      if (active.quotaInterrupted || quotaWait || boardBudgetFailure(project)) throw deferReply;
       // A finished turn must not silently turn a steering message into another run.
       if (activeAgents.get(key) !== active) throw new Error(t("ui.the_agent_finished_before_receiving_this_message_88246090"));
       // The request owns its staging files until it hands them to the active turn.
@@ -1560,6 +1564,10 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
     return { saved, result };
   } catch (error) {
     if (!signal.aborted && deferredIndex !== undefined && (error === deferReply || error instanceof CodexQuotaExceeded)) {
+      if (!active && discussionThreadId && error instanceof CodexQuotaExceeded) {
+        const interrupted = activeAgents.get(key);
+        if (interrupted) interrupted.quotaInterrupted = true;
+      }
       const interruptedIndex = await settledReplyIndex?.() ?? deferredIndex;
       const result = await callCli<Task>(project, ["chat", id], {
         deferAt: interruptedIndex,

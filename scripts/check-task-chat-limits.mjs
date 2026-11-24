@@ -30,6 +30,7 @@ const messages = {
   combined: "Диалог: добавить сводку.",
   running: "Диалог: продолжить уже начатый ответ.",
   interrupted: "Диалог: сохранить отчёт в XLSX.",
+  followup: "Диалог: обработать следующее вложение.",
 };
 const calls = [];
 const checks = [];
@@ -39,6 +40,8 @@ let exhausted = restarting;
 let failWrite = false;
 let writeRejected = false;
 const finishRejectedWrite = Promise.withResolvers();
+const finishAttachmentRead = Promise.withResolvers();
+let pausedAttachment;
 let budgetTurn = 0;
 const gates = new Map();
 
@@ -71,13 +74,22 @@ globalThis.limitChatFixture = {
     primary: { usedPercent: exhausted ? 100 : 20, resetsAt: Date.now() / 1000 + 3600 },
   } })),
   rejectWrite(args) {
-    if (!failWrite || args[1][0] !== "chat" || args[2]?.text !== messages.budget) return;
+    if (!failWrite || args[1][0] !== "chat" || args[2]?.text !== messages.quota) return;
     failWrite = false;
     writeRejected = true;
     return finishRejectedWrite.promise.then(() => ({
       ok: false,
       error: { code: "BOARD_BUSY", message: "Проверка ошибки записи" },
     }));
+  },
+  waitForAttachment(args, read) {
+    const [command, action] = args[1];
+    const file = args[2]?.file;
+    if (command !== "attachment" || action !== "read" || !pausedAttachment || pausedAttachment.file !== file) {
+      return read();
+    }
+    pausedAttachment.started = true;
+    return finishAttachmentRead.promise.then(read);
   },
   async reply(prompt, action, options) {
     options.beforeStart?.();
@@ -94,6 +106,7 @@ globalThis.limitChatFixture = {
       const result = await action("task_update", { authorization: "сохранить отчёт в XLSX", description: updatedDescription });
       assert.equal(result.ok, true, JSON.stringify(result));
       assert.equal(result.data.changed, true);
+      await gates.get(request).promise;
       exhausted = true;
       await globalThis.limitChatApp.refresh();
       throw new CodexQuotaExceeded("Fixture provider ended the turn because quota was exhausted");
@@ -214,7 +227,9 @@ async function phase() {
     .replace("import { callCli,", "import { callCli as realCallCli,")
     .replace("codexStatus, configuredCodex,", "codexStatus, configuredCodex as realConfiguredCodex,")
     .replace("import { chatModels,", "import { chatModels as realChatModels,") + [
-    "const callCli = (...args) => Promise.resolve(globalThis.limitChatFixture.rejectWrite(args) ?? realCallCli(...args));",
+    "const callCli = (...args) => Promise.resolve(globalThis.limitChatFixture.rejectWrite(args) ??",
+    "  globalThis.limitChatFixture.waitForAttachment(args, () => realCallCli(...args)))",
+    "  .then(reply => globalThis.limitChatFixture.afterWrite?.(args, reply) ?? reply);",
     "const configuredCodex = async () => ({});",
     "const chatModels = async () => [{ id: 'fixture-sol', effort: 'high', default: true, efforts: ['high'] }];",
     "globalThis.limitChatApp = { createWindow,",
@@ -244,28 +259,7 @@ async function phase() {
     spend();
     const draft = cli(["create"], plannedDraft({ title: "Черновик отчёта", execution: { provider: "codex", ...settings } }));
     await open(first, draft.id);
-    failWrite = true;
     await send(first, messages.budget, true);
-    await until("pending write", () => writeRejected);
-    const held = await evaluate(first, `(() => {
-      const input = document.querySelector('#task-chat-input');
-      const attachments = input.closest('.task-chat').querySelector('.draft-attachments');
-      return { text: input.value, readOnly: input.readOnly, files: attachments.textContent };
-    })()`);
-    assert.equal(held.text, messages.budget);
-    assert.equal(held.readOnly, true);
-    assert.ok(held.files.includes(filename));
-    assert.equal((await rows(first, messages.budget)).length, 0);
-    finishRejectedWrite.resolve();
-    await until("draft retained on write error", () => writeRejected && evaluate(first,
-      "document.querySelector('#task-chat-input:not([readonly])')?.value === " + JSON.stringify(messages.budget) +
-      " && Boolean(document.querySelector('.task-chat p.chat-status:not([hidden])')?.textContent)"))
-      .catch(async error => {
-        console.error("Composer after rejected send", { writeRejected, text: await evaluate(first, "document.querySelector('.task-chat').innerText") });
-        throw error;
-      });
-    assert.equal(savedUsers(draft.id).length, 0);
-    await send(first, messages.budget, true, false);
     await waitSaved(first, draft.id, messages.budget);
     assert.equal(calls.length, 0);
     await capture(first, "budget-wait.png", messages.budget, "user");
@@ -273,7 +267,7 @@ async function phase() {
     await until("draft included message in review", async () => (await rows(first, "Разбор учёл новый формат CSV.", "agent")).length);
     assert.deepEqual(calls.map(call => [call.request, call.docs, call.draft]), [[messages.budget, ["fixture attachment"], true]]);
     await capture(first, "draft-reply.png", "Разбор учёл новый формат CSV.", "agent");
-    pass("При дневном лимите Enter сохраняет текст и вложение. Поле очищается после записи, при ошибке черновик доступен для повтора. После сброса разбор получил текст и файл.");
+    pass("При дневном лимите Enter сохранил текст и вложение. После сброса разбор черновика получил текст и файл.");
 
     const existing = cli(["create"], plannedDraft({ title: "Отчёт с существующим диалогом", execution: { provider: "codex", ...settings } }));
     const seeded = cli(["chat", existing.id], { ...settings, text: "Предыдущий вопрос." });
@@ -287,11 +281,29 @@ async function phase() {
       confirmsDraft: true,
     });
     assert.equal(cli(["approve", existing.id]).status, "ready");
-    exhausted = true;
-    await refresh();
     await open(first, existing.id);
     await open(second, existing.id);
+    failWrite = true;
     await send(first, messages.quota, false);
+    await until("pending write", () => writeRejected);
+    exhausted = true;
+    await refresh();
+    const held = await evaluate(first, `(() => {
+      const input = document.querySelector('#task-chat-input');
+      const attachments = input.closest('.task-chat').querySelector('.draft-attachments');
+      return { text: input.value, readOnly: input.readOnly, files: attachments.textContent };
+    })()`);
+    assert.equal(held.text, messages.quota);
+    assert.equal(held.readOnly, false);
+    assert.ok(held.files.includes(filename));
+    assert.equal((await rows(first, messages.quota)).length, 1);
+    finishRejectedWrite.resolve();
+    await until("draft retained on write error", () => evaluate(first,
+      "document.querySelector('#task-chat-input:not([readonly])')?.value === " + JSON.stringify(messages.quota) +
+      " && Boolean(document.querySelector('.task-chat p.chat-status:not([hidden])')?.textContent)"));
+    assert.equal(savedUsers(existing.id).length, 1);
+    await evaluate(first, "frame.quotaWait = undefined; void 0");
+    await send(first, messages.quota, false, false);
     const requestId = await waitSaved(first, existing.id, messages.quota);
     const duplicate = await evaluate(second, "taskboard.chatSend(" + JSON.stringify(existing.id) + ", " +
       JSON.stringify({ ...settings, text: messages.quota, requestId, files: [] }) + ")");
@@ -305,7 +317,7 @@ async function phase() {
     await evaluate(second, "document.querySelector('#close-sheet').click()");
     await open(second, existing.id);
     await waitSaved(second, existing.id, messages.combined);
-    pass("При общей квоте кнопка сохраняет текст и вложение. При двух исчерпанных лимитах Enter сохраняет вторую реплику. Два окна, повтор requestId и закрытие карточки сохраняют по одной реплике.");
+    pass("Квота исчерпана между отправкой и отказом записи. Поле сохранило текст и вложение. Повтор при устаревшем снимке окна сохранил их один раз. При обоих лимитах Enter сохранил вторую реплику.");
     writeFileSync(saved, JSON.stringify({ checks, existing: existing.id, pending: task(existing.id).pendingLimitChat }));
     return;
   }
@@ -342,13 +354,33 @@ async function phase() {
   await refresh();
   gates.get(messages.running).resolve();
   await until("active reply survives both limits", () => chat(id).some(event => event.actor === "agent" && event.text.includes(messages.running)));
+  await until("previous chat operation released", () => globalThis.limitChatApp.isIdle(project));
   exhausted = false;
   await refresh();
   await reset();
+  gates.set(messages.interrupted, Promise.withResolvers());
   await send(first, messages.interrupted, false, false);
+  await until("interrupted reply wrote its change", () => task(id).description === updatedDescription);
+  // Arm the read gate when the follow-up is saved, before main prepares its attachment for steering.
+  globalThis.limitChatFixture.afterWrite = (args, reply) => {
+    if (args[1][0] === "chat" && args[2]?.text === messages.followup && reply.ok) {
+      pausedAttachment = { file: reply.data.history.at(-1).chat.files[0], started: false };
+    }
+    return reply;
+  };
+  await send(first, messages.followup, false);
+  await until("saved follow-up attachment in preparation", () => pausedAttachment?.started);
+  assert.equal(task(id).pendingLimitChat, undefined);
+  gates.get(messages.interrupted).resolve();
   await until("previous reply is deferred", () => task(id).limitChatContinuation?.threadId === sessionId);
   assert.equal(task(id).description, updatedDescription);
   await until("interrupted reply shown as waiting", async () => (await rows(first, messages.interrupted))[0]?.includes(waiting));
+  const queued = task(id);
+  assert.deepEqual(queued.pendingLimitChat.map(index => queued.history[index].text), [messages.interrupted, messages.followup]);
+  await open(first, id);
+  await waitSaved(first, id, messages.followup);
+  pausedAttachment = undefined;
+  finishAttachmentRead.resolve();
   exhausted = false;
   await refresh();
   await until("interrupted answer completed automatically", () =>
@@ -357,7 +389,14 @@ async function phase() {
   assert.equal(savedUsers(id).filter(event => event.text === messages.interrupted).length, 1);
   assert.equal(task(id).history.filter(event => event.action === "update" && event.ownerBriefSource).length, 1);
   assert.equal(task(id).limitChatContinuation, undefined);
-  pass("Начатый ответ завершён после исчерпания обоих лимитов. Прерванный провайдером ответ продолжен автоматически в том же сеансе, запись правки одна.");
+  await until("follow-up answered after the continuation", () =>
+    chat(id).some(event => event.actor === "agent" && event.text.includes(messages.followup)));
+  assert.deepEqual(calls.slice(-2).map(call => [call.request, call.docs]), [
+    [messages.interrupted, []],
+    [messages.followup, ["fixture attachment"]],
+  ]);
+  assert.equal(task(id).pendingLimitChat, undefined);
+  pass("Квота прервала ход, пока готовилось вложение уже сохранённой следующей реплики. Первый ответ продолжился в том же сеансе с одной правкой, второй получил вложение после него.");
   const files = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: root, encoding: "utf8" })
     .trim().split(/\r?\n/).filter(Boolean);
   const tested = [...new Set([...files, "src/desktop/chat.js", "src/desktop/renderer.js", "scripts/check-task-chat-limits.mjs"])];
