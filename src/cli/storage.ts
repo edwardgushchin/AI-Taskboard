@@ -622,9 +622,18 @@ export function initializeBoard<T>(location: BoardLocation, snapshot: (store: Bo
       for (const name of ["tasks", "attachments", "archive", "pending"]) {
         directory(join(location.directory, name), true);
       }
+      const agent = { provider: "codex", model: "gpt-6.2-sol", effort: "medium" } satisfies BoardIndex["settings"]["executor"];
       const board: BoardIndex = {
         version: 1, nextId: 1,
-        settings: { boardType, ...(boardType === "manual" ? { manualColumns: defaultColumns(), autoMode: false } : {}), archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...defaultBoardAgents },
+        settings: {
+          boardType,
+          archiveAfterDays: 90,
+          integrationMode: "merge",
+          reviewMode: "reviewer",
+          ...(boardType === "manual"
+            ? { ...defaultBoardAgents, manualColumns: defaultColumns(), autoMode: false }
+            : { manager: agent, executor: agent, reviewer: agent, taskLimits: { executor: 2, reviewer: 1 } }),
+        },
         tags: [], tasks: {}, archive: {},
       };
       withProjectRulesLock(location, () => migrateBoardProjectRules(location.root, false));

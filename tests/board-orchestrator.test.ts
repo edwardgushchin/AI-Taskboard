@@ -22,6 +22,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { boardReviewMode, taskReviewMode, taskReviewModeVersion, codexThreadPattern, defaultBoardAgents, hexTagColor, maxAttachmentBytes, reviewVerifier, TaskboardError, taskIdPattern, reviewsAcceptanceRepair, usesIndependentReviewer } from "../src/cli/model.ts";
 import { managerInbox, needsManagerAttention } from "../src/cli/task-messages.ts";
+import { usageKey } from "../src/cli/token-usage.ts";
 import type { RunActivity, Task } from "../src/cli/model.ts";
 import type { ChatSettings } from "../src/cli/model.ts";
 import { directory as storageDirectory, locateBoard, onBoard, readBoardSettings, readJson, writeJson } from "../src/cli/storage.ts";
@@ -31,7 +32,7 @@ import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desk
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import {
-  completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerWorkItems,
+  completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot, managerWorkItems,
   readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
   saveManagerHistory, sendGoalMessage,
 } from "../src/desktop/manager-history.ts";
@@ -65,6 +66,7 @@ const dispatcherSource = stripTypeScriptTypes(main.statements.map(node => node.g
   text.startsWith("const autoBoards =") || text.startsWith("const managerNoticeKey =") ||
   text.startsWith("function scheduleAutoBoard(")).join("\n"));
 const handlerSource = stripTypeScriptTypes(main.statements.map(node => node.getText(main)).filter(text =>
+  text.startsWith("function reviewRetryBinding(") || text.startsWith("function reviewRetryFor(") ||
   text.startsWith("function interruptedForLimit(") || text.startsWith("function dailyBudgetFailure(") ||
   /^(?:(?:async )?function (?:frame|boardUnread|publishManagerUnread|managerQuestion|publishReviewActivity|isPastedFile|readBoardThread|saveBoardGoal|parseOwnerGoalEdit|goalIterationAuthority|changeBoardGoal|resumeBoardGoal|boardThreadPath|broadcastBoardChat|prepareBoardAttachments|runBoardRequest|executorBusy|canScheduleAutoReview|autoReviewTab|availableReviewSlots|reviewAttempt|readyReviews|scheduleAutoReview|reviewSubmission|saveTaskTokenUsage|reserveAgent|scheduleAgentWork|continueAcceptance|returnTaskToDraft|scheduleMaintenance|scheduleRecurringTasks|taskRunLimit|readQueuedMessage|queuedFiles|listQueuedMessages)\(|const (?:imageExtensions|imageTypes|boardRequests|boardGoalClears|boardGoalResumes|boardWorkRequests|backgroundManagerRequests|goalReadTool|goalChatTools|goalWorkTools|deferredExecutors|acceptanceWork|maintenanceWork|returningDrafts|reviewOperations|managerReviewOperations|taskOperations|steeringOperations) =|let schedulingAgentWork =|imageTypes\.set\(|ipcMain\.handle\("board:(?:queue|request|stopOrchestrator|answerQuestion|goal|history|readManagerMessages)",)/.test(text)).join("\n"));
 const entry = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
@@ -168,7 +170,7 @@ function fixture(t: TestContext) {
     acknowledgeInterval, intervalDeadline, iterativeEnabled, ownerIterationDirective, iterationDirectiveAfterEdit,
     normalizeGoalRules, readIterativeGoal, saveIterativeGoal,
     applicationUpdates, applicationUpdateTools, updateOwner: undefined, updateProject: undefined,
-    scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {},
+    scheduleAutoBoard: () => {}, scheduleDraftDiscussions: () => {}, scheduleLimitChat: () => {},
     activeRunSummary, discussionActivityByTask: new Map(), runActivityByTask: new Map(), replyingTasks: new Set(), projectLabels: () => [], recentBoards: [], russian: true, theme: "dark",
     captureFileLink, isFileLink, verifyFileLink, AbortSignal, AbortController, ArrayBuffer, Buffer, Error, basename, dirname, extname, join, mkdtemp, rm, writeFile, maxAttachmentBytes, boardActions, boardInstructions, boardTools, callCli,
     githubReadTool, readBoardGitHub: (cwd: string, args: unknown) => callCli(cwd, ["github-read"], args),
@@ -178,7 +180,7 @@ function fixture(t: TestContext) {
     reviewModeReplyTarget, setReviewModeFromChat,
     reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread,
+    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot,
     managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     readManagerTurn: async (_profile: string, _project: string, reference: { turnId?: string }) => {
@@ -187,6 +189,7 @@ function fixture(t: TestContext) {
     },
     send() {},
     notifyRunChange() {},
+    usageKey,
     tokenUsageQueue: () => ({
       enqueue: (cwd: string, id: string, report: unknown) => callCli(cwd, ["token-usage", id], report),
     }),
@@ -1600,7 +1603,9 @@ test("manager can route a draft to Luna or Sol without changing board defaults",
     return { text: "Routed." };
   });
   assert.equal(routed.data?.answer, "Routed.", JSON.stringify(routed));
-  assert.deepEqual((await f.cli(["settings"])).data.executor, defaultBoardAgents.executor);
+  assert.deepEqual((await f.cli(["settings"])).data.executor, {
+    provider: "codex", model: "gpt-6.2-sol", effort: "medium",
+  });
 });
 
 test("a stale reviewer-human snapshot cannot reserve a reviewer after switching to human with automatic mode off", { timeout: 90_000 }, async t => {
@@ -3324,6 +3329,46 @@ test("a goal delegates a bounded slice, waits for submission, and reviews before
   assert.equal(followUp.data.answer, "The prior update is still available.", followUp.data.error);
 });
 
+test("the initial reviewer uses one pass while the legacy reviewer confirms risky reports", { timeout: 120_000 }, async t => {
+  const initial = { provider: "codex", model: "gpt-6.2-sol", effort: "medium" };
+  const legacy = defaultBoardAgents.reviewer;
+  for (const reviewer of [initial, legacy]) {
+    await t.test(reviewer.model, async phase => {
+      const f = fixture(phase);
+      assert.equal((await f.cli(["init"], { git: false })).ok, true);
+      if (reviewer === legacy) {
+        assert.equal((await f.cli(["settings"], { reviewer })).ok, true);
+      }
+      const { data: task } = await f.cli(["create"], plannedDraft({
+        title: "Review the result", criteria: ["Check evidence."],
+      }));
+      assert.equal((await f.cli(["approve", task.id])).ok, true);
+      assert.equal((await f.cli(["start", task.id])).ok, true);
+      const { data: preview } = await f.cli(["preview", task.id]);
+      const submission = await f.cli(["submit", task.id], {
+        token: preview.token, noChanges: true, summary: "Submitted", checks: ["Checked"],
+      });
+      assert.equal(submission.ok, true, JSON.stringify(submission));
+      const report = { summary: "Verified", needsHuman: false, verifyRisk: true, findings: [], evidence: ["Checked"] };
+      const calls: (ChatSettings | null | undefined)[] = [];
+      f.setReviewer(async (context, _call, settings) => {
+        calls.push(settings);
+        if (settings?.model === reviewVerifier.model) {
+          assert.deepEqual(context.candidateReview, report);
+        }
+        return report;
+      });
+      const { data: board } = await f.cli(["list", "--compact"]);
+      const watch = f.schedule(board, async () => assert.fail("Unexpected manager run"));
+      watch.tick();
+      await watch.done();
+      assert.deepEqual(calls, reviewer === legacy ? [reviewer, reviewVerifier] : [reviewer]);
+      const { data: reviewed } = await f.cli(["show", task.id]);
+      assert.equal(reviewed.history.at(-1).action, "review-approve");
+    });
+  }
+});
+
 test("a reviewer leaves gaps on review and wakes the waiting manager on approval without Git changes", { timeout: 150_000 }, async t => {
   const f = fixture(t);
   const project = join(f.folder, "project");
@@ -3336,7 +3381,7 @@ test("a reviewer leaves gaps on review and wakes the waiting manager on approval
   git("-c", "user.name=Taskboard", "-c", "user.email=taskboard@example.invalid", "commit", "--allow-empty", "-m", "Initial commit");
   const head = git("rev-parse", "HEAD");
   assert.equal((await f.cli(["init"])).ok, true);
-  assert.equal((await f.cli(["settings"], { reviewMode: "human" })).ok, true);
+  assert.equal((await f.cli(["settings"], { reviewMode: "human", reviewer: defaultBoardAgents.reviewer })).ok, true);
   const { data: task } = await f.cli(["create"], plannedDraft({ title: "Check local data", criteria: ["Obsolete folder is absent."] }));
   assert.equal((await f.cli(["approve", task.id])).ok, true);
   const started = await f.cli(["start", task.id]);

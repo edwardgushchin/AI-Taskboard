@@ -92,6 +92,10 @@ void (async () => {
       cli(board, "init", { git: false });
       cli(manual, "init", { boardType: "manual" });
       assert.equal(existsSync(profileLimits), false);
+      notice([2, 1]);
+      reservations(2, 1);
+      record("PASS fresh agent board has 2 execution slots and 1 review slot in CLI notices and shared reservations.");
+      cli(board, "settings", { taskLimits: {} });
       notice([3, 2]);
       reservations(3, 2);
       writeFileSync(runtime, JSON.stringify([{ id: "task-defaults", kind: "defaults", owner: 0,
