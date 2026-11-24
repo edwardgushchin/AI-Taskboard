@@ -1543,6 +1543,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 :is(#provider-limits, #agent-activity, #auto-mode-panel):popover-open { opacity: 1; transform: translateY(0); }
 #agent-activity {
   overflow: hidden;
+  padding-inline: 0;
 }
 #agent-activity:popover-open {
   display: flex;
@@ -1551,6 +1552,7 @@ pre { max-height: 290px; margin: 0; overflow: auto; background: var(--lane); pad
 .agent-activity-scroll {
   min-height: 0;
   overflow: auto;
+  padding-inline: var(--surface-inset);
 }
 .agent-activity-scroll:focus-visible {
   outline: none;

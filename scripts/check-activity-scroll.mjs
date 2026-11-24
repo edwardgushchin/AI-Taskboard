@@ -14,6 +14,23 @@ app.disableHardwareAcceleration();
 
 const read = path => readFileSync(new URL("../src/desktop/" + path, import.meta.url), "utf8");
 const results = [];
+
+function visibleThumbGap(image, geometry, atBottom = false) {
+  const { width, height } = image.getSize();
+  const { right, top, bottom, trackRight, scrollbar } = geometry;
+  const y = Math.round(atBottom ? bottom - 19 : top + 18);
+  const trackEnd = Math.round(trackRight);
+  const trackStart = trackEnd - scrollbar;
+  assert.ok(trackStart >= 2 && trackEnd <= width && y >= 0 && y < height, JSON.stringify(geometry));
+
+  const bitmap = image.toBitmap();
+  const pixel = x => bitmap.readUInt32LE((y * width + x) * 4);
+  const background = pixel(trackStart - 2);
+  for (let x = trackEnd - 1; x >= trackStart; x--) {
+    if (pixel(x) !== background) return Math.round(right) - x - 1;
+  }
+  assert.fail("Бегунок не виден на снимке: " + JSON.stringify(geometry));
+}
 void app.whenReady().then(async () => {
   nativeTheme.themeSource = "dark";
   const window = new BrowserWindow({
@@ -59,12 +76,55 @@ void app.whenReady().then(async () => {
       };
       renderActiveAgents();
     }
+    function scrollGeometry(surface, viewport) {
+      const outer = surface.getBoundingClientRect();
+      const inner = viewport.getBoundingClientRect();
+      return {
+        top: inner.top,
+        right: outer.right - parseFloat(getComputedStyle(surface).borderRightWidth),
+        bottom: inner.bottom,
+        trackRight: inner.right,
+        scrollbar: viewport.offsetWidth - viewport.clientWidth,
+      };
+    }
+    function renderChatFixture() {
+      const draft = document.createElement("div");
+      draft.className = "board-draft";
+      draft.dataset.open = "";
+      draft.style.cssText = "position: absolute; bottom: 80px; right: 60px; width: 520px";
+      const chat = document.createElement("section");
+      chat.className = "board-chat";
+      const bar = document.createElement("div");
+      bar.className = "board-chat-bar";
+      const title = document.createElement("strong");
+      title.textContent = "Чат менеджера";
+      bar.append(title);
+      const log = document.createElement("div");
+      log.className = "board-chat-log";
+      log.setAttribute("role", "log");
+      log.tabIndex = 0;
+      for (let index = 0; index < 30; index++) {
+        const message = document.createElement("article");
+        message.className = "chat-entry board-manager-message";
+        message.dataset.actor = index % 2 === 0 ? "user" : "assistant";
+        message.textContent = "Сообщение " + (index + 1) + " в чате менеджера";
+        log.append(message);
+      }
+      chat.append(bar, log);
+      draft.append(chat);
+      document.querySelector("main").append(draft);
+      return log;
+    }
     function measure() {
       const outer = panel.getBoundingClientRect();
       const inner = scroller.getBoundingClientRect();
       const trigger = indicator.getBoundingClientRect();
       const last = [...scroller.querySelectorAll("li")].at(-1);
       const lastRect = last?.getBoundingClientRect();
+      const heading = scroller.querySelector("h2").getBoundingClientRect();
+      const value = scroller.querySelector("dd")?.getBoundingClientRect();
+      const scrollbar = scroller.offsetWidth - scroller.clientWidth;
+      const style = getComputedStyle(panel);
       return {
         size: [innerWidth, innerHeight],
         scale: devicePixelRatio,
@@ -73,8 +133,14 @@ void app.whenReady().then(async () => {
         restored: document.activeElement === indicator,
         top: scroller.scrollTop,
         max: scroller.scrollHeight - scroller.clientHeight,
-        scrollbar: scroller.offsetWidth - scroller.clientWidth,
-        insets: [inner.top - outer.top, outer.right - inner.right, outer.bottom - inner.bottom],
+        scrollbar,
+        geometry: scrollGeometry(panel, scroller),
+        headingGaps: [
+          heading.left - inner.left,
+          heading.top - outer.top - parseFloat(style.borderTopWidth),
+        ],
+        valueGap: value && inner.right - scrollbar - value.right,
+        bottomGap: lastRect && outer.bottom - parseFloat(style.borderBottomWidth) - lastRect.bottom,
         anchored: Math.abs(outer.bottom + 8 - trigger.top) < 1 &&
           Math.abs(outer.right - trigger.right) < 1,
         fits: outer.top >= 0 && outer.left >= 0 && outer.right <= innerWidth &&
@@ -100,6 +166,8 @@ void app.whenReady().then(async () => {
   };
   await evaluate("renderFixture(4, 18); indicator.focus(); document.fonts.ready.then(() => true)");
   await key(" ", "Space", 32);
+  let activityThumbGap;
+  let activityTrackGap;
   for (const [width, height] of [[1280, 800], [900, 540]]) {
     window.setContentSize(width, height);
     await key("Home", "Home", 36);
@@ -108,9 +176,18 @@ void app.whenReady().then(async () => {
     assert.equal(top.scale, 1);
     assert.ok(top.open && top.focused && top.fits && top.anchored, JSON.stringify(top));
     assert.ok(top.scrollbar > 0 && top.top === 0 && top.max > 0, JSON.stringify(top));
-    assert.ok(top.insets.every(inset => inset >= 16), JSON.stringify(top));
+    assert.deepEqual(top.headingGaps, [16, 16]);
+    assert.equal(top.valueGap, 16);
+    const trackGap = top.geometry.right - top.geometry.trackRight;
+    assert.equal(trackGap, 0);
+    const topImage = await page.capturePage();
+    assert.deepEqual(topImage.getSize(), { width, height });
+    const topThumbGap = visibleThumbGap(topImage, top.geometry);
+    assert.ok(topThumbGap > trackGap);
     if (width === 1280) {
-      writeFileSync(join(artifacts, "activity-top.png"), (await page.capturePage()).toPNG());
+      activityThumbGap = topThumbGap;
+      activityTrackGap = trackGap;
+      writeFileSync(join(artifacts, "activity-top.png"), topImage.toPNG());
     }
     for (let step = 0; step < 15; step++) {
       await cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...top.wheel, deltaX: 0, deltaY: 240 });
@@ -124,14 +201,20 @@ void app.whenReady().then(async () => {
     const bottom = await measure();
     assert.ok(bottom.top === bottom.max && bottom.lastVisible, JSON.stringify(bottom));
     assert.match(bottom.last, /T-0072$/);
-    assert.deepEqual(bottom.insets, top.insets);
+    assert.ok(bottom.bottomGap >= 16, JSON.stringify(bottom));
+    assert.deepEqual(bottom.geometry, top.geometry);
+    const bottomImage = await page.capturePage();
+    assert.deepEqual(bottomImage.getSize(), { width, height });
+    assert.equal(visibleThumbGap(bottomImage, bottom.geometry, true), topThumbGap);
     results.push(
       `- ${width}×${height} CSS-пикселей, DPR ${top.scale}. Полоса шириной ${top.scrollbar} px, ` +
-      `отступы сверху, справа и снизу ${top.insets.join("/")} px. Колесо и End дошли до ${bottom.top}/${bottom.max} px. ` +
+      `от внутреннего края рамки до дорожки ${trackGap} px, до видимой части бегунка ${topThumbGap} px в обеих крайних позициях. ` +
+      `Отступ заголовка сверху и слева и отступ чисел справа — 16 px. ` +
+      `Колесо и End дошли до ${bottom.top}/${bottom.max} px. ` +
       `Последняя строка «${bottom.last}» полностью видна.`,
     );
     if (width === 900) {
-      writeFileSync(join(artifacts, "activity-bottom-low.png"), (await page.capturePage()).toPNG());
+      writeFileSync(join(artifacts, "activity-bottom-low.png"), bottomImage.toPNG());
     }
     await key("Escape", "Escape", 27);
     const closed = await measure();
@@ -143,9 +226,31 @@ void app.whenReady().then(async () => {
     assert.equal(short.max, 0);
     assert.equal(short.scrollbar, 0);
     await key("Escape", "Escape", 27);
-    await evaluate("renderFixture(4, 18)");
-    await key(" ", "Space", 32);
+    if (width === 1280) {
+      await evaluate("renderFixture(4, 18)");
+      await key(" ", "Space", 32);
+    }
   }
+  window.setContentSize(1280, 800);
+  await evaluate("const log = renderChatFixture();");
+  await settle();
+  const chat = await evaluate(`({
+    ...scrollGeometry(log.closest(".board-chat"), log),
+    scrollRange: log.scrollHeight - log.clientHeight,
+    scale: devicePixelRatio,
+    size: [innerWidth, innerHeight],
+  })`);
+  assert.deepEqual(chat.size, [1280, 800]);
+  assert.equal(chat.scale, 1);
+  assert.ok(chat.scrollRange > 0 && chat.scrollbar > 0, JSON.stringify(chat));
+  const chatTrackGap = chat.right - chat.trackRight;
+  assert.equal(chatTrackGap, activityTrackGap);
+  const chatImage = await page.capturePage();
+  assert.deepEqual(chatImage.getSize(), { width: 1280, height: 800 });
+  const chatThumbGap = visibleThumbGap(chatImage, chat);
+  assert.equal(chatThumbGap, activityThumbGap);
+  writeFileSync(join(artifacts, "manager-chat.png"), chatImage.toPNG());
+  results.push(`- Чат менеджера, 1280×800 CSS-пикселей, DPR 1. От внутреннего края рамки до дорожки ${chatTrackGap} px, до видимой части бегунка ${chatThumbGap} px.`);
   const sources = [
     "src/desktop/index.html", "src/desktop/styles.css", "src/desktop/themes.css",
     "src/desktop/renderer.js", "src/desktop/localization.cjs", "src/desktop/locales/ru.json",
@@ -162,10 +267,11 @@ void app.whenReady().then(async () => {
     "# Проверка прокрутки панели «Активность по доскам»", "",
     `Windows Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, Node ${process.versions.node}. Zoom 100%.`,
     "Изолированное окно с исходной строкой состояния и функцией renderActiveAgents. Данные четырёх досок и 72 операций заданы фикстурой.", "",
+    "Для чата менеджера использована разметка диалога с классами приложения и 30 тестовыми сообщениями. Зазор до дорожки измерен по геометрии, до бегунка — по пикселям PNG.", "",
     ...results,
     "- Space и Enter открыли панель и передали фокус прокручиваемой области. Escape закрыл панель и вернул фокус кнопке.",
     "- В обоих размерах короткий список целиком виден, ширина полосы и диапазон прокрутки равны нулю.", "",
-    "Команда", "", "```powershell", "node scripts/check-activity-scroll.mjs --artifacts .tasks/qa", "```", "",
+    "Команда", "", "```powershell", "node scripts/check-activity-scroll.mjs --artifacts .tasks/qa/T-0363", "```", "",
     `Git HEAD рабочего дерева: ${head}. SHA-256 проверенных исходников, UTF-8 с LF:`, "",
     ...hashes, "",
   ].join("\n"));
