@@ -3425,9 +3425,19 @@ function draftComposer() {
     const page = document.createDocumentFragment();
     const delivered = new Set();
     const messages = new Set();
+    const bindings = new Set();
+    const saveBindings = () => {
+      // Board updates prune bindings on detached nodes while this page is still being built.
+      for (const binding of localizedBindings) {
+        if (binding.node.isConnected || !page.contains(binding.node)) continue;
+        localizedBindings.delete(binding);
+        bindings.add(binding);
+      }
+    };
     let deadline = performance.now() + 8;
     for (const _ of renderHistoryTurns(turns, page, delivered, messages, false)) {
       if (performance.now() >= deadline) {
+        saveBindings();
         await scheduler.yield();
         if (!canInstall() || active || locale !== localization.locale) {
           for (const tile of page.querySelectorAll(".chat-attachment")) chatPreviews.unobserve(tile);
@@ -3436,7 +3446,8 @@ function draftComposer() {
         deadline = performance.now() + 8;
       }
     }
-    return { page, delivered };
+    saveBindings();
+    return { page, delivered, bindings };
   }
   const atEndOfHistory = dialogueViewport.atEnd;
   const canBrowseHistory = () => editor.isConnected && editor.matches("[data-open], [data-pinned]");
@@ -3534,6 +3545,7 @@ function draftComposer() {
             if (!previousReplies.has(reply.dataset.messageId)) reply.setAttribute("data-enter", "");
           }
           log.replaceChildren(olderHistory, greeting, next.page);
+          for (const binding of prepared?.bindings ?? []) localizedBindings.add(binding);
           if (active?.entry) log.append(active.entry);
           if (active) log.append(active.container, active.thinking);
           updateOlderHistory();
