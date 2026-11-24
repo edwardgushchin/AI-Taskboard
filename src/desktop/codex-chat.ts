@@ -6,7 +6,7 @@ import { trackActiveRun, trackProvider } from "./active-runs.ts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { findQueuedTurn } from "./codex-queued-turn.ts";
-import { CodexRoutingTimeout, isRoutingTimeout } from "./codex-routing-timeout.ts";
+import { CodexRoutingRetry, isRoutingDiscoveryFailure } from "./codex-routing-retry.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { CodexRpcRejection, codexRpc, dailyBudgetInterruption, stopCodexProcess, turnControl } from "./codex-rpc.ts";
 import type { AgentControl, RpcMessage } from "./codex-rpc.ts";
@@ -1141,7 +1141,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
           }
           const recovered = tokens.recover(thread.id, saved);
           tokens.save(await tokens.recoverRollout(thread.path, thread.id, saved) ?? recovered, onTokenUsage);
-          if (isRoutingTimeout(saved)) throw new CodexRoutingTimeout(saved.error!.message!);
+          if (isRoutingDiscoveryFailure(saved)) throw new CodexRoutingRetry(saved.error!.message!);
           if (saved.status !== "completed") throw new Error(saved.error?.message ?? "Codex did not complete the review.");
           turn = saved;
           for (const item of saved.items) {
@@ -1296,7 +1296,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
       const goalStatus: GoalStatus | "cleared" | undefined = followingGoal ? currentGoal?.status ?? "cleared" : undefined;
       const goalStopped = turn.status === "interrupted" && (goalStatus === "paused" || goalStatus === "cleared");
       if (stopping || (turn.status === "interrupted" && !goalStopped)) return { interrupted: true as const };
-      if (options.role === "reviewer" && isRoutingTimeout(turn)) throw new CodexRoutingTimeout(turn.error!.message!);
+      if (options.role === "reviewer" && isRoutingDiscoveryFailure(turn)) throw new CodexRoutingRetry(turn.error!.message!);
       if (turn.status !== "completed" && !goalStopped) throw new Error(turn.error?.message ?? "Codex did not complete the reply.");
       completed = !goalStopped;
       const text = answers.join("\n\n").trim();

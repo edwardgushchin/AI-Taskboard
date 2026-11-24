@@ -36,11 +36,11 @@ import type { Expert } from "../cli/experts.ts";
 import { expertCommands, executorExpertTools, leadInstructions, leadSkillInstructions, phaseStageReporter, subagentInstructions, watchTeamMail } from "./expert-tools.ts";
 import { insideProject } from "./project-files.ts";
 import { findQueuedTurn, missingCodexThread } from "./codex-queued-turn.ts";
-import { isRoutingTimeout } from "./codex-routing-timeout.ts";
+import { isRoutingDiscoveryFailure } from "./codex-routing-retry.ts";
 
 type Client = NonNullable<Awaited<ReturnType<typeof configuredCodex>>>;
 type Turn = { id: string; status: string; completedAt?: number | null; error?: { message?: string } | null };
-type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean; routingTimeout?: boolean; unconfirmed?: boolean };
+type RunFailure = { reason: string; disconnected?: boolean; interrupted?: boolean; routingDiscoveryFailure?: boolean; unconfirmed?: boolean };
 type Run = AgentControl & { threadId: string; completion: Promise<RunFailure | undefined>; recovered?: true };
 type QueuedTurn = {
   clientId: string;
@@ -402,7 +402,7 @@ export async function startCodexRun(client: Client, project: string, cwd: string
       const turn = turns.get(turnId)!;
       if (turn.status !== "completed") failure = {
         reason: turn.error?.message || "Codex ended the task run: " + turn.status + ".",
-        ...(isRoutingTimeout(turn) ? { routingTimeout: true } : {}),
+        ...(isRoutingDiscoveryFailure(turn) ? { routingDiscoveryFailure: true } : {}),
         ...(turn.status === "interrupted" ? { interrupted: true } : {}),
       };
     } catch (error) {

@@ -63,7 +63,7 @@ import { transcribeVoice } from "./voice-transcription.ts";
 import { startWindowsDictation } from "./windows-dictation.ts";
 import { linkedDraftManagerReply, matchesDraftDependency, needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
-import { routingRetryDelayMs } from "./codex-routing-timeout.ts";
+import { routingRetryDelayMs } from "./codex-routing-retry.ts";
 import { reviewDecisionSequence } from "../cli/expert-team.ts";
 import { readReviewerChatPage, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
@@ -4942,7 +4942,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       }
       if (!result.ok) {
         if (retry && result.error.code === "BOARD_BUSY") return;
-        if (!signal.aborted && result.error.code === "CODEX_ROUTING_TIMEOUT") {
+        if (!signal.aborted && result.error.code === "CODEX_ROUTING_RETRY") {
           const exhausted = Boolean(retry && !retry.manual);
           // Keep the turn available for reconciliation until the queue records its outcome.
           setRetry({
@@ -6024,7 +6024,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         await saveActivity();
         return;
       }
-      if (routingRetryAt !== undefined && outcome?.routingTimeout && slotId && !stopRequested && !signal.aborted &&
+      if (routingRetryAt !== undefined && outcome?.routingDiscoveryFailure && slotId && !stopRequested && !signal.aborted &&
           exhaustExecutorRoutingRetry(project, slotId, id, outcome.reason)) {
         await saveActivity();
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
@@ -6037,7 +6037,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (routingRetryAt !== undefined && !signal.aborted) {
         agentSlots.defer(project, id, undefined, queuedRevision);
       }
-      if (outcome?.routingTimeout && routingRetryAt === undefined && role === "executor" &&
+      if (outcome?.routingDiscoveryFailure && routingRetryAt === undefined && role === "executor" &&
           slotId && !stopRequested && !signal.aborted && !returningDrafts.has(key)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok && current.data.status === "in_progress" && current.data.codexThreadId === codexThreadId &&
