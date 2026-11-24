@@ -1819,6 +1819,7 @@ function render({ affectedLanes = [], added = [], moves = [] } = {}) {
   byId("board-composer").hidden = archiveView;
   if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
   const composer = byId("board-composer").firstChild;
+  composer.resumeBoardView();
   composer.localize();
   composer.updateManagerBusy(frame.managerBusy);
   composer.updateManagerRun(frame.managerRun);
@@ -2077,7 +2078,7 @@ function chatViewport(list) {
   let restoring = false;
   const hasViewport = () => !suspended && list.clientHeight && visible(list);
   let position = { end: true, top: 0, anchors: [] };
-  const atEnd = () => suspended ? position.end : list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
+  const atEnd = () => hasViewport() ? list.scrollHeight - list.scrollTop - list.clientHeight <= 1 : position.end;
   let restoredTop;
   let folds;
   function remember() {
@@ -2180,10 +2181,10 @@ function chatViewport(list) {
       resize.disconnect();
       observed.clear();
       for (const anchor of position.anchors) delete anchor.node;
-      change();
+      change?.();
     },
     resume(change) {
-      change();
+      change?.();
       if (!suspended) return;
       applyFolds(folds);
       folds = undefined;
@@ -2660,6 +2661,8 @@ function draftComposer() {
   function showWork(show) {
     if (show && views.hidden) return;
     if (show === !workPanel.hidden) return;
+    dialogueViewport.remember();
+    workViewport.remember();
     workPanel.hidden = !show;
     log.hidden = show;
     dialogueToggle.setAttribute("aria-pressed", String(!show));
@@ -3595,6 +3598,15 @@ function draftComposer() {
         let delivered = recentDelivered;
         let oldImages = [];
         if (!unchanged) {
+          const deferWhileReading = () => {
+            if (!hasDialogueHistory || atEndOfHistory()) return false;
+            if (recentCursor === result.data.nextCursor && !olderPages.length && !loadingOlder) return false;
+            // Keep the mounted rows and their cursor together until the reader returns to the end.
+            historyInvalidated = true;
+            historyLoaded = true;
+            return true;
+          };
+          if (deferWhileReading()) return;
           const generation = historyGeneration;
           const canInstall = () => !disposed && !reloadAfterHistory &&
             generation === historyGeneration && canBrowseHistory();
@@ -3602,6 +3614,10 @@ function draftComposer() {
           const prepared = needsLiveState ? undefined : await prepareRecentHistory(turns, canInstall);
           if (!canInstall()) {
             if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
+            return;
+          }
+          if (deferWhileReading()) {
+            for (const tile of prepared?.page.querySelectorAll(".chat-attachment") ?? []) chatPreviews.unobserve(tile);
             return;
           }
           oldImages = [...log.querySelectorAll(".chat-attachments img")];
@@ -3709,6 +3725,27 @@ function draftComposer() {
     workViewport.resume(() => {
       if (savedWork.length || liveWork.length || pendingWork.size) renderGoalTimeline();
     });
+    if (!workPanel.hidden) editor.invalidateWork();
+  };
+  let boardViewSuspended = false;
+  editor.suspendBoardView = () => {
+    if (!canBrowseHistory()) return;
+    boardViewSuspended = true;
+    dialogueViewport.suspend();
+    workViewport.suspend();
+    clearTimeout(readRetry);
+    cancelAnimationFrame(readFrame);
+    readFrame = undefined;
+    readObserver.disconnect();
+  };
+  editor.resumeBoardView = () => {
+    if (!boardViewSuspended || !canBrowseHistory()) return;
+    boardViewSuspended = false;
+    dialogueViewport.resume();
+    workViewport.resume();
+    lastScrollTop = log.scrollTop;
+    readObserver.observe(log);
+    editor.invalidateHistory();
     if (!workPanel.hidden) editor.invalidateWork();
   };
   editor.closeChat = () => {
@@ -6717,6 +6754,7 @@ function update(next) {
   const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
+  if (projectChanged) byId("board-composer").firstChild?.suspendBoardView?.();
   let cardLayout;
   if (!projectChanged && frame.board && next.board && !archiveView && !reducedMotion.matches && !document.hidden) {
     cardLayout = cardLayoutChanges(frame.board, next.board.tasks);
