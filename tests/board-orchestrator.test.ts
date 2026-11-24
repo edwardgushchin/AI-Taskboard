@@ -297,7 +297,7 @@ function fixture(t: TestContext) {
             : ["goal_read", "goal_send", "goal_edit"])
           : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
-          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
+          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update", "board_import_project_rules"] : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
           !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
           ["task_set_review_mode"] : []),
