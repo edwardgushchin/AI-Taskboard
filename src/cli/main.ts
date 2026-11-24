@@ -40,7 +40,7 @@ import packageInfo from "../../package.json" with { type: "json" };
 import { grantTaskTool, requestTaskTool } from "./task-tools.ts";
 import { recoverTestData } from "./test-recovery.ts";
 import { expertContext, expertSkill, listExperts, readExpert, saveExpert } from "./experts.ts";
-import { approvalRequirements, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
+import { approvalRequirements, claimTeamMailNotification, createExpertPlan, expertStagesStatus, planNewTask, requireApprovalPlan, requireExpertPlan, requireExpertResults, reviewDecisionSequence, sendTeamMessage, taskExpertPhase, teamInbox, updateExpertStage } from "./expert-team.ts";
 import { syncTaskStatusNotices } from "../desktop/manager-history.ts";
 import { syncSettingsNotices } from "../desktop/settings-notices.ts";
 import { cachedTaskLimits, readProfileTaskLimits } from "../desktop/agent-limits.ts";
@@ -572,6 +572,8 @@ function run(
   if (command === "expert-inbox") return teamInbox(store, text(id, "task ID", true),
     input.actor === "manager" ? "manager" : input.actor === "user" ? "owner" : input.actor === "reviewer" ? "reviewer" : id!,
     input.afterSequence === undefined ? 0 : number(input.afterSequence, "afterSequence", 0));
+  if (command === "expert-notify") return claimTeamMailNotification(store, text(id, "task ID", true),
+    member(input.actor, ["agent", "reviewer"], "actor"), number(input.afterSequence, "afterSequence", 0));
   if (command === "expert-message") return sendTeamMessage(store, text(id, "task ID", true),
     typeof input.stage === "string" && (input.actor === "agent" && input.stage.startsWith("work:") ||
       ["reviewer", "manager"].includes(String(input.actor)) && input.stage.startsWith("review:")) ? input.stage :

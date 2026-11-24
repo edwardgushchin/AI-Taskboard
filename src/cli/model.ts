@@ -261,6 +261,7 @@ export interface Task {
   goalThreadId?: string;
   managerGoalId?: string;
   managerReadThrough?: number;
+  teamMailNotifiedThrough?: Partial<Record<"agent" | "reviewer", number>>;
   revision: number;
   createdAt: string;
   updatedAt: string;

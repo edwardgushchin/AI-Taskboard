@@ -63,12 +63,12 @@ import { transcribeVoice } from "./voice-transcription.ts";
 import { startWindowsDictation } from "./windows-dictation.ts";
 import { linkedDraftManagerReply, matchesDraftDependency, needsManagerAttention } from "../cli/task-messages.ts";
 import { readReviewReports, saveReviewReports } from "./review-history.ts";
-import { routingRetryDelayMs } from "./codex-routing-timeout.ts";
+import { routingRetryDelayMs } from "./codex-routing-retry.ts";
 import { reviewDecisionSequence } from "../cli/expert-team.ts";
 import { readReviewerChatPage, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
-import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
-import { backgroundGoalHistory } from "./goal-history-background.ts";
+import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { backgroundDialogueHistory, backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
 import type { BoardMcpTool } from "./board-mcp.ts";
@@ -1090,7 +1090,7 @@ interface ChatRequest {
   requestId?: string;
 }
 
-type ChatUpdate = { type: "saved" | "changed" } | { type: "commentary"; text: string };
+type ChatUpdate = { type: "saved"; requestId?: string } | { type: "changed" } | { type: "commentary"; text: string };
 
 let tokenUsage: TokenUsageQueue | undefined;
 const boardUsage = new Map<string, BoardCodexUsage>();
@@ -1356,7 +1356,7 @@ async function sendChat(project: string, id: string, request: ChatRequest, notif
         text, model, effort, attachmentSources: sources, waitForLimit, requestId: request.requestId,
       });
       saved = reply.ok;
-      if (saved) notify({ type: "saved" });
+      if (saved) notify({ type: "saved", requestId: request.requestId });
       if (waitForLimit || (reply.ok && reply.data.pendingLimitChat?.length)) return { saved, result: reply };
       if (reply.ok && request.requestId &&
           reply.data.history.findLast(event => event.chat)?.chat?.requestId !== request.requestId) {
@@ -2763,18 +2763,13 @@ ipcMain.handle("board:history", async (event, project?: string, cursor: unknown 
     const profile = app.getPath("userData");
     const readLegacy = saved && saved.history !== "local"
       ? (next: string | null) => readBoardHistory(profile, project, saved.id, next) : undefined;
-    let data;
-    let goalLogAvailable: boolean | undefined;
-    if (view === "chat") {
-      data = await readManagerView(project, cursor, view, readLegacy);
-    } else {
-      const history = await backgroundGoalHistory(project, cursor, Boolean(readLegacy));
-      goalLogAvailable = history.goalLogAvailable;
-      data = history.local;
-      if (history.providerCutoff !== undefined && readLegacy) {
-        data = await readManagerProviderHistory(cursor, view, history.providerCutoff, readLegacy);
-      }
-    }
+    const history = view === "chat"
+      ? await backgroundDialogueHistory(project, cursor, Boolean(readLegacy))
+      : await backgroundGoalHistory(project, cursor, Boolean(readLegacy));
+    let goalLogAvailable = "goalLogAvailable" in history ? history.goalLogAvailable : undefined;
+    const data = history.providerCutoff !== undefined && readLegacy
+      ? await readManagerProviderHistory(cursor, view, history.providerCutoff, readLegacy)
+      : history.local;
     if (saved && saved.goal === undefined && data && "goal" in data && data.goal !== undefined) {
       saveBoardGoal(boardThreadPath(project), data.goal);
     }
@@ -4960,7 +4955,7 @@ async function reviewSubmission(watch: BoardWatch, id: string, retryLimit: numbe
       }
       if (!result.ok) {
         if (retry && result.error.code === "BOARD_BUSY") return;
-        if (!signal.aborted && result.error.code === "CODEX_ROUTING_TIMEOUT") {
+        if (!signal.aborted && result.error.code === "CODEX_ROUTING_RETRY") {
           const exhausted = Boolean(retry && !retry.manual);
           // Keep the turn available for reconciliation until the queue records its outcome.
           setRetry({
@@ -6042,7 +6037,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
         await saveActivity();
         return;
       }
-      if (routingRetryAt !== undefined && outcome?.routingTimeout && slotId && !stopRequested && !signal.aborted &&
+      if (routingRetryAt !== undefined && outcome?.routingDiscoveryFailure && slotId && !stopRequested && !signal.aborted &&
           exhaustExecutorRoutingRetry(project, slotId, id, outcome.reason)) {
         await saveActivity();
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
@@ -6055,7 +6050,7 @@ async function launchTask(project: string, id: string, revisionRequest?: { input
       if (routingRetryAt !== undefined && !signal.aborted) {
         agentSlots.defer(project, id, undefined, queuedRevision);
       }
-      if (outcome?.routingTimeout && routingRetryAt === undefined && role === "executor" &&
+      if (outcome?.routingDiscoveryFailure && routingRetryAt === undefined && role === "executor" &&
           slotId && !stopRequested && !signal.aborted && !returningDrafts.has(key)) {
         const current = await callCli<LaunchState>(project, ["show", id, "--compact"], { launchDetails: true });
         if (current.ok && current.data.status === "in_progress" && current.data.codexThreadId === codexThreadId &&

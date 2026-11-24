@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexQuotaExceeded, codexRpc, isCodexQuotaError, stopCodexProcess } from "../src/desktop/codex-rpc.ts";
-import { isRoutingTimeout } from "../src/desktop/codex-routing-timeout.ts";
+import { isRoutingDiscoveryFailure } from "../src/desktop/codex-routing-retry.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { boardProjectRulesPrompt, readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
@@ -63,6 +63,7 @@ test("task discussion streams task usage before success, provider failure, or a 
         assert.ok(process.argv.includes(reviewing ? 'web_search="disabled"' : 'web_search="live"'));
         assert.equal(params.permissions, undefined);
         assert.equal(params.sandbox, "read-only");
+        assert.equal(params.developerInstructions.split("Default response language: ").length, 2);
         if (quota) {
           assert.notEqual(outcome, "quota-resume");
           assert.equal(params.ephemeral, false);
@@ -71,6 +72,8 @@ test("task discussion streams task usage before success, provider failure, or a 
           assert.equal(params.ephemeral, false, "the provider needs the review lead's rollout for native subagents");
           assert.match(params.developerInstructions, /Assigned review lead specialization: .*QA lead/);
           assert.match(params.developerInstructions, /Assigned review plan: .*check-api/);
+          assert.ok(params.developerInstructions.indexOf("independent, read-only AI Taskboard reviewer") <
+            params.developerInstructions.indexOf("Assigned review plan:"));
           assert.match(params.developerInstructions, /Native subagents are enabled/);
           assert.match(params.developerInstructions, /ready for acceptance in as few revision rounds as possible/);
           assert.match(params.developerInstructions, /Approve with an empty findings list/);
@@ -164,7 +167,7 @@ test("task discussion streams task usage before success, provider failure, or a 
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
       boardProjectRulesPrompt, reviewModeInstruction,
-      randomUUID, stopCodexProcess, isRoutingTimeout, codexThreadPattern, CodexQuotaExceeded, isCodexQuotaError,
+      randomUUID, stopCodexProcess, isRoutingDiscoveryFailure, codexThreadPattern, CodexQuotaExceeded, isCodexQuotaError,
       executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool, leadInstructions, phaseStageReporter, subagentInstructions,
       leadSkillInstructions: async () => [], watchTeamMail: () => () => {},
