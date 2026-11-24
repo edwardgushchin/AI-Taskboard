@@ -1233,8 +1233,8 @@ function recoverBoardUsage(watch: BoardWatch) {
     });
     const report = await usage.recoverRollout(thread.path, charge.threadId, {
       id: charge.turnId,
-      status: "completed",
-      completedAt: charge.completedAt / 1000,
+      status: charge.completedAt === undefined ? "inProgress" : "completed",
+      completedAt: charge.completedAt === undefined ? undefined : charge.completedAt / 1000,
     });
     if (report && subscriptions.get(project) === watch && !closingProjects.has(project)) await write(report);
   }).catch(() => {

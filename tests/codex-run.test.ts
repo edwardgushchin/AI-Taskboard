@@ -1,5 +1,7 @@
 import { confirmFixtureDraft, plannedDraft } from "./fixtures/planned-draft.ts";
 import { activeRunSummary } from "../src/desktop/active-runs.ts";
+import { BoardCodexUsage } from "../src/desktop/codex-daily-budget.ts";
+import { CodexTokenUsage } from "../src/desktop/codex-token-usage.ts";
 import assert from "node:assert/strict";
 import { callCli } from "../src/desktop/cli.ts";
 import { execFileSync, spawn } from "node:child_process";
@@ -228,7 +230,8 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
     '      send({ id, error: { message: "session " + params.threadId + " is archived. Run codex unarchive first." } });',
     '      return;',
     '    }',
-    '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread },',
+    '    const path = outcome === "usage-closed" ? capture + ".rollout.jsonl" : undefined;',
+    '    result = { model: "resolved-model", thread: { id: params.threadId ?? thread, path },',
     '      approvalPolicy: params.approvalPolicy, approvalsReviewer: outcome === "manual-review" ? "user" : params.approvalsReviewer,',
     '      activePermissionProfile: { id: outcome === "readonly" ? ":read-only" : params.permissions } };',
     '  } else if (method === "thread/turns/list" && outcome === "recover-usage") {',
@@ -631,14 +634,45 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
   await assert.rejects(startCodexRun(client("busy"), folder, worktree, { ...task, codexThreadId: thread }),
     (error: Error & { code?: string }) => error.code === "CODEX_THREAD_BUSY" && /active writer/.test(error.message));
   assert.equal(JSON.parse(readFileSync(capture, "utf8")).requests.at(-1).method, "thread/resume");
+  const ledger = new BoardCodexUsage(folder);
+  const path = capture + ".rollout.jsonl";
+  const at = Date.now();
+  const resetTime = new Date(at + 12 * 60 * 60 * 1000).toTimeString().slice(0, 5);
+  const events = [
+    { type: "session_meta", payload: { id: thread } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+  ];
+  function writeRollout(...tail: object[]) {
+    writeFileSync(path, [...events, ...tail].map(event => JSON.stringify(event)).join("\n") + "\n");
+  }
+  function rolloutSample(time: number, total: number, cached: number) {
+    const counters = { total_tokens: total, cached_input_tokens: cached };
+    return {
+      type: "event_msg",
+      timestamp: new Date(time).toISOString(),
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: counters, last_token_usage: counters },
+      },
+    };
+  }
+  const first = rolloutSample(at, 120, 50);
+  writeRollout(first);
   for (const outcome of ["usage", "usage-failed", "usage-closed"]) {
     const reports: TokenUsageReport[] = [];
-    const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, async report => { reports.push(report); });
+    const save = async (report: TokenUsageReport) => {
+      reports.push(report);
+      if (outcome === "usage-closed") ledger.reconcile(report);
+    };
+    const writer = outcome === "usage-closed"
+      ? Object.assign(save, { observe: (sample: Parameters<BoardCodexUsage["observe"]>[0]) => ledger.observe(sample) })
+      : save;
+    const measured = await startCodexRun(client(outcome), folder, worktree, task, undefined, writer);
     const failure = await measured.completion;
     assert.equal(activeRunSummary().total, 0);
     assert.equal(Boolean(failure), outcome !== "usage");
     assert.ok(reports.length >= 2);
-    const record = reports.at(-1)!.records[0];
+    const record = reports.at(outcome === "usage-closed" ? -2 : -1)!.records[0];
     assert.equal(record.model, "resolved-model");
     assert.equal(record.totalTokens, 120);
     assert.equal(record.inputTokens, 100);
@@ -652,6 +686,40 @@ test("the Codex launch probes access, applies settings, and monitors the turn", 
       assert.equal(typeof record.completedAt, "number");
     }
   }
+  const reopened = new BoardCodexUsage(folder);
+  const lateAt = Math.floor(Date.now() / 1000 + 1) * 1000;
+  assert.equal(reopened.get(85, lateAt, resetTime).spent, 70);
+  assert.equal(reopened.get(85, lateAt, resetTime).reason, undefined);
+  async function recoverLate() {
+    const [candidate] = reopened.unresolved(lateAt);
+    assert.equal(candidate?.threadId, thread);
+    assert.equal(candidate.turnId, "turn-1");
+    assert.equal(candidate.completedAt, undefined);
+    const usage = new CodexTokenUsage(sample => reopened.observe(sample));
+    const recovered = await usage.recoverRollout(path, candidate.threadId, { id: candidate.turnId, status: "inProgress" });
+    assert.ok(recovered);
+    return recovered;
+  }
+  const second = rolloutSample(lateAt, 145, 60);
+  writeRollout(first, second);
+  const partial = await recoverLate();
+  assert.equal(partial.records[0].completedAt, undefined);
+  assert.equal(partial.records[0].dailyRecoveryPending, true);
+  assert.equal(reopened.get(85, lateAt, resetTime).spent, 85);
+  assert.equal(reopened.get(85, lateAt, resetTime).reason, "exhausted");
+  assert.equal(reopened.reconcile(partial).records.length, 0);
+  assert.equal(reopened.reconcile(await recoverLate()).records.length, 0);
+  writeRollout(first, second, {
+    type: "event_msg",
+    timestamp: new Date(lateAt).toISOString(),
+    payload: { type: "task_complete", turn_id: "turn-1" },
+  });
+  const final = await recoverLate();
+  assert.equal(final.records[0].completedAt, lateAt);
+  assert.equal(reopened.reconcile(final).records.length, 0);
+  const saved = new BoardCodexUsage(folder);
+  assert.equal(saved.get(85, lateAt, resetTime).spent, 85);
+  assert.deepEqual(saved.unresolved(lateAt), []);
   const recoveredReports: TokenUsageReport[] = [];
   const recoveredUsage = await startCodexRun(client("recover-usage"), folder, worktree, { ...task, codexThreadId: thread },
     undefined, async report => { recoveredReports.push(report); }, undefined,

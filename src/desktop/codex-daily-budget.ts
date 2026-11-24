@@ -91,7 +91,7 @@ type TurnCharge = Pick<ConfirmedTurnUsage, "tokens" | "counters"> & {
   latestAt?: number;
   recoveryPending?: boolean;
 };
-type RecoveryCharge = { threadId: string; turnId: string; completedAt: number; role?: CodexBudgetRole; task?: string };
+type RecoveryCharge = { threadId: string; turnId: string; completedAt?: number; role?: CodexBudgetRole; task?: string };
 type PendingTurn = TurnCharge & { increments: { at: number; tokens: number }[] };
 type OldJournal = {
   resets: number[];
@@ -259,12 +259,21 @@ export class BoardCodexUsage {
     }
     if (this.initialized || exists(this.path) || exists(join(this.folder, "live.json"))) {
       this.database(db => {
-        const rows = db.prepare("SELECT id, completed FROM turns WHERE recovery_pending = 1 AND completed >= ? ORDER BY completed, id");
-        for (const row of rows.iterate(since)) {
+        const rows = db.prepare(`
+          SELECT id, completed, completed AS recent FROM turns
+          WHERE recovery_pending = 1 AND completed >= ?
+          UNION ALL
+          SELECT id, completed,
+            (SELECT MAX(at) FROM increments WHERE turn = turns.id) AS recent FROM turns
+          WHERE recovery_pending = 1 AND completed IS NULL AND recent >= ?
+          ORDER BY recent, id
+        `);
+        for (const row of rows.iterate(since, since)) {
           const key = row.id as string;
           if (candidates.has(key)) continue;
           const [threadId, turnId] = JSON.parse(key) as [string, string];
-          candidates.set(key, { threadId, turnId, completedAt: row.completed as number });
+          const completedAt = typeof row.completed === "number" ? row.completed : undefined;
+          candidates.set(key, { threadId, turnId, completedAt });
         }
       });
     }
@@ -323,7 +332,8 @@ export class BoardCodexUsage {
     const increment = tokens - previous;
     turn.tokens = tokens;
     if (turn.completedAt === undefined && counters) turn.counters = counters;
-    if (increment > 0) {
+    // The first confirmed baseline dates the turn even if it establishes no spend.
+    if (increment > 0 || !known) {
       turn.increments.push({ at, tokens: increment });
       turn.latestAt = Math.max(turn.latestAt ?? at, at);
     }

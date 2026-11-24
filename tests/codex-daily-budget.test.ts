@@ -497,6 +497,7 @@ for (const legacy of [true, false]) {
       const usage = new CodexTokenUsage(snapshot => board.observe(snapshot));
       const [candidate] = board.unresolved(completedAt);
       assert.equal(candidate?.turnId, "turn");
+      assert.equal(candidate.completedAt, completedAt);
       const result = await usage.recoverRollout(path, candidate.threadId, {
         id: candidate.turnId, status: "completed", completedAt: candidate.completedAt / 1000,
       });
@@ -524,6 +525,22 @@ for (const legacy of [true, false]) {
     assert.deepEqual(new BoardCodexUsage(project).unresolved(completedAt), []);
   });
 }
+
+test("a dated zero baseline keeps a recent unconfirmed turn available after restart", t => {
+  const project = mkdtempSync(join(tmpdir(), "codex-budget-zero-base-"));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  mkdirSync(join(project, ".tasks"));
+  const ledger = new BoardCodexUsage(project);
+  const at = new Date(2026, 10, 24, 11).getTime();
+  const counters = { ...emptyTokenCounts(), totalTokens: 100, cachedInputTokens: 90 };
+  ledger.observe({ threadId: "thread", turnId: "old", tokens: 0, observedAt: at - 3 * 86_400_000, counters });
+  ledger.observe({ threadId: "thread", turnId: "recent", tokens: 0, observedAt: at, counters });
+  assert.equal(ledger.flush(), true);
+
+  const reopened = new BoardCodexUsage(project);
+  assert.deepEqual(reopened.unresolved(at), [{ threadId: "thread", turnId: "recent", completedAt: undefined }]);
+  assert.equal(reopened.get(100, at).spent, 0);
+});
 
 test("completion releases active state and an early flush durably saves the remaining live sample", t => {
   const project = mkdtempSync(join(tmpdir(), "codex-budget-release-"));
