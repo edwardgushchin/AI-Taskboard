@@ -572,7 +572,7 @@ function renderRunActivity(container, items, completed = false, durationMs, task
   }
   if (completed && nodes.length) {
     let label = () => {
-      if (context?.managerWork || context?.taskRunSegment) return t("ui.work_details_e9890a2e");
+      if (context?.managerWork || context?.taskRunSegment || context?.managerIncomplete) return t("ui.work_details_e9890a2e");
       if (!Number.isSafeInteger(durationMs) || durationMs < 0) return t("ui.completed_a863c619");
       const seconds = Math.floor(durationMs / 1000), minutes = Math.floor(seconds / 60);
       const unit = (value, name) => new Intl.NumberFormat(localization.locale, {style:"unit",unit:name,unitDisplay:"short"}).format(value);
