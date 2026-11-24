@@ -110,6 +110,8 @@ app.whenReady().then(async () => {
         items: [],
       }));
       const recent = Object.fromEntries(boardNames.map(name => [name, makeTurns(name + ' · свежая реплика ', 30)]));
+      const pageSize = 30;
+      const latestPage = {};
       api.boardQueue = async () => ({ ok: true, data: [] });
       api.boardHistory = async (project, cursor, view) => {
         if (view === 'goal-availability') return { ok: true, data: true };
@@ -125,8 +127,16 @@ app.whenReady().then(async () => {
           }));
           return { ok: true, data: { turns: [{ messages: [], items }], goalLogAvailable: true } };
         }
-        const turns = cursor ? makeTurns(project + ' · страница архива ' + cursor + ' · реплика ', 30) : recent[project];
-        const nextCursor = cursor === '2' ? null : cursor === '1' ? '2' : '1';
+        const history = [
+          ...makeTurns(project + ' · страница архива 2 · реплика ', pageSize),
+          ...makeTurns(project + ' · страница архива 1 · реплика ', pageSize),
+          ...recent[project],
+        ];
+        const endIndex = cursor ? history.findIndex(turn => turn.messages[0].clientId === cursor) : history.length;
+        const startIndex = Math.max(0, endIndex - pageSize);
+        const turns = history.slice(startIndex, endIndex);
+        const nextCursor = startIndex > 0 ? turns[0].messages[0].clientId : null;
+        if (!cursor) latestPage[project] = turns.map(turn => turn.messages[0].clientId);
         return { ok: true, data: { turns: structuredClone(turns), nextCursor } };
       };
       const tabs = boardNames.map(path => ({ path, name: path }));
@@ -187,8 +197,31 @@ app.whenReady().then(async () => {
         })()`);
         await settle();
         await check("Boolean(row('Orion · свежая реплика 29'))", "Orion loads its own dialogue");
+        const shiftedAnchor = "Orion · свежая реплика 4";
+        const shiftedKey = JSON.stringify(shiftedAnchor);
+        const previousOffset = await evaluate(`place(${shiftedKey}); offset(row(${shiftedKey}))`);
+        await check("!row('Orion · страница архива 1 · реплика 29')", "Orion has not loaded older history");
+        await evaluate(`(async () => {
+          await go('Atlas');
+          recent.Orion.push(...makeTurns('Orion · новые сообщения ', 12));
+          await go('Orion');
+        })()`);
+        await settle();
+        await check(`latestPage.Orion.length === pageSize && !latestPage.Orion.includes(${shiftedKey})`,
+          "The newest page moved past the saved row and its visible neighbours");
+        const restoredOffset = await evaluate(`row(${shiftedKey}) ? offset(row(${shiftedKey})) : null`);
+        assert.ok(restoredOffset !== null && Math.abs(restoredOffset - previousOffset) <= 1,
+          `Orion restores the row displaced by the page boundary: ${previousOffset} -> ${restoredOffset}`);
+        await evaluate("feed().querySelector('.board-chat-older').click()");
+        await settle();
+        await check(`Boolean(row('Orion · страница архива 1 · реплика 29')) &&
+          feed().querySelectorAll('[data-chat-anchor="user:Orion · свежая реплика 4"]').length === 1 &&
+          Math.abs(offset(row(${shiftedKey})) - ${previousOffset}) <= 1`,
+          "Loading older history from the retained page preserves the visible row without duplicating it");
         await evaluate("jump(feed().scrollHeight)");
+        await settle();
         await check("end()", "leave Orion at the end");
+        await check("Boolean(row('Orion · новые сообщения 11'))", "Orion refreshes the deferred page at the end");
         await evaluate("go('Atlas')");
         await settle();
         const after = await evaluate(`offset(row(${JSON.stringify(anchor)}))`);
@@ -246,10 +279,13 @@ app.whenReady().then(async () => {
         await check("!recorded.closed.isConnected && !boardViews.has('Atlas')", "closing Atlas removes the cached composer");
         await evaluate(`
           recorded.closed = undefined;
-          recent.Orion.pop();
+          recent.Orion.length = pageSize;
           update({ project: 'Atlas', board, tabs: tabs.slice(0, 1), managerUnread: [] });
         `);
-        results.push({ width, height: 800, pinned, anchor, before, after });
+        results.push({
+          width, height: 800, pinned, anchor, before, after,
+          shiftedPage: { anchor: shiftedAnchor, before: previousOffset, after: restoredOffset },
+        });
       }
     }
     const sources = ["src/desktop/renderer.js", "src/desktop/styles.css", "src/desktop/index.html", "scripts/check-chat.mjs"];
@@ -263,6 +299,8 @@ app.whenReady().then(async () => {
       command: "node scripts/check-chat.mjs --manager-board-position --artifacts .tasks/qa/T-0346",
       checks: [
         "Restored the same anchor in an older page across repeated project switches.",
+        "Restored a row displaced from the latest page before any older page was loaded.",
+        "Loaded older messages from the retained cursor without duplicating the visible row.",
         "Preserved the anchor through invalidation and prepending.",
         "Restored independent positions for Dialogue and Goal activity.",
         "Restored manual scroll to the top and the end with a new reply on a different board.",

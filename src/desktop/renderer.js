@@ -3564,6 +3564,15 @@ function draftComposer() {
         let delivered = recentDelivered;
         let oldImages = [];
         if (!unchanged) {
+          const deferWhileReading = () => {
+            if (!hasDialogueHistory || atEndOfHistory()) return false;
+            if (recentCursor === result.data.nextCursor && !olderPages.length && !loadingOlder) return false;
+            // Keep the mounted rows and their cursor together until the reader returns to the end.
+            historyInvalidated = true;
+            historyLoaded = true;
+            return true;
+          };
+          if (deferWhileReading()) return;
           const generation = historyGeneration;
           const canInstall = () => !disposed && !reloadAfterHistory &&
             generation === historyGeneration && canBrowseHistory();
@@ -3571,6 +3580,10 @@ function draftComposer() {
           const prepared = needsLiveState ? undefined : await prepareRecentHistory(turns, canInstall);
           if (!canInstall()) {
             if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
+            return;
+          }
+          if (deferWhileReading()) {
+            for (const tile of prepared?.page.querySelectorAll(".chat-attachment") ?? []) chatPreviews.unobserve(tile);
             return;
           }
           oldImages = [...log.querySelectorAll(".chat-attachments img")];
