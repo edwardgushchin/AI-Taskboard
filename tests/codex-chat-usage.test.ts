@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexRpc, stopCodexProcess } from "../src/desktop/codex-rpc.ts";
-import { isRoutingTimeout } from "../src/desktop/codex-routing-timeout.ts";
+import { isRoutingDiscoveryFailure } from "../src/desktop/codex-routing-retry.ts";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { boardProjectRulesPrompt, readBoardProjectRules, writeBoardProjectRules } from "../src/cli/board-agents.ts";
@@ -140,7 +140,7 @@ test("task discussion streams task usage before success, provider failure, or a 
     const reports: TokenUsageReport[] = [];
     const runtime = runInNewContext(stripTypeScriptTypes(source) + "\n({ replyToTask, reviewWithCodex })", {
       boardProjectRulesPrompt, reviewModeInstruction,
-      randomUUID, stopCodexProcess, isRoutingTimeout, codexThreadPattern,
+      randomUUID, stopCodexProcess, isRoutingDiscoveryFailure, codexThreadPattern,
       executorExpertTools, expertCommands, trackActiveRun, trackProvider, claimDiscussion, spawn, codexRpc, CodexTokenUsage, manualContext: () => "", readBoardSettings: () => ({}), locateBoard: (path: string) => path, responseLanguageInstructions, boardAgentInstructions, boardCodexArgs, managerCodexArgs, providerActions, boardWorklog, worklogReminder, worklogTool, withBoardMcp, process, setTimeout, clearTimeout, runActivity, runLog,
       githubReadTool, leadInstructions, phaseStageReporter, subagentInstructions,
       leadSkillInstructions: async () => [], watchTeamMail: () => () => {},
