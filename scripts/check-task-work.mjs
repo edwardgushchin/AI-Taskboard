@@ -45,9 +45,26 @@ function activity(id, type, title, text, seconds) {
   return { id, type, title, text, status: "completed", at: new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString() };
 }
 
-const command = activity("command", "commandExecution", "git status --short", "M  src/desktop/chat.js", 1);
+const longValue = "ПереносДлиннойСтроки".repeat(7);
+const examplePath = String.raw`G:\Projects\AI Taskboard\src\desktop\chat.js`;
+const codeLine = `const result = "${"abcdefghij".repeat(18)}";`;
+const messageText = [
+  `\tПодтверждён результат проверки. Файл ${examplePath}, команда \`git status\`.`,
+  `    ${longValue}`,
+  "",
+  "    Абзац с четырьмя пробелами.",
+  "",
+  "```js",
+  codeLine,
+  "```",
+].join("\n");
+const command = activity("command", "commandExecution", `git status --short -- "${examplePath}"`, [
+  "M  src/desktop/chat.js",
+  longValue,
+  ...Array.from({ length: 18 }, (_, index) => `Строка вывода ${index + 1}`),
+].join("\n"), 1);
 const tool = activity("tool", "mcpToolCall", "docs / lookup", "Documentation found", 2);
-const note = activity("note", "agentMessage", "", "Проверка завершена, результат сохранён.", 3);
+const note = activity("note", "agentMessage", "", messageText, 3);
 const finalReply = { ...activity("answer", "agentMessage", "", "Журнал проверен.", 4), phase: "final_answer" };
 const foreign = activity("previous", "commandExecution", "PREVIOUS SESSION", "PREVIOUS SESSION OUTPUT", 1);
 const discussionCommand = activity("standalone-command", "commandExecution", "STANDALONE COMMAND", "STANDALONE OUTPUT", 5);
@@ -217,6 +234,7 @@ app.whenReady().then(async () => {
       return png;
     };
     const dialogText = () => evaluate('document.querySelector("#task-chat-dialogue").textContent');
+    let reviewPages;
     const syncReviewPages = async () => {
       const pages = { latest: readReviewerChatPage(project, taskId) };
       for (let cursor = pages.latest.before; cursor;) {
@@ -224,6 +242,7 @@ app.whenReady().then(async () => {
         pages[cursor] = page;
         cursor = page.before;
       }
+      reviewPages = pages;
       await evaluate("window.reviewPages = " + JSON.stringify(pages) +
         '; api.reviewerChat = async (_id, before) => ({ ok: true, data: reviewPages[before ?? "latest"] }); void 0');
     };
@@ -240,12 +259,102 @@ app.whenReady().then(async () => {
     };
     const reviewItems = (index, at = new Date().toISOString()) => {
       const common = { at, status: "completed" };
+      const layoutFixture = index === 1 || index === 11;
+      const label = `Сообщение ревью ${index}`;
+      const output = `Вывод команды ${index}`;
       return [
-        { ...common, id: "review-message", type: "agentMessage", title: "", text: "Сообщение ревью " + index },
-        { ...common, id: "review-command", type: "commandExecution",
-          title: "git diff --check review-" + index, text: "Вывод команды " + index },
+        {
+          ...common, id: `review-message-${index}`, type: "agentMessage", title: "",
+          text: layoutFixture ? `${messageText}\n\n${label}` : label,
+        },
+        {
+          ...common, id: `review-command-${index}`, type: "commandExecution", title: `git diff --check review-${index}`,
+          text: layoutFixture ? `${output}\n${command.text}` : output,
+        },
       ];
     };
+    const measureTypography = (selector, read) => evaluate(`(() => {
+      const row = document.querySelector(${JSON.stringify(selector)});
+      if (!row) return { missing: ${JSON.stringify(selector)} };
+      return (${read})(row, document.querySelector("#task-chat-work"));
+    })()`);
+    const workMessageSelector = (item, attemptId) => {
+      const id = attemptId ? `${attemptId}::${item.id}` : item.id;
+      return `#task-chat-work [data-item="message:${id}"]`;
+    };
+    const dialogueTypography = () => measureTypography('#task-chat-dialogue [data-actor="agent"] .chat-text p', paragraph => {
+      const { fontFamily, fontSize, lineHeight } = getComputedStyle(paragraph);
+      return { fontFamily, fontSize, lineHeight };
+    });
+    const verifyTypography = async (item, dialogue, label, attemptId) => {
+      const result = await measureTypography(workMessageSelector(item, attemptId), (row, work) => {
+        const paragraph = row.querySelector("p");
+        const code = row.querySelector("pre code");
+        const inline = [...row.querySelectorAll("p code")].find(node => node.textContent === "git status");
+        const time = row.querySelector("time");
+        const pre = code?.closest("pre");
+        const style = paragraph && getComputedStyle(paragraph);
+        return {
+          prose: paragraph?.textContent,
+          paragraphs: [...row.querySelectorAll("p")].map(node => node.textContent),
+          typography: style && { fontFamily: style.fontFamily, fontSize: style.fontSize, lineHeight: style.lineHeight },
+          lines: style && Math.round(paragraph.getBoundingClientRect().height / parseFloat(style.lineHeight)),
+          inline: inline?.textContent,
+          inlineFont: inline && getComputedStyle(inline).fontFamily,
+          fenced: code?.textContent,
+          fencedFont: code && getComputedStyle(code).fontFamily,
+          codeWidth: pre?.clientWidth,
+          codeScroll: pre?.scrollWidth,
+          codeBlocks: row.querySelectorAll("pre").length,
+          viewport: [work.clientWidth, work.scrollWidth],
+          time: time?.dateTime,
+          timeText: time?.textContent,
+        };
+      });
+      assert.ok(result.prose?.includes(`Файл ${examplePath}, команда git status.`), JSON.stringify(result));
+      assert.ok(result.prose.includes(longValue));
+      assert.ok(result.paragraphs.includes("Абзац с четырьмя пробелами."));
+      assert.deepEqual(result.typography, dialogue);
+      assert.ok(result.lines > 2, JSON.stringify(result));
+      assert.equal(result.inline, "git status");
+      assert.equal(result.fenced, `${codeLine}\n`);
+      assert.match(result.inlineFont, /mono/i);
+      assert.match(result.fencedFont, /mono/i);
+      assert.equal(result.codeBlocks, 1);
+      assert.ok(result.codeScroll > result.codeWidth, JSON.stringify(result));
+      assert.equal(result.viewport[0], result.viewport[1]);
+      assert.equal(result.time, item.at);
+      assert.match(result.timeText, /^\d{2}:\d{2}$/);
+      record(`${label}: ${dialogue.fontFamily}, ${dialogue.fontSize}, интерлиньяж ${dialogue.lineHeight} как в «Диалоге». ` +
+        `Ширина ленты ${result.viewport.join(" = ")} px, ширина блока кода ${result.codeWidth} px, содержимого ${result.codeScroll} px.`);
+    };
+    const verifyCommand = async (title, output) => {
+      const result = await evaluate(`(() => {
+        const work = document.querySelector("#task-chat-work");
+        const detail = [...work.querySelectorAll(".chat-run-item")].find(item =>
+          item.querySelector(".chat-run-preview")?.textContent.trim() === ${JSON.stringify(title)});
+        const command = detail.querySelector(".chat-run-command");
+        const output = detail.querySelector(".chat-run-output");
+        output.scrollLeft = output.scrollWidth;
+        output.scrollTop = output.scrollHeight;
+        const result = {
+          open: detail.open, command: command.textContent, output: output.textContent,
+          fonts: [command, output].map(node => getComputedStyle(node).fontFamily),
+          scroll: [output.scrollLeft, output.scrollTop], viewport: [work.clientWidth, work.scrollWidth],
+        };
+        output.scrollLeft = 0;
+        output.scrollTop = 0;
+        return result;
+      })()`);
+      assert.equal(result.open, true);
+      assert.equal(result.command, title);
+      assert.equal(result.output, output);
+      for (const family of result.fonts) assert.match(family, /mono/i);
+      assert.ok(result.scroll.every(value => value > 0), JSON.stringify(result));
+      assert.equal(result.viewport[0], result.viewport[1]);
+      record(`Раскрытая команда и вывод сохранены целиком. Вывод прокручен внутри блока на ${result.scroll.join(" × ")} px.`);
+    };
+    let dialogue;
     const report = index => ({
       summary: "Итог ревью " + index,
       findings: index === 10 ? ["Исправьте вывод команды."] : [],
@@ -303,7 +412,9 @@ app.whenReady().then(async () => {
       await press("dialogue", "Enter");
       assert.ok((await dialogText()).includes(discussionAnswer.text));
       assert.ok((await dialogText()).includes(discussionCommand.title));
+      dialogue = await dialogueTypography();
       await press("work", "Space");
+      await verifyTypography(note, dialogue, "Живое сообщение исполнителя");
       record("Живой ответ отдельного чата и его команда видны в «Диалоге».");
     }
     const providerItems = async () => (await rendered())
@@ -325,6 +436,7 @@ app.whenReady().then(async () => {
       const sequence = current().history.length;
       await publish("run", [], thread, { sequence, threadId: thread, items: mixed, durationMs: 4_000 });
       await verifyWork();
+      await verifyTypography(note, dialogue, "Сохранённое сообщение исполнителя");
       assert.equal(await foldOpen(), true);
       await clickFold();
       assert.equal(await foldOpen(), false);
@@ -424,6 +536,7 @@ app.whenReady().then(async () => {
         await updateReviews();
         await openReviewCard(reviewCard);
         verifyReviewOrder(await reviewRows());
+        await verifyTypography(entries[0], dialogue, "Живое сообщение ревьюера", active.id);
         publish([...entries, {
           ...entries[0], id: "late", text: "Позднее событие ревью", at: atOffset(-1),
         }, {
@@ -443,6 +556,9 @@ app.whenReady().then(async () => {
         return report(11);
       });
       await updateReviews();
+      const latestReview = readReviewerChatPage(project, taskId).attempts.at(-1);
+      await verifyTypography(latestReview.items.find(item => item.id === "review-message-11"), dialogue,
+        "Сохранённое сообщение ревьюера", latestReview.id);
       const rows = await reviewRows();
       assert.equal(rows.filter(row => row.includes("Сообщение ревью 11")).length, 1);
       assert.equal(rows.filter(row => row.includes("Итог ревью 11")).length, 1);
@@ -456,8 +572,10 @@ app.whenReady().then(async () => {
     } else {
       await press("dialogue", "Enter");
       assert.ok((await dialogText()).includes(discussionAnswer.text));
+      dialogue = await dialogueTypography();
       await press("work", "Space");
       await verifyWork();
+      await verifyTypography(note, dialogue, "Сообщение исполнителя после перезапуска");
       assert.equal(await foldOpen(), true);
       assert.deepEqual(await evaluate(`[
         document.querySelector("#task-chat-work [data-item='message:note']").checkVisibility({ contentVisibilityAuto: true }),
@@ -476,6 +594,7 @@ app.whenReady().then(async () => {
         command.querySelector("summary").click();
         return command.open && command.innerText.includes("M  src/desktop/chat.js");
       })()`), true);
+      await verifyCommand(command.title, command.text);
       record("Первый показ сохранённого запуска раскрыт. Сообщение и сводка видимы, команда и инструмент свёрнуты. Мышь сворачивает запуск, Enter раскрывает.");
       record("После перезапуска сохранённый ответ отдельного чата остался в «Диалоге». Его журнал без ID сеанса отсутствует в «Ходе работы».");
       assert.equal(await evaluate('document.querySelectorAll(".expert-stage").length'), 2);
@@ -726,28 +845,50 @@ app.whenReady().then(async () => {
       assert.ok(Math.abs(await evaluate("reviewOffset()") - oldOffset) <= 1);
       const narrow = await capture("unified-review-narrow.png", 900, 800);
       record("После перезапуска из 11 попыток показаны последние десять. Подгрузка раскрыла старейшую с сообщением, командой, выводом и итогом. Обновление открытой карточки в 900 × 800 сохранило положение и раскрытие.");
+      const firstReview = Object.values(reviewPages).flatMap(page => page.attempts)
+        .find(attempt => attempt.items.some(item => item.id === "review-message-1"));
+      const firstMessage = firstReview.items.find(item => item.id === "review-message-1");
+      const firstCommand = firstReview.items.find(item => item.id === "review-command-1");
+      assert.equal(window.webContents.getZoomFactor(), 1);
+      const layoutCaptures = [];
+      for (const [width, height, filename] of [
+        [1280, 800, "work-messages-wide.png"],
+        [900, 700, "work-messages-narrow.png"],
+      ]) {
+        window.setContentSize(width, height);
+        await settle();
+        await openCommand(firstCommand.title);
+        await evaluate(`document.querySelector(${JSON.stringify(workMessageSelector(firstMessage, firstReview.id))})
+          .scrollIntoView({ block: "start" })`);
+        await settle();
+        await verifyTypography(firstMessage, dialogue, `Сохранённое сообщение ревьюера, ${width} × ${height}, масштаб 100%`, firstReview.id);
+        await verifyCommand(firstCommand.title, firstCommand.text);
+        layoutCaptures.push([filename, await capture(filename, width, height)]);
+      }
       const gitBase = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true });
       assert.equal(gitBase.status, 0, gitBase.stderr);
       const sha256 = data => createHash("sha256").update(data).digest("hex");
       const paths = [
         "src/desktop/chat.js", "src/desktop/renderer.js", "src/desktop/main.ts", "src/desktop/codex-chat.ts",
         "src/desktop/reviewer-chat.ts", "src/desktop/preload.cjs",
-        "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/styles.css", "src/cli/tasks.ts",
+        "src/desktop/locales/en.json", "src/desktop/locales/ru.json", "src/desktop/styles.css", "src/desktop/markdown.js", "src/cli/tasks.ts",
         "src/cli/model.ts", "src/cli/expert-team.ts", "scripts/check-task-work.mjs", "scripts/electron-check.mjs",
       ];
       writeFileSync(join(artifacts, "unified-review-check.txt"), [
-        "T-0339. Пройдена проверка Windows Electron и CLI",
-        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0339-folds",
+        "T-0365. Шрифт и перенос сообщений в Windows Electron",
+        "Команда: node scripts/check-task-work.mjs --artifacts .tasks/qa/T-0365",
         `Среда: ${process.platform} ${process.arch}; Node ${process.versions.node}; Electron ${process.versions.electron}; Chromium ${process.versions.chrome}.`,
         "Linux и macOS не запускались. Упаковка вне изменений.",
         "Два процесса Electron, штатный рендерер, синтетические уведомления провайдера, реальная CLI и файловое хранилище ревью на временной доске.",
         "Ответы IPC для страниц ревью поданы в тестовый рендерер из readReviewerChatPage.",
+        "В сохранённом журнале T-0156 воспроизведено начало обычного сообщения с TAB. Markdown-it по умолчанию разбирает его как code_block. В лентах работы карточки и этапа отключено правило неявного кода по отступу. Явные блоки с ограждением и встроенный код по-прежнему размечаются как код.",
         ...checks.map((check, index) => `${index + 1}. ${check}`),
         `База рабочей копии: ${gitBase.stdout.trim()}`,
         "SHA-256 исходников UTF-8, CRLF приведены к LF как при хранении в Git:",
         ...paths.map(path => `${sha256(readFileSync(join(root, path), "utf8").replaceAll("\r\n", "\n"))}  ${path}`),
         `${sha256(wide)}  unified-review-wide.png (PNG, исходные байты)`,
         `${sha256(narrow)}  unified-review-narrow.png (PNG, исходные байты)`,
+        ...layoutCaptures.map(([name, png]) => `${sha256(png)}  ${name} (PNG, исходные байты)`),
         "",
       ].join("\n"));
     }

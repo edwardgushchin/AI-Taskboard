@@ -18,13 +18,14 @@ test("comments and priority changes retain saved manual executor requests", t =>
   t.after(() => rmSync(project, { recursive: true, maxRetries: 5 }));
   initializeBoard(locateBoard(project, true), () => {});
   const cliPath = fileURLToPath(new URL("../src/cli/main.ts", import.meta.url));
-  const taskCommand = (args: string[], input?: Record<string, unknown>): Task => {
+  const command = (args: string[], input?: Record<string, unknown>) => {
     const result = spawnSync(process.execPath,
       [cliPath, "--project", project, "--json", ...args, ...(input ? ["--stdin"] : [])],
       { encoding: "utf8", input: input && JSON.stringify(input), windowsHide: true });
     assert.equal(result.status, 0, result.stdout || result.stderr);
     return JSON.parse(result.stdout).data;
   };
+  const taskCommand = (args: string[], input?: Record<string, unknown>): Task => command(args, input);
   const { id } = taskCommand(["create"], plannedDraft({
     title: "Manual first launch", criteria: ["Keep the assigned directory"], workingDirectory: project,
   }));
@@ -64,6 +65,19 @@ test("comments and priority changes retain saved manual executor requests", t =>
   const preserved = queued();
   assert.ok(preserved && matchesQueuedExecutor(preserved, promoted));
   assert.ok(matchesQueuedExecutor(preserved, linked));
+
+  const question = command(["expert-message", id], {
+    to: "manager", kind: "question", text: "Continue with the current fixture?",
+  });
+  const reply = { actor: "manager", to: id, replyTo: question.sequence, text: "Yes, continue." };
+  const result = command(["expert-message", id], reply);
+  assert.deepEqual(command(["expert-message", id], reply), result);
+  const inbox = command(["expert-inbox", id], { afterSequence: question.sequence });
+  assert.deepEqual(inbox.messages.map((mail: { replyTo: number }) => mail.replyTo), [question.sequence]);
+  const fresh = taskCommand(["show", id]);
+  assert.equal(fresh.codexThreadId, codexThreadId);
+  assert.equal(fresh.revision, promoted.revision);
+  assert.deepEqual(queued(), preserved);
 });
 
 test("write probe retry persists its delay and respects shared slots and cancellation", t => {

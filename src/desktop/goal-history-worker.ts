@@ -1,13 +1,18 @@
-import { parentPort } from "node:worker_threads";
-import { GoalHistoryIndex, hasGoalHistory } from "./manager-history.ts";
+import { parentPort, workerData } from "node:worker_threads";
+import { GoalHistoryIndex, hasGoalHistory, readManagerLocalPage } from "./manager-history.ts";
 
 const port = parentPort!;
-const index = new GoalHistoryIndex();
+const index = workerData === "work" ? new GoalHistoryIndex() : undefined;
 port.on("message", ({ id, project, cursor, hasProvider, availabilityOnly }) => {
   try {
-    const result = availabilityOnly
-      ? { goalLogAvailable: hasGoalHistory(project) }
-      : index.read(project, cursor, hasProvider);
+    let result;
+    if (!index) {
+      result = readManagerLocalPage(project, cursor, "chat", hasProvider);
+    } else if (availabilityOnly) {
+      result = { goalLogAvailable: hasGoalHistory(project) };
+    } else {
+      result = index.read(project, cursor, hasProvider);
+    }
     port.postMessage({ id, result });
   } catch (error) {
     port.postMessage({ id, error: (error as Error).message });
