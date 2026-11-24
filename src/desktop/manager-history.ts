@@ -66,6 +66,7 @@ type Message = Omit<NonNullable<BoardActivity["userMessage"]>, "files"> & {
   clientId?: string; at?: string;
   files: { name: string; url?: string; link?: import("../cli/attachment-links.ts").FileLink }[];
 };
+type ProviderTurn = { threadId: string; clientId: string; turnId?: string };
 type Run = {
   message?: Message;
   items: BoardActivity[];
@@ -74,7 +75,8 @@ type Run = {
   lane?: "chat" | "work" | "notice";
   goalId?: string;
   outcome?: { status: "running" | "completed" | "interrupted"; reason?: string };
-  provider?: { threadId: string; clientId: string; turnId?: string };
+  provider?: ProviderTurn;
+  recoveryProviders?: ProviderTurn[];
 };
 type Turn = { messages: Message[]; items: BoardActivity[]; durationMs?: number; lane?: Run["lane"]; goalId?: string;
   outcome?: Run["outcome"]; recovery?: string };
@@ -294,12 +296,16 @@ export function completedManagerAnswer(items: BoardActivity[]) {
     ((item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) || item.generatedImage?.file));
 }
 
+export function managerHistoryFile(startedAt: number, id: string) {
+  return String(startedAt).padStart(13, "0") + "-" + id + ".json";
+}
+
 export function saveManagerHistory(project: string, startedAt: number, id: string, run: Run) {
   if (!codexThreadPattern.test(id)) throw new Error("Invalid manager history ID.");
   const board = join(project, ".tasks");
   directory(board);
   const folder = join(board, "manager-chat");
-  const file = String(startedAt).padStart(13, "0") + "-" + id + ".json";
+  const file = managerHistoryFile(startedAt, id);
   return withRuntimeLock(board, () => {
     directory(folder, true);
     const path = join(folder, file);

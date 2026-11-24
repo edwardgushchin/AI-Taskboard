@@ -65,7 +65,7 @@ import { routingRetryDelayMs } from "./codex-routing-timeout.ts";
 import { reviewDecisionSequence } from "../cli/expert-team.ts";
 import { readReviewerChatPage, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
-import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
@@ -2389,9 +2389,16 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
         if (entries.some(entry => entry.task === "manager:dialogue")) {
           return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
         }
+        const jobs = listQueuedMessages(directory);
+        const pendingWrite = jobs.find(job => job.acceptedHistory &&
+          managerHistoryFile(job.acceptedHistory.startedAt, job.acceptedHistory.id) === draft);
+        if (pendingWrite) {
+          writeJson(join(directory, pendingWrite.id + ".json"), { ...pendingWrite, failed: undefined });
+          return { ok: true as const, data: pendingWrite.id };
+        }
         const original = readManagerRecovery(project, draft);
         if (!original) return { ok: true as const, data: null };
-        const existing = listQueuedMessages(directory).find(job => job.recovery === draft);
+        const existing = jobs.find(job => job.recovery === draft);
         const jobId = existing?.id ?? randomUUID();
         const files = original.message.files.flatMap(file => {
           const image = file.url?.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i);
@@ -3178,6 +3185,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       return;
     }
     if (!(historyAccepted && historyMessage) && !items.length) return false;
+    const recoveryProviders = original?.recoveryProviders ?? [];
     const record: NonNullable<QueuedBoardMessage["acceptedHistory"]> = {
       startedAt: original?.startedAt ?? startedAt,
       id: original?.id ?? managerRun.id,
@@ -3189,7 +3197,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         lane,
         goalId: goal ? goalId : undefined,
         outcome,
-        provider: original?.provider ?? providerTurn,
+        provider: original ? original.provider : providerTurn,
+        recoveryProviders: original && providerTurn ? [...recoveryProviders, providerTurn] : original?.recoveryProviders,
       },
     };
     try {
@@ -3201,7 +3210,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       if (deliveryPath) {
         try {
           runtimeTransaction(project, () => {
-            const pending = readQueuedMessage(deliveryPath);
+            // A successful running-state write may have removed this job already.
+            const pending = readQueuedMessage(deliveryPath) ?? (deliveryPath === queuedPath ? queued : undefined);
             if (pending) writeJson(deliveryPath, { ...pending, acceptedHistory: record, failed: true });
           });
         } catch (queueError) {
@@ -3344,8 +3354,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         return { ok: true as const, data: { answer: "", changes } };
       }
       requestText = original.message.text;
-      const restored = await restoreAnswer(original.provider);
-      if (restored) return restored;
+      const references = [original.provider, ...(original.recoveryProviders ?? []).toReversed()];
+      for (const reference of references) {
+        const restored = await restoreAnswer(reference);
+        if (restored) return restored;
+      }
     }
     let ownerObjective = goal === true ? requestText : stored?.ownerObjective;
     let finishConfiguredTurn = false;

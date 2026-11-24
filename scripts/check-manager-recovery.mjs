@@ -30,7 +30,7 @@ const messages = {
   overload: "Создай карточку для проверки очереди",
   restore: "Подведи итог проверки очереди",
   denied: "Смоделируй окончательный отказ",
-  drop: "Смоделируй тишину после принятия",
+  drop: "Проверь варианты оптимизации кэша",
   delayed: "Ответь с задержкой",
   stop: "Дождись команды остановки",
   next: "Ответь на следующее сообщение",
@@ -40,6 +40,11 @@ const messages = {
 const title = "Проверка очереди";
 const draft = plannedDraft({
   title, description: "Карточка для проверки повторного действия.", criteria: ["Создана одна карточка."],
+  tags: ["проверка"],
+});
+const cacheTitle = "Оптимизация кэша";
+const cacheDraft = plannedDraft({
+  title: cacheTitle, description: "Сравнить варианты кэширования.", criteria: ["Оценены варианты."],
   tags: ["проверка"],
 });
 const success = "Ход проверен и завершён.";
@@ -61,7 +66,7 @@ function provider() {
   const { spawnSync } = require("node:child_process");
   const { createInterface } = require("node:readline");
   const [log, inputs, ...flags] = process.argv.slice(2);
-  const { messages, draft, success, restored, reconciled, rejected, capacity } = JSON.parse(inputs);
+  const { messages, draft, cacheDraft, success, restored, reconciled, rejected, capacity } = JSON.parse(inputs);
   let threadId, turnId, clientId, interruptTimer, mutation, prompt;
   const send = event => console.log(JSON.stringify(event));
   const record = (event, details = {}) => appendFileSync(log, JSON.stringify({
@@ -136,12 +141,14 @@ function provider() {
       clientId = params.clientUserMessageId;
       record(method, { attempt, sandbox: params.sandboxPolicy?.type });
       send({ id, result: { turn: { id: turnId, status: "inProgress" } } });
-      if (prompt === messages.overload) {
+      if (prompt === messages.overload || prompt === messages.drop) {
         activity();
         mutation = attempt === 1 ? "original" : "safe";
-        send({ id: 951, method: "item/tool/call", params: { threadId, turnId, callId: randomUUID(), tool: "task_create",
-          arguments: draft } });
-        if (attempt === 1) {
+        send({ id: 951, method: "item/tool/call", params: {
+          threadId, turnId, callId: randomUUID(), tool: "task_create",
+          arguments: prompt === messages.drop ? cacheDraft : draft,
+        } });
+        if (attempt === 1 && prompt === messages.overload) {
           notice("error", { willRetry: true, error: { message: capacity } });
           interruptTimer = setTimeout(() => {
             final(success);
@@ -160,7 +167,7 @@ function provider() {
           final(success);
           done("completed");
         }, 1200);
-      } else if (prompt === messages.stop || prompt === messages.drop) {
+      } else if (prompt === messages.stop) {
         activity();
       } else {
         final(reconciled);
@@ -200,7 +207,7 @@ app.setPath("userData", profile);
 app.disableHardwareAcceleration();
 app.requestSingleInstanceLock = () => true;
 globalThis.managerRecoveryClient = {
-  path: node, args: [fake, transcript, JSON.stringify({ messages, draft, success, restored, reconciled, rejected, capacity })],
+  path: node, args: [fake, transcript, JSON.stringify({ messages, draft, cacheDraft, success, restored, reconciled, rejected, capacity })],
   windowsSandbox: "mxc",
 };
 
@@ -278,6 +285,22 @@ async function clickRecovery(window) {
     const button = controls.at(-1);
     button?.click();
     return Boolean(button);
+  })()`);
+}
+async function cacheTimeout(window, click = false) {
+  return evaluate(window, `(() => {
+    const shouldClick = ${JSON.stringify(click)};
+    const log = document.querySelector(${JSON.stringify(logSelector)});
+    const status = [...log?.querySelectorAll(".manager-recovery") ?? []].find(node => {
+      const message = node.closest(".chat-run")?.previousElementSibling;
+      return message?.innerText?.includes(${JSON.stringify(messages.drop)}) &&
+        node.innerText.includes(${JSON.stringify(timeout)}) &&
+        !node.innerText.includes(${JSON.stringify(capacity)});
+    });
+    const button = status?.querySelector("button");
+    if (!button || (shouldClick && button.disabled)) return false;
+    if (shouldClick) button.click();
+    return true;
   })()`);
 }
 async function capture(window, name) {
@@ -378,7 +401,8 @@ void app.whenReady().then(async () => {
     await send(window, messages.denied);
     await until(async () => settled() && await contains(window, rejected), "provider rejected");
     await send(window, messages.drop);
-    await until(async () => settled() && await contains(window, messages.drop, timeout), "plain connection timeout");
+    await until(async () => settled() && await cacheTimeout(window), "plain connection timeout");
+    assert.equal(cli(project, ["list", "--compact"]).tasks.filter(task => task.title === cacheTitle).length, 1);
     await send(window, messages.next);
     await until(async () => settled() && replyCount(await outcomes(window), messages.next).length === 1, "next ordinary request");
     const turnsBeforeRestart = await outcomes(window);
@@ -401,8 +425,32 @@ void app.whenReady().then(async () => {
         lane: "chat", message: { text: prompt, files: [], at }, items, durationMs,
       }));
     }
+    await until(async () => await contains(window, messages.cache) && await cacheTimeout(window),
+      "same cache timeout after background history refresh");
+    await api(twin, "selectTab", other);
+    await until(async () => (await api(twin, "bootstrap")).board?.project === other, "other board selected after cache timeout");
+    await api(twin, "selectTab", project);
+    await prepare(twin);
+    await until(() => cacheTimeout(twin), "same cache timeout after switching back");
   } else {
     await until(() => contains(window, restored, timeout, messages.cache), "restored transcript after Electron restart");
+    await until(() => cacheTimeout(window), "same cache timeout after Electron restart");
+    const applied = cli(project, ["list", "--compact"]).tasks.filter(task => task.title === cacheTitle);
+    assert.equal(applied.length, 1);
+    assert.ok(await cacheTimeout(window, true));
+    await until(async () => settled() && replyCount(await outcomes(window), messages.drop).length === 1,
+      "one answer for the cache request after recovery");
+    const cacheTurns = (await outcomes(window)).filter(turn => turn.messages.some(message => message.text === messages.drop));
+    assert.equal(cacheTurns.flatMap(turn => turn.messages).length, 1);
+    assert.equal(cacheTurns[0].outcome.status, "completed");
+    assert.equal(cacheTurns[0].recovery, undefined);
+    assert.equal(starts(messages.drop).length, 2);
+    assert.equal(starts(messages.drop)[1].sandbox, "readOnly");
+    const blocked = snapshot().filter(event => event.event === "mutation" && event.prompt === messages.drop && event.safe);
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0].result?.success, false);
+    const after = cli(project, ["list", "--compact"]).tasks.filter(task => task.title === cacheTitle);
+    assert.deepEqual(after.map(task => task.id), applied.map(task => task.id));
     const turns = await outcomes(window);
     assert.equal(replyCount(turns, messages.restore).length, 1);
     const legacy = turns.filter(turn => turn.messages.some(message => [messages.legacy, messages.cache].includes(message.text)));
@@ -447,7 +495,8 @@ void app.whenReady().then(async () => {
       "- Провайдер с сохранённым итогом разорвал соединение. Из его истории восстановился один ответ без нового запуска. Ответ сохранился после перезапуска Electron.",
       "- Проверены возобновившийся провайдер, окончательный отказ, отдельный тайм-аут без ошибки перегрузки, штатная кнопка остановки и обычное следующее сообщение.",
       "- После тайм-аута, восстановления и остановки проверено завершение процессов App Server и освобождение записи manager:dialogue.",
-      "- После смены проекта причина тайм-аута осталась в ленте. Для двух синтетических старых реплик по T-0001 и старой реплики про оптимизацию кэша проверен повтор с точным исходным текстом и без выдуманной диагностики.",
+      "- Для одной новой реплики об оптимизации кэша причина обычного тайм-аута осталась видна после фонового обновления, смены проекта и перезапуска Electron. Кнопка этой реплики восстановила ровно один итог. Повторное создание карточки отклонено, исходная карточка сохранила свой ID.",
+      "- Для двух синтетических старых реплик по T-0001 и старой реплики про оптимизацию кэша проверен повтор с точным исходным текстом без выдуманной диагностики.",
       "- Linux и macOS не запускались. Стенд использует тот же JavaScript и IPC, но Windows-поведение окон и упакованная сборка на других ОС здесь не проверены.",
       "",
       ...paths.map(path => `- \`${digest(path)}\` \`${path}\``),

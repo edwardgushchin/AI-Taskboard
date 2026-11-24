@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, hash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
@@ -31,7 +31,7 @@ import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desk
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import {
-  completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
+  completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerWorkItems,
   readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
   saveManagerHistory, sendGoalMessage,
 } from "../src/desktop/manager-history.ts";
@@ -124,6 +124,7 @@ function fixture(t: TestContext) {
   const idleGoalActions: BoardGoalAction[] = [];
   let providerHistoryReads = 0;
   let savedTurn: { items: { type: string; phase: string; text: string }[] } | undefined;
+  let savedTurnId: string | undefined;
   const managerTurnReads: string[] = [];
   let legacyHistory: (cursor: string | null) => ReturnType<typeof readBoardHistory> = async () => {
     throw new Error("Codex history unavailable.");
@@ -172,12 +173,12 @@ function fixture(t: TestContext) {
     reviewModeReplyTarget, setReviewModeFromChat,
     reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
+    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread,
     managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
     readManagerTurn: async (_profile: string, _project: string, reference: { turnId?: string }) => {
       managerTurnReads.push(reference.turnId ?? "");
-      return savedTurn;
+      return !savedTurnId || savedTurnId === reference.turnId ? savedTurn : undefined;
     },
     send() {},
     notifyRunChange() {},
@@ -424,7 +425,10 @@ function fixture(t: TestContext) {
     stop: () => handlers.get("board:stopOrchestrator")!({ sender }),
     history: (cursor?: string, view?: string) => handlers.get("board:history")!({ sender }, project, cursor, view),
     setLegacyHistory: (reader: typeof legacyHistory) => { legacyHistory = reader; },
-    setSavedTurn: (turn: typeof savedTurn) => { savedTurn = turn; },
+    setSavedTurn: (turn: typeof savedTurn, id?: string) => {
+      savedTurn = turn;
+      savedTurnId = id;
+    },
     managerTurnReads,
     markRead: (ids: string[], board = project) => handlers.get("board:readManagerMessages")!({ sender }, board, ids),
     providerHistoryReads: () => providerHistoryReads,
@@ -2304,36 +2308,81 @@ test("an accepted manager message remains durable when writing history fails", a
   assert.ok(turn.recovery);
 });
 
-test("an interrupted recovery keeps the original provider turn available", async t => {
+test("an interrupted manager turn preserves its outcome when the running state was already saved", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
-  const text = "Recover the original answer";
+  const text = "Keep the reason for this interruption";
   const { data: id } = await f.queue("add", undefined, text, false, []);
-  const first = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+  const root = join(f.project, ".tasks");
+  const history = join(root, "manager-chat");
+  const backup = join(root, "manager-chat-saved");
+  let recovery: string | undefined;
+  const result = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
     session!.acceptTurn!(f.dialogueId, "original-turn");
-    throw new Error("Original connection closed.");
+    assert.equal((await f.queue("list")).data.length, 0);
+    const [running] = readManagerHistory(f.project, null, "chat")!.turns;
+    assert.equal(running.outcome?.status, "running");
+    recovery = running.recovery;
+    await rename(history, backup);
+    await writeFile(history, "Block only the final history write.");
+    throw new Error("Connection closed after saving the running state.");
   }, [], false, id);
-  assert.match(first.data.error, /Original connection closed/);
-  const [original] = readManagerHistory(f.project, null, "chat")!.turns;
-  const retry = await f.queue("recover", undefined, original.recovery);
-  const interrupted = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
-    session!.acceptTurn!(f.dialogueId, "recovery-turn");
-    throw new Error("Recovery connection closed.");
-  }, [], false, retry.data);
-  assert.match(interrupted.data.error, /Recovery connection closed/);
-  const [pending] = readManagerHistory(f.project, null, "chat")!.turns;
-  assert.equal(pending.recovery, original.recovery);
+  assert.equal(result.data.keepQueued, true);
+  assert.match(result.data.error, /Connection closed after saving the running state/);
+  const [queued] = (await f.queue("list")).data;
+  assert.equal(queued.id, id);
+  assert.equal(queued.historyPending, true);
+  assert.equal(queued.failed, true);
 
-  f.setSavedTurn({ items: [{ type: "agentMessage", phase: "final_answer", text: "Original answer restored." }] });
-  const recover = await f.queue("recover", undefined, pending.recovery);
-  const restored = await f.run(text, async () => assert.fail("Use the original saved answer"), [], false, recover.data);
-  assert.equal(restored.data.answer, "Original answer restored.");
-  assert.deepEqual(f.managerTurnReads, ["original-turn", "original-turn", "recovery-turn", "original-turn"]);
+  rmSync(history);
+  await rename(backup, history);
+  assert.ok(recovery);
+  assert.equal((await f.queue("recover", undefined, recovery)).data, id);
+  const saved = await f.run(text, async () => assert.fail("Recover the saved outcome without a provider request"), [], false, id);
+  assert.equal(saved.ok, true, saved.error?.message);
+  assert.equal((await f.queue("list")).data.length, 0);
   const { turns } = readManagerHistory(f.project, null, "chat")!;
   assert.equal(turns.length, 1);
-  assert.equal(turns[0].messages.length, 1);
-  assert.equal(turns[0].items.filter(item => item.phase === "final_answer").length, 1);
+  assert.deepEqual(turns[0].messages.map(message => message.text), [text]);
+  assert.equal(turns[0].outcome?.status, "interrupted");
+  assert.match(turns[0].outcome?.reason ?? "", /Connection closed after saving the running state/);
 });
+
+for (const savedTurnId of ["original-turn", "recovery-turn"]) {
+  test("an interrupted recovery restores the late answer from " + savedTurnId, async t => {
+    const f = fixture(t);
+    await f.cli(["init"]);
+    const text = "Recover the original answer";
+    const { data: id } = await f.queue("add", undefined, text, false, []);
+    const first = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+      session!.acceptTurn!(f.dialogueId, "original-turn");
+      throw new Error("Original connection closed.");
+    }, [], false, id);
+    assert.match(first.data.error, /Original connection closed/);
+    const [original] = readManagerHistory(f.project, null, "chat")!.turns;
+    const retry = await f.queue("recover", undefined, original.recovery);
+    const interrupted = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+      session!.acceptTurn!(f.dialogueId, "recovery-turn");
+      throw new Error("Recovery connection closed.");
+    }, [], false, retry.data);
+    assert.match(interrupted.data.error, /Recovery connection closed/);
+    const [pending] = readManagerHistory(f.project, null, "chat")!.turns;
+    assert.equal(pending.recovery, original.recovery);
+
+    const answer = "Saved answer restored from " + savedTurnId;
+    f.setSavedTurn({ items: [{ type: "agentMessage", phase: "final_answer", text: answer }] }, savedTurnId);
+    const recover = await f.queue("recover", undefined, pending.recovery);
+    const restored = await f.run(text, async () => assert.fail("Use the original saved answer"), [], false, recover.data);
+    assert.equal(restored.data.answer, answer);
+    const expected = ["original-turn", "original-turn", "recovery-turn", "original-turn"];
+    if (savedTurnId === "recovery-turn") expected.push("recovery-turn");
+    assert.deepEqual(f.managerTurnReads, expected);
+    const { turns } = readManagerHistory(f.project, null, "chat")!;
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].messages.length, 1);
+    assert.equal(turns[0].items.filter(item => item.phase === "final_answer").length, 1);
+});
+}
 
 test("an interrupted manager request preserves the durable queue until Codex records the message", async t => {
   const f = fixture(t);
