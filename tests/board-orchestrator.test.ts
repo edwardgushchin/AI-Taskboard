@@ -31,8 +31,8 @@ import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desk
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import {
-  goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
-  readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+  completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
+  readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
   saveManagerHistory, sendGoalMessage,
 } from "../src/desktop/manager-history.ts";
 import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
@@ -111,6 +111,7 @@ function fixture(t: TestContext) {
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
     enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
     finishTurn?: () => boolean;
+    acceptTurn?: (thread: string, turn: string) => void; retrying?: (reason: string) => void;
     role?: string; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
@@ -122,6 +123,7 @@ function fixture(t: TestContext) {
   const chatBinding = join(project, ".tasks", "manager-conversation.json");
   const idleGoalActions: BoardGoalAction[] = [];
   let providerHistoryReads = 0;
+  let savedTurn: { items: { type: string; phase: string; text: string }[] } | undefined;
   let legacyHistory: (cursor: string | null) => ReturnType<typeof readBoardHistory> = async () => {
     throw new Error("Codex history unavailable.");
   };
@@ -169,9 +171,9 @@ function fixture(t: TestContext) {
     reviewModeReplyTarget, setReviewModeFromChat,
     reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
-    managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
-    saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
+    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
+    managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
+    saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction, readManagerTurn: async () => savedTurn,
     send() {},
     notifyRunChange() {},
     tokenUsageQueue: () => ({
@@ -245,7 +247,9 @@ function fixture(t: TestContext) {
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,
       _tools: unknown, instructions: string, _signal: AbortSignal,
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
-        role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
+        role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; recovery?: boolean;
+        access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
+        onTurnAccepted?: (thread: string, turn: string) => void; onProviderRetry?: (reason: string) => void;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
         finishGoalTurn?: () => boolean;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
@@ -284,7 +288,13 @@ function fixture(t: TestContext) {
         "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
-      assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
+      if (session.recovery) {
+        assert.equal(session.readOnly, true);
+        assert.equal(session.separateTurn, true);
+        assert.deepEqual(Array.from(_tools as { name: string }[], tool => tool.name).sort(), ["board_list", "task_show"]);
+        assert.equal(session.mcpTools.length, 0);
+      } else {
+        assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
         [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || (!name.startsWith("project_git_") && !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
@@ -296,11 +306,14 @@ function fixture(t: TestContext) {
           : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
           !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
+        ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
+          !prompt.startsWith("AI Taskboard queue:") ? ["board_import_project_rules"] : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
           !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
           ["task_set_review_mode"] : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
-      if (reviewTurn) {
+      }
+      if (reviewTurn && !session.recovery) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
         assert.equal(session.attachmentContext, undefined);
         assert.equal(session.separateTurn, true);
@@ -314,6 +327,7 @@ function fixture(t: TestContext) {
           controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
           role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access,
           confirmApproval: session.confirmApproval, finishTurn: session.finishGoalTurn,
+          acceptTurn: session.onTurnAccepted, retrying: session.onProviderRetry,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
@@ -401,6 +415,7 @@ function fixture(t: TestContext) {
     stop: () => handlers.get("board:stopOrchestrator")!({ sender }),
     history: (cursor?: string, view?: string) => handlers.get("board:history")!({ sender }, project, cursor, view),
     setLegacyHistory: (reader: typeof legacyHistory) => { legacyHistory = reader; },
+    setSavedTurn: (turn: typeof savedTurn) => { savedTurn = turn; },
     markRead: (ids: string[], board = project) => handlers.get("board:readManagerMessages")!({ sender }, board, ids),
     providerHistoryReads: () => providerHistoryReads,
     pendingQuestion: () => runtime.managerQuestion(project)?.view,
@@ -2181,6 +2196,69 @@ test("dialogue results filter coordination and do not add it to the goal log", a
   assert.equal(readManagerHistory(f.project)!.turns.flatMap(turn => turn.items).filter(item => item.messages?.length).length, 9);
 });
 
+test("manager recovery uses the selected saved reply and protects applied changes", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const text = "Create a draft for caching";
+  const { data: id } = await f.queue("add", undefined, text, false, []);
+  const result = await f.run(text, async (act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    session!.acceptTurn!(f.dialogueId, "original-turn");
+    assert.equal((await f.queue("list")).data.length, 0);
+    const created = await act("task_create", plannedDraft({ title: "Cache", tags: ["Performance"] }));
+    assert.equal(created.ok, true, created.error?.message);
+    session!.retrying!("Selected model is at capacity.");
+    throw new Error("Codex did not respond in time.");
+  }, [], false, id);
+  assert.equal(result.ok, true, result.error?.message);
+  const readTurns = () => readManagerHistory(f.project, null, "chat")!.turns;
+  const [original] = readTurns();
+  assert.equal(original.outcome?.status, "interrupted");
+  assert.match(original.outcome?.reason ?? "", /did not respond in time.*at capacity/s);
+  assert.ok(original.recovery);
+  for (const invalid of ["../" + original.recovery, original.recovery + ".json"]) {
+    assert.equal((await f.queue("recover", undefined, invalid)).data, null);
+  }
+  const requested = await f.queue("recover", undefined, original.recovery);
+  assert.equal((await f.queue("recover", undefined, original.recovery)).data, requested.data);
+  const retried = await f.run(text, async (act, prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    assert.equal(prompt, text);
+    const listed = await act("board_list", {});
+    assert.equal(listed.data.tasks.length, 1);
+    const blocked = await act("task_create", { title: "Cache", tags: ["Performance"] });
+    assert.equal(blocked.error.code, "RECOVERY_READ_ONLY");
+    session!.acceptTurn!(f.dialogueId, "recovery-turn");
+    return { text: "The draft already exists." };
+  }, [], false, requested.data);
+  assert.equal(retried.data?.answer, "The draft already exists.", retried.error?.message ?? retried.data?.error);
+  const [restored] = readTurns();
+  assert.equal(readTurns().length, 1);
+  assert.deepEqual(restored.messages, original.messages);
+  assert.equal(restored.items.filter(item => item.phase === "final_answer").length, 1);
+  assert.equal(restored.outcome?.status, "completed");
+  assert.equal(restored.recovery, undefined);
+  assert.equal((await f.cli(["list", "--compact"])).data.tasks.length, 1);
+});
+
+test("manager recovers a provider final after losing the connection", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const text = "Give me the board summary";
+  const { data: id } = await f.queue("add", undefined, text, false, []);
+  const result = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    session!.acceptTurn!(f.dialogueId, "original-turn");
+    f.setSavedTurn({ items: [{ type: "agentMessage", phase: "final_answer", text: "The summary is ready." }] });
+    throw new Error("Connection closed.");
+  }, [], false, id);
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(result.data.answer, "The summary is ready.");
+  const { turns } = readManagerHistory(f.project, null, "chat")!;
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].messages.length, 1);
+  assert.equal(turns[0].items.length, 1);
+  assert.equal(turns[0].outcome?.status, "completed");
+  assert.equal(turns[0].recovery, undefined);
+});
+
 test("an interrupted manager request preserves the durable queue until Codex records the message", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
@@ -2188,6 +2266,7 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   const { data: id } = await f.queue("add", undefined, "Исходный текст", false, attachments);
   assert.equal((await f.queue("edit", id, "Новый текст")).ok, true);
   const result = await f.run("Новый текст", async () => ({ interrupted: true }), attachments, false, id);
+  assert.equal(result.ok, true, result.error?.message);
   assert.equal(result.data.keepQueued, true);
   const [saved] = (await f.queue("list")).data;
   assert.equal(saved.id, id);

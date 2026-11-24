@@ -590,6 +590,15 @@ body:has(> .project-tabs:not([hidden]))::before {
 }
 .board-chat details > summary > .icon:last-child { transition: transform 180ms ease; }
 .board-chat .chat-thinking { min-height: 18px; }
+.manager-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.manager-recovery > span { white-space: pre-line; overflow-wrap: anywhere; }
 .board-chat .chat-thinking > span {
   display: inline-flex; align-items: center; gap: 7px; max-inline-size: 100%; vertical-align: top;
 }

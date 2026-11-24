@@ -31,7 +31,7 @@ import { callCli, cliChild, cliFailure, cliSpawnFailure } from "./cli.ts";
 import { TokenUsageQueue } from "./token-usage-queue.ts";
 import { githubReadTool, readBoardGitHub } from "./github-read.ts";
 import { codexAuthMode, codexStatus, configuredCodex, executorFullAccess, isManagerAccess, managerAccess, setCodexAuth, setCodexExecutable, setCodexWindowsSandbox, setTaskExecutorAccess } from "./codex.ts";
-import { chatModels, readBoardHistory, readLastTaskTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
+import { chatModels, readBoardHistory, readLastTaskTurn, readManagerTurn, readTaskRunHistory, replyToBoard, replyToTask, reviewWithCodex, updateBoardGoal } from "./codex-chat.ts";
 import type { BoardActivity, BoardGoal, BoardGoalAction } from "./codex-chat.ts";
 import { boardReviewModeTool, reviewModeCardReply, reviewModeConfirmation, reviewModeQuestion, reviewModeReceipt,
   reviewModeReplyTarget, setReviewModeFromChat, taskChatActions } from "./chat-actions.ts";
@@ -65,7 +65,7 @@ import { routingRetryDelayMs } from "./codex-routing-timeout.ts";
 import { reviewDecisionSequence } from "../cli/expert-team.ts";
 import { readReviewerChatPage, reviewerActivity, withReviewerChat } from "./reviewer-chat.ts";
 import { readStageRunHistory } from "./stage-run-history.ts";
-import { goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
+import { completedManagerAnswer, goalActivityItems, goalMessages, hasManagerImageView, hasManagerMessage, managerChatItems, managerUnread, managerUnreadSnapshot, managerWorkItems, normalizeManagerUnread, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView, saveManagerHistory, sendGoalMessage } from "./manager-history.ts";
 import { backgroundGoalHistory } from "./goal-history-background.ts";
 import { goalActionTools, runGoalAction } from "./goal-actions.ts";
 import { readManagerImage, saveManagerImage } from "./manager-images.ts";
@@ -2339,6 +2339,7 @@ function boardThreadPath(project: string, dialogue = false) {
 
 type QueuedBoardMessage = {
   id: string; draft: string; goal: boolean; created: number; failed?: boolean;
+  recovery?: string;
   displayedReviewModeQuestionId?: string;
   files: { name: string; type: string; bytes: string; link?: FileLink }[];
 };
@@ -2379,6 +2380,29 @@ ipcMain.handle("board:queue", async (event, project: string, action: unknown, id
       return { ok: true, data: listQueuedMessages(directory).map(job => ({
         ...job, files: queuedFiles(job), inFlight: context?.queuedMessageId === job.id || context?.steeringMessageId === job.id,
       })) };
+    }
+    if (action === "recover" && typeof draft === "string") {
+      storageDirectory(directory, true);
+      const result = runtimeTransaction(board.project, entries => {
+        if (entries.some(entry => entry.task === "manager:dialogue")) {
+          return cliFailure("BOARD_REQUEST_IN_PROGRESS", t("ui.the_agent_is_already_handling_a_request_72b4da49"));
+        }
+        const original = readManagerRecovery(project, draft);
+        if (!original) return { ok: true as const, data: null };
+        const existing = listQueuedMessages(directory).find(job => job.recovery === draft);
+        const jobId = existing?.id ?? randomUUID();
+        const files = original.message.files.flatMap(file => {
+          const image = file.url?.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=]+)$/i);
+          if (file.link) return [{ name: file.name, type: "", bytes: "", link: file.link }];
+          return image ? [{ name: file.name, type: image[1], bytes: image[2] }] : [];
+        });
+        const job: QueuedBoardMessage = { id: jobId, recovery: draft, draft: original.message.text,
+          goal: false, created: existing?.created ?? Date.now(), files };
+        writeJson(join(directory, jobId + ".json"), job);
+        return { ok: true as const, data: jobId };
+      });
+      broadcastBoardChat(project, "orchestrator-queue", {}, event.sender);
+      return result;
     }
     if (action === "add" && id === undefined) id = randomUUID();
     if (typeof id !== "string" || !codexThreadPattern.test(id)) return cliFailure("INVALID_INPUT", t("errors.9784747447fcf118"));
@@ -2880,6 +2904,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
         }
         const pending = readQueuedMessage(queuedPath);
+        if (pending?.recovery) throw new Error(t("ui.manager_recovery_action"));
         if (pending) {
           writer.steeringMessageId = pending.id;
           claimed = true;
@@ -3134,6 +3159,11 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   let historyMessage: { at?: string; text: string; files: { url?: string; name: string; link?: FileLink; size?: number; error?: string }[]; clientId?: string } | undefined;
   let historyModel: string | undefined;
   let historyAccepted = false;
+  const recovery = queued?.recovery;
+  let original: ReturnType<typeof readManagerRecovery>;
+  let outcome: { status: "running" | "completed" | "interrupted"; reason?: string } | undefined;
+  let providerTurn: NonNullable<NonNullable<typeof original>["provider"]> | undefined;
+  let providerRetry: string | undefined;
   const saveHistory = () => {
     if (cleanupJob) {
       try {
@@ -3145,14 +3175,32 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     }
     if (!(historyAccepted && historyMessage) && !items.length) return;
     try {
-      const changed = saveManagerHistory(project, startedAt, managerRun.id, {
-        message: historyAccepted ? historyMessage : undefined, items,
-        model: historyModel, durationMs: Date.now() - startedAt, lane, goalId: goal ? goalId : undefined,
+      const changed = saveManagerHistory(project, original?.startedAt ?? startedAt, original?.id ?? managerRun.id, {
+        message: original?.originalMessage ?? (historyAccepted ? historyMessage : undefined),
+        items: original ? [...original.items, ...items] : items,
+        model: historyModel ?? original?.model, durationMs: Date.now() - startedAt, lane, goalId: goal ? goalId : undefined,
+        outcome, provider: providerTurn ?? original?.provider,
       });
       if (changed) publishManagerUnread(project);
     } catch (error) {
       console.warn("Could not save manager chat history.", (error as Error).message);
     }
+  };
+  const restoreAnswer = async (reference: typeof providerTurn) => {
+    if (!reference) return;
+    const turn = await readManagerTurn(app.getPath("userData"), project, reference).catch(() => undefined);
+    const answer = turn?.items.findLast(item => item.type === "agentMessage" &&
+      item.phase === "final_answer" && item.text?.trim())?.text;
+    if (!answer) return;
+    items = items.filter(item => item.type !== "agentMessage" || item.phase !== "final_answer");
+    items.push({ id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "",
+      phase: "final_answer", text: answer, status: "completed" });
+    outcome = { status: "completed" };
+    historyAccepted = true;
+    acceptedMessage = true;
+    saveHistory();
+    delivered();
+    return { ok: true as const, data: { answer, items: managerChatItems(items), changes, error: undefined } };
   };
   let threadId: string | undefined;
   let goalId: string | undefined;
@@ -3245,7 +3293,18 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       startReview([repairTask.id]);
     }
     const binding = boardThreadPath(project, !goal);
-    const stored = background ? undefined : readBoardThread(binding);
+    const stored = background || recovery ? undefined : readBoardThread(binding);
+    if (recovery) {
+      original = readManagerRecovery(project, recovery);
+      if (!original) {
+        acceptedMessage = true;
+        delivered();
+        return { ok: true as const, data: { answer: "", changes } };
+      }
+      requestText = original.message.text;
+      const restored = await restoreAnswer(original.provider);
+      if (restored) return restored;
+    }
     let ownerObjective = goal === true ? requestText : stored?.ownerObjective;
     let finishConfiguredTurn = false;
     threadId = stored?.id;
@@ -3378,11 +3437,12 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     if (!reviewIds && !cleanupJob && !repairTask && !goal && !background) {
       mcpTools.push(...applicationUpdateTools);
     }
-    const allowReviewModeChange = !background && !goal && !isManual(settings.data);
+    const allowReviewModeChange = !recovery && !background && !goal && !isManual(settings.data);
     if (allowReviewModeChange) mcpTools.push(boardReviewModeTool);
     if (allowRulesMigration) mcpTools.push(migrateRulesTool);
     if (goal) mcpTools = goalActionTools(mcpTools);
     if (approvalNotices) mcpTools = mcpTools.filter(({ name }) => name === "task_review" || name === "task_accept");
+    if (recovery) mcpTools = mcpTools.filter(({ name }) => ["board_list", "task_show"].includes(name));
     const attachments = await prepareBoardAttachments(queued ? queuedFiles(queued) : files, scratch);
     if (draftNotice) {
       mcpTools = mcpTools.filter(({ name }) => ["manager_inbox", "task_show", "team_message", "expert_list", "expert_context"].includes(name));
@@ -3663,7 +3723,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       return { ok: true, data: message };
     }
     let requestTools: BoardMcpTool[];
-    if (cleanupJob) {
+    if (cleanupJob || recovery) {
       requestTools = boardTools.filter(tool => ["board_list", "task_show"].includes(tool.name));
     } else if (reviewIds || approvalNotices || draftNotice) {
       requestTools = [];
@@ -3677,6 +3737,9 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
       attachments.flatMap(file => file.image ? [file.image] : []),
       async (name, args, toolSignal) => {
         const dispatch = async (args: unknown): Promise<CliReply> => {
+          if (recovery && name !== "board_list" && name !== "task_show") {
+            return cliFailure("RECOVERY_READ_ONLY", "Recovery may only inspect the board.");
+          }
           if (draftNotice) {
             const fields = args as Record<string, unknown> | null;
             if (name === "manager_inbox") return { ok: true, data: draftQuestions };
@@ -3833,7 +3896,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           });
         };
         return goal && goalId ? runGoalAction(project, goalId, name, args, dispatch) : dispatch(args);
-      }, requestTools, instructions + (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
+      }, requestTools, instructions + (recovery ?
+        "\nRecover the owner's saved request. Inspect current state before answering. Some actions may already have happened. " +
+        "Report what is confirmed and which actions still need a new explicit request. This recovery is read-only." : "") +
+        (allowReviewModeChange ? "\n" + boardReviewModeTool.description : "") +
         (clarifiedReview ? "\nThe application verified the owner's answer to its card question: " + JSON.stringify(clarifiedReview) +
           ". Use the latest owner message as authorization." : "") + "\n" + initialSettings.text + (iteration ?
         "\nThis is a single planning turn. Handle the specified goal questions and owner instructions. Only acknowledge the specified questions. " +
@@ -3843,8 +3909,8 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         "Do not use task_wait. Objective: " +
         JSON.stringify(stored?.goal?.objective) : ""), signal, {
         id: threadId,
-        separateTurn: reviewIds || draftNotice ? true : undefined,
-        keepThread: Boolean(reviewThreadPath),
+        separateTurn: reviewIds || draftNotice || recovery ? true : undefined,
+        keepThread: Boolean(reviewThreadPath || recovery),
         role: cleanupJob || repairTask ? "reviewer" : "manager",
         access: reviewIds ? undefined : managerAccess(app.getPath("userData"), project),
         confirmApproval: cleanupJob ? async () => false : reviewIds ? undefined : confirmApproval,
@@ -3889,7 +3955,17 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
           iterationDispatched = true;
         } : undefined,
         onTurnRejected: iteration ? () => { iterationDispatched = false; } : undefined,
-        readOnly: Boolean(reviewIds || draftNotice),
+        readOnly: Boolean(reviewIds || draftNotice || recovery),
+        recovery: Boolean(recovery),
+        onProviderRetry: lane === "chat" ? reason => { providerRetry = reason.slice(0, 1500); } : undefined,
+        onTurnAccepted: lane === "chat" && typeof messageId === "string" ? (threadId, turnId) => {
+          providerTurn = { threadId, turnId, clientId: messageId };
+          outcome = { status: "running" };
+          historyAccepted = true;
+          acceptedMessage = true;
+          saveHistory();
+          delivered();
+        } : undefined,
         onGoalSet: () => {
           goalSet = true;
           if (goal === true) {
@@ -3907,6 +3983,10 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         messageId: typeof messageId === "string" ? messageId : undefined,
         onMessage: id => {
           if (id === messageId) {
+            if (lane === "chat" && threadId) {
+              providerTurn ??= { threadId, clientId: id };
+              outcome = { status: "running" };
+            }
             acceptedMessage = true;
             historyAccepted = true;
             saveHistory();
@@ -3962,7 +4042,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
         },
         title: t("ui.project_manager_for_3f3547d6") + (basename(board.project) || board.project),
         save: id => {
-          if (!background) writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
+          if (!background && !recovery) writeJson(binding, { ...readBoardThread(binding), provider: "codex", id, history: "local" });
           else if (reviewThreadPath && managerReviewId) {
             rememberTaskCodexThread(project, managerReviewId, id);
             writeJson(reviewThreadPath, { binding: reviewBinding, id });
@@ -4036,6 +4116,7 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
             };
           }
           if (background) return;
+          if (recovery) return;
           running.sendNow = (text, files, messageId) => {
             if (sendingNow) throw new Error(t("ui.a_message_is_already_being_sent_ed690319"));
             sendingNow = (async () => {
@@ -4088,10 +4169,14 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     await pendingAction;
     signal.throwIfAborted();
     if (signal.reason === quotaInterruption) return quotaFailure();
-    if ("interrupted" in response) return { ok: true as const, data: {
-      answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: t("ui.reply_stopped_c7fee9e0"), id: threadId,
-      keepQueued: Boolean(queuedPath && !acceptedMessage),
-    } };
+    if ("interrupted" in response) {
+      const reason = t("ui.reply_stopped_c7fee9e0");
+      if (lane === "chat") outcome = { status: "interrupted", reason };
+      return { ok: true as const, data: {
+        answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: reason, id: threadId,
+        keepQueued: Boolean(queuedPath && !acceptedMessage),
+      } };
+    }
     const goalNotice = {
       paused: t("ui.goal_paused_be134ecc"),
       blocked: t("ui.goal_blocked_438409c7"),
@@ -4106,13 +4191,15 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
     historyAccepted = true;
     historyModel = response.model ?? historyModel;
     const answer = reviewConfirmation ?? response.text;
-    const finalMessage = items.findLastIndex(item => item.type === "agentMessage" && item.phase !== "commentary");
+    const finalMessage = items.findLastIndex(item => item.type === "agentMessage" &&
+      item.phase !== "commentary" && item.status === "completed");
     if (reviewConfirmation && finalMessage >= 0) {
       items[finalMessage] = { ...items[finalMessage], text: reviewConfirmation };
     } else if (answer && finalMessage < 0) {
       items = [...items, { id: managerRun.id, at: new Date().toISOString(), type: "agentMessage", title: "", phase: "final_answer",
         text: answer, status: "completed" }];
     }
+    if (lane === "chat") outcome = { status: "completed" };
     if (iteration && response.goalStatus === "active" && currentActiveGoal(project) === iteration.id && response.text.trim()) {
       const state = readIterativeGoal(project, iteration.id);
       saveIterativeGoal(project, { ...state, step: response.text.trim() });
@@ -4127,9 +4214,25 @@ async function runBoardRequest(sender: Electron.WebContents, board: Board | unde
   } catch (error) {
     await pendingAction;
     if (signal.reason === switchMode) return { ok: true as const, data: { answer: "", changes } };
-    if (operation.controller.signal.reason === quotaInterruption) return quotaFailure();
+    if (operation.controller.signal.reason === quotaInterruption) {
+      if (lane === "chat") outcome = { status: "interrupted", reason: t("ui.codex_reached_its_usage_limit_391a3158") };
+      return quotaFailure();
+    }
     if (cancelledWhileWaiting) return cliFailure("BOARD_WAIT_CANCELLED", "");
-    const message = t("ui.could_not_complete_the_board_request_91ea559c") + "\n" + (error instanceof Error ? error.message : String(error)).slice(0, 1500);
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 1500);
+    const message = [t("ui.could_not_complete_the_board_request_91ea559c"), reason,
+      providerRetry !== reason ? providerRetry : undefined].filter(Boolean).join("\n");
+    if (lane === "chat" && historyAccepted) {
+      if (completedManagerAnswer(items)) outcome = { status: "completed" };
+      else {
+        const restored = await restoreAnswer(providerTurn);
+        if (restored) return restored;
+        outcome = { status: "interrupted", reason: message };
+      }
+      if (outcome.status === "completed") {
+        return { ok: true as const, data: { answer: "", items: managerChatItems(items), changes, error: undefined } };
+      }
+    }
     if (goalSet || changes.length || acceptedMessage) {
       if (changes.length) delivered();
       return { ok: true as const, data: { answer: "", items: lane === "chat" ? managerChatItems(items) : items, changes, error: goalSet ? t("ui.the_goal_is_saved_in_the_codex_chat_this_run_end_5bbc3859") + "\n" + message : message, id: threadId, keepQueued: Boolean(queuedPath && !acceptedMessage && !changes.length) } };

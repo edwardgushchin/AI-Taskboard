@@ -1,4 +1,6 @@
 {
+  "ui.manager_recovery_unknown": "The turn has no confirmed result.",
+  "ui.manager_recovery_action": "Recover reply",
   "review_mode.card_question": "Which card?",
   "review_mode.mode_question": "Which review mode?",
   "review_mode.saved": "{id} now uses the “{mode}” review mode.",

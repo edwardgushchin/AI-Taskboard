@@ -1,4 +1,6 @@
 {
+  "ui.manager_recovery_unknown": "Итог хода не подтверждён.",
+  "ui.manager_recovery_action": "Восстановить ответ",
   "review_mode.card_question": "Какой карточке?",
   "review_mode.mode_question": "Какой режим ревью выбрать?",
   "review_mode.saved": "Для {id} сохранён режим «{mode}».",
