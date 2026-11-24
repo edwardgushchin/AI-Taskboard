@@ -1,4 +1,6 @@
 const sourceLocation = new RegExp(sourceFile.source.replace(/\$$/, ":[1-9]\\d*(?::\\d+)?$"), "i");
+const leadingTaskId = /^T-\d{4,}(?=[\s,;:!?)]|\.(?![\p{L}\p{N}]))/u;
+const boardReferenceStoragePrefix = "taskboard.board-reference-name:";
 const fullDigest = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const shortCommit = /^[0-9a-f]{4,39}$/i;
 const commitContext = /(?:^|[^\p{L}\p{N}_])(?:commit|коммит[а-яё]*)[\s:—–=-]*$/iu;
@@ -129,7 +131,6 @@ function createChatMarkdown() {
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   const quotedBoardReference = /^#(?<board>[^\s\0][^\r\n\0]*?)\/(?<foreignTask>T-\d{4,})$/u;
   const shortTaskReference = String.raw`#?T-\d{4,}`;
-  const leadingTaskId = /^T-\d{4,}(?=[\s,;:!?)]|\.(?![\p{L}\p{N}]))/u;
   const references = [
     String.raw`#(?<board>[^#\s\0][^#\r\n\0]*?)\/(?<foreignTask>T-\d{4,})`,
     shortTaskReference,
@@ -192,7 +193,7 @@ function createChatMarkdown() {
     const icon = '<i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>';
     if (meta?.localId) {
       const { localId } = meta;
-      const candidate = `data-candidate-board="${escape(meta.board)}" data-candidate-task="${id}" data-local-task="${localId}"`;
+      const candidate = `data-candidate-board="${escape(meta.board)}" data-candidate-task="${id}"`;
       const local = `<a class="chat-task-reference" href="#${localId}" data-task="${localId}" ${candidate}>${icon}${localId}</a>`;
       return local + "<span>" + escape(label.slice(localId.length)) + "</span>";
     }
@@ -500,21 +501,38 @@ function showHexColors(block, plainText = false) {
   }
 }
 
+function rememberBoardReferenceNames(names) {
+  try {
+    for (const name of names) {
+      if (leadingTaskId.test(name)) {
+        localStorage.setItem(boardReferenceStoragePrefix + name, "1");
+      }
+    }
+  } catch {
+    // A renderer without persistent storage still uses the names in the current frame.
+  }
+}
+
 function syncBoardReferenceLinks(container, names) {
   for (const link of container.querySelectorAll("[data-candidate-board]")) {
-    const { candidateBoard, candidateTask, localTask } = link.dataset;
-    const qualified = names.includes(candidateBoard.trim().normalize("NFC"));
-    const board = qualified ? candidateBoard : undefined;
-    if (link.dataset.taskBoard === board) continue;
-
-    const id = qualified ? candidateTask : localTask;
-    const label = qualified ? board + "/" + id : id;
-    if (qualified) link.dataset.taskBoard = board;
-    else delete link.dataset.taskBoard;
-    link.dataset.task = id;
+    if (link.dataset.taskBoard) continue;
+    const { candidateBoard, candidateTask } = link.dataset;
+    const name = candidateBoard.trim().normalize("NFC");
+    let qualified = names.includes(name);
+    if (!qualified) {
+      try {
+        qualified = localStorage.getItem(boardReferenceStoragePrefix + name) === "1";
+      } catch {
+        // Keep the local link when persistent storage is unavailable.
+      }
+    }
+    if (!qualified) continue;
+    const label = candidateBoard + "/" + candidateTask;
+    link.dataset.taskBoard = candidateBoard;
+    link.dataset.task = candidateTask;
     link.setAttribute("href", "#" + label);
     link.lastChild.textContent = label;
-    link.nextElementSibling.hidden = qualified;
+    link.nextElementSibling.hidden = true;
   }
 }
 

@@ -141,7 +141,7 @@ async function expectCard(window, project, title, before, count, id = task) {
   assert.equal(BrowserWindow.getAllWindows().length, count);
 }
 
-async function expectRefusal(window, name, reason) {
+async function expectRefusal(window, name, reason, id = task) {
   const before = await frame(window);
   const selector = boardLink(name);
   await activate(window, selector, true);
@@ -151,7 +151,7 @@ async function expectRefusal(window, name, reason) {
   }, reason), reason);
   assert.equal((await frame(window)).project, before.project);
   assert.equal(await evaluate(window, "document.querySelector('#sheet').open"), false);
-  assert.equal(await evaluate(window, "document.querySelector(" + JSON.stringify(selector) + ").textContent"), name + "/" + task);
+  assert.equal(await evaluate(window, "document.querySelector(" + JSON.stringify(selector) + ").textContent"), name + "/" + id);
   await evaluate(window, "document.querySelector('#notice-close').click()");
   results.push(reason + " Перехода нет, ссылка читаема.");
 }
@@ -345,23 +345,34 @@ async function run() {
     () => evaluateWith(other, selector => Boolean(document.querySelector(selector)), prefixedLink),
     "полная ссылка на доску с номером в начале имени",
   );
-  const candidate = links + '[data-candidate-board="T-0001 Свод"]';
   cli(target, ["settings"], { name: boardName });
   await until(
-    () => evaluateWith(other, selector => document.querySelector(selector)?.dataset.task === "T-0001", candidate),
-    "короткая ссылка после переименования доски",
+    async () => !(await frame(other)).boardReferenceNames.includes(prefixedName),
+    "переименованная доска исчезла из списка известных имён",
   );
+  await expectRefusal(other, prefixedName, "недоступна", secondTask);
+
+  const reloaded = new Promise(resolve => other.webContents.once("did-finish-load", resolve));
+  other.webContents.reload();
+  await reloaded;
+  await openChat(other);
+  await until(
+    () => evaluateWith(other, selector => Boolean(document.querySelector(selector)), prefixedLink),
+    "полная ссылка в сохранённой переписке после перезагрузки окна",
+  );
+  await expectRefusal(other, prefixedName, "недоступна", secondTask);
+
   cli(target, ["settings"], { name: prefixedName });
   await until(
-    () => evaluateWith(other, selector => document.querySelector(selector)?.dataset.task === "T-0002", candidate),
-    "полная ссылка после восстановления имени доски",
+    async () => (await frame(other)).boardReferenceNames.includes(prefixedName),
+    "имя доски восстановлено",
   );
   const titled = await frame(other);
   await activate(other, prefixedLink, true);
   await expectCard(other, target, secondTitle, titled, 2, secondTask);
   await capture(other, "prefixed-card.png");
   assert.equal((await frame(window)).project, target);
-  results.push("Ссылка на «T-0001 Свод» обновилась после смены и восстановления названия в другом окне. Enter открыл T-0002. Короткая T-0001 перед «по пути План/Факт/T-0002» открыла исходную карточку.");
+  results.push("Ссылка на «T-0001 Свод» сохранила название и T-0002 после переименования и перезагрузки окна. Показана причина, локальная T-0001 не открылась. После восстановления имени Enter открыл T-0002. Короткая T-0001 перед «по пути План/Факт/T-0002» открыла исходную карточку.");
 
   await open(other, source);
   await closeTab(other, target);
