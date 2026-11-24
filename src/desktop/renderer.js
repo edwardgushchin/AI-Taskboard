@@ -1804,6 +1804,7 @@ function render(previousBoard) {
   byId("board-composer").hidden = archiveView;
   if (!byId("board-composer").firstChild) byId("board-composer").append(draftComposer());
   const composer = byId("board-composer").firstChild;
+  composer.resumeBoardView();
   composer.localize();
   composer.updateManagerBusy(frame.managerBusy);
   composer.updateManagerRun(frame.managerRun);
@@ -2062,7 +2063,7 @@ function chatViewport(list) {
   let restoring = false;
   const hasViewport = () => !suspended && list.clientHeight && visible(list);
   let position = { end: true, top: 0, anchors: [] };
-  const atEnd = () => suspended ? position.end : list.scrollHeight - list.scrollTop - list.clientHeight <= 1;
+  const atEnd = () => hasViewport() ? list.scrollHeight - list.scrollTop - list.clientHeight <= 1 : position.end;
   let restoredTop;
   let folds;
   function remember() {
@@ -2165,10 +2166,10 @@ function chatViewport(list) {
       resize.disconnect();
       observed.clear();
       for (const anchor of position.anchors) delete anchor.node;
-      change();
+      change?.();
     },
     resume(change) {
-      change();
+      change?.();
       if (!suspended) return;
       applyFolds(folds);
       folds = undefined;
@@ -2612,6 +2613,8 @@ function draftComposer() {
   function showWork(show) {
     if (show && views.hidden) return;
     if (show === !work.hidden) return;
+    dialogueViewport.remember();
+    workViewport.remember();
     work.hidden = !show;
     log.hidden = show;
     dialogueToggle.setAttribute("aria-pressed", String(!show));
@@ -3581,6 +3584,27 @@ function draftComposer() {
     workViewport.resume(() => {
       if (savedWork.length || liveWork.length || pendingWork.size) renderGoalTimeline();
     });
+    if (!work.hidden) editor.invalidateWork();
+  };
+  let boardViewSuspended = false;
+  editor.suspendBoardView = () => {
+    if (!canBrowseHistory()) return;
+    boardViewSuspended = true;
+    dialogueViewport.suspend();
+    workViewport.suspend();
+    clearTimeout(readRetry);
+    cancelAnimationFrame(readFrame);
+    readFrame = undefined;
+    readObserver.disconnect();
+  };
+  editor.resumeBoardView = () => {
+    if (!boardViewSuspended || !canBrowseHistory()) return;
+    boardViewSuspended = false;
+    dialogueViewport.resume();
+    workViewport.resume();
+    lastScrollTop = log.scrollTop;
+    readObserver.observe(log);
+    editor.invalidateHistory();
     if (!work.hidden) editor.invalidateWork();
   };
   editor.closeChat = () => {
@@ -6589,6 +6613,7 @@ function update(next) {
   const languageChanged = frame.localization?.locale !== next.localization?.locale;
   const previousProject = frame.project;
   const projectChanged = frame.project !== next.project;
+  if (projectChanged) byId("board-composer").firstChild?.suspendBoardView?.();
   const previousBoard = projectChanged ? undefined : frame.board;
   const tagsChanged = JSON.stringify(frame.board?.tags) !== JSON.stringify(next.board?.tags);
   if (projectChanged && byId("auto-mode-panel").matches(":popover-open")) byId("auto-mode-panel").hidePopover();

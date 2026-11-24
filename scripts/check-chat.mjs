@@ -95,6 +95,179 @@ app.whenReady().then(async () => {
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     writeFileSync(join(artifacts, name), (await window.webContents.capturePage()).toPNG());
   };
+  if (process.argv.includes("--manager-board-position")) {
+    window.show();
+    const settle = () => evaluate("new Promise(resolve => setTimeout(resolve, 120))");
+    await evaluate(`
+      const boardNames = ['Atlas', 'Orion'];
+      const makeTurns = (prefix, count) => Array.from({ length: count }, (_, index) => ({
+        messages: [{
+          clientId: prefix + index,
+          text: prefix + index + ' · Заметка о ходе работы над проектом',
+          files: [],
+          at: '2026-11-24T10:00:00Z',
+        }],
+        items: [],
+      }));
+      const recent = Object.fromEntries(boardNames.map(name => [name, makeTurns(name + ' · свежая реплика ', 30)]));
+      api.boardQueue = async () => ({ ok: true, data: [] });
+      api.boardHistory = async (project, cursor, view) => {
+        if (view === 'goal-availability') return { ok: true, data: true };
+        if (view === 'live') return { ok: true, data: { work: [], chat: [] } };
+        if (view === 'work') {
+          const items = Array.from({ length: 30 }, (_, index) => ({
+            id: 'goal-' + project + '-' + index,
+            type: 'agentMessage',
+            phase: 'final_answer',
+            status: 'completed',
+            text: 'Ход цели · ' + project + ' · событие ' + index,
+            at: '2026-11-24T10:00:00Z',
+          }));
+          return { ok: true, data: { turns: [{ messages: [], items }], goalLogAvailable: true } };
+        }
+        const turns = cursor ? makeTurns(project + ' · страница архива ' + cursor + ' · реплика ', 30) : recent[project];
+        const nextCursor = cursor === '2' ? null : cursor === '1' ? '2' : '1';
+        return { ok: true, data: { turns, nextCursor } };
+      };
+      const tabs = boardNames.map(path => ({ path, name: path }));
+      const board = { tasks: [], archived: [], settings: {} };
+      const select = project => update({ project, board, tabs, managerUnread: [] });
+      api.selectTab = select;
+      const composer = () => byId('board-composer').firstChild;
+      const feed = () => composer().querySelector('.board-chat-log:not(.board-work)');
+      const goalFeed = () => composer().querySelector('.board-work');
+      const input = () => composer().querySelector('.draft-input textarea');
+      const jump = top => {
+        feed().scrollTop = top;
+        feed().dispatchEvent(new Event('scroll'));
+      };
+      const opening = async pinned => {
+        const panel = composer();
+        if (panel.hasAttribute('data-pinned') !== pinned) panel.querySelector('.board-chat-pin').click();
+        await Promise.resolve();
+        input().click();
+      };
+      const row = id => feed().querySelector('[data-chat-anchor="user:' + id + '"]');
+      const offset = item => item.getBoundingClientRect().top - feed().getBoundingClientRect().top;
+      const place = id => jump(feed().scrollTop + offset(row(id)) + 13);
+      const end = () => feed().scrollHeight - feed().scrollTop - feed().clientHeight <= 1;
+      const go = async project => {
+        const tab = [...document.querySelectorAll('.project-tab-button')]
+          .find(button => button.parentElement.dataset.project === project);
+        tab.click();
+        await Promise.resolve();
+      };
+      const unload = () => update({ project: 'Orion', board, tabs: tabs.slice(1), managerUnread: [] });
+      const recorded = {};
+      void 0;
+    `);
+    const results = [];
+    for (const width of [1280, 800]) {
+      window.setContentSize(width, 800);
+      for (const pinned of [true, false]) {
+        await evaluate(`(async () => {
+          select('Atlas');
+          await opening(${pinned});
+          input().value = 'Черновик Atlas';
+        })()`);
+        await settle();
+        const anchor = "Atlas · страница архива 1 · реплика 12";
+        await evaluate(`
+          if (!row(${JSON.stringify(anchor)})) feed().querySelector('.board-chat-older').click();
+        `);
+        await settle();
+        await check(`Boolean(row(${JSON.stringify(anchor)}))`, `Atlas older page loaded at ${width}px, pinned=${pinned}`);
+        const before = await evaluate(`place(${JSON.stringify(anchor)}); offset(row(${JSON.stringify(anchor)}))`);
+        if (width === 1280 && pinned) await capture("board-position-before.png");
+
+        await evaluate(`(async () => {
+          await go('Orion');
+          await opening(${pinned});
+          input().value = 'Черновик Orion';
+        })()`);
+        await settle();
+        await check("Boolean(row('Orion · свежая реплика 29'))", "Orion loads its own dialogue");
+        await evaluate("jump(feed().scrollHeight)");
+        await check("end()", "leave Orion at the end");
+        await evaluate("go('Atlas')");
+        await settle();
+        const after = await evaluate(`offset(row(${JSON.stringify(anchor)}))`);
+        assert.ok(Math.abs(after - before) <= 1, `Atlas anchor at ${width}px, pinned=${pinned}: ${before} -> ${after}`);
+        await check(`input().value === 'Черновик Atlas' && composer().hasAttribute('data-pinned') === ${pinned}`,
+          "Atlas restores its draft and pin");
+        if (width === 1280 && pinned) await capture("board-position-after.png");
+
+        await evaluate(`
+          composer().invalidateHistory();
+          feed().querySelector('.board-chat-older').click();
+        `);
+        await settle();
+        await check(`Boolean(row('Atlas · страница архива 2 · реплика 0')) &&
+          Math.abs(offset(row(${JSON.stringify(anchor)})) - ${before}) <= 1`,
+          "background invalidation and prepending an older page preserve the restored anchor");
+        await evaluate("composer().querySelector('.board-work-toggle').click()");
+        await settle();
+        const goalTop = await evaluate(`
+          goalFeed().scrollTop = 450;
+          goalFeed().dispatchEvent(new Event('scroll'));
+          goalFeed().scrollTop;
+        `);
+        assert.ok(goalTop > 0, "goal history has its own scroll position");
+        await evaluate("go('Orion').then(() => go('Atlas'))");
+        await settle();
+        await check(`!goalFeed().hidden && Math.abs(goalFeed().scrollTop - ${goalTop}) <= 1`,
+          "goal history restores independently after a project switch");
+        await evaluate("composer().querySelector('.board-dialogue-toggle').click()");
+        await settle();
+        await check(`Math.abs(offset(row(${JSON.stringify(anchor)})) - ${before}) <= 1`,
+          "dialogue preserves its position after reading goal history");
+        await evaluate("feed().focus({ preventScroll: true })");
+        window.webContents.sendInputEvent({ type: "keyDown", keyCode: "Home" });
+        window.webContents.sendInputEvent({ type: "keyUp", keyCode: "Home" });
+        await evaluate("new Promise(resolve => setTimeout(resolve, 400))");
+        await evaluate(`
+          recorded.top = feed().scrollTop;
+          recent.Orion.push(...makeTurns('Orion · новая реплика ', 1));
+          go('Orion');
+        `);
+        await settle();
+        await check("end() && Boolean(row('Orion · новая реплика 0')) && input().value === 'Черновик Orion'",
+          "Orion follows the new reply and retains its draft");
+        await evaluate("go('Atlas')");
+        await settle();
+        const tops = await evaluate("[recorded.top, feed().scrollTop]");
+        assert.deepEqual(tops, [0, 0], "Atlas restores the manually selected top");
+        await evaluate("recorded.closed = composer(); go('Orion').then(unload)");
+        await check("!recorded.closed.isConnected && !boardViews.has('Atlas')", "closing Atlas removes the cached composer");
+        await evaluate(`
+          recorded.closed = undefined;
+          recent.Orion.pop();
+          update({ project: 'Atlas', board, tabs: tabs.slice(0, 1), managerUnread: [] });
+        `);
+        results.push({ width, height: 800, pinned, anchor, before, after });
+      }
+    }
+    const sources = ["src/desktop/renderer.js", "src/desktop/styles.css", "src/desktop/index.html", "scripts/check-chat.mjs"];
+    const sha256 = Object.fromEntries(sources.map(path => [path, createHash("sha256").update(readFileSync(join(root, path))).digest("hex")]));
+    writeFileSync(join(artifacts, "board-position-report.json"), JSON.stringify({
+      versions: process.versions,
+      platform: process.platform,
+      results,
+      sha256,
+      representation: "worktree file bytes",
+      command: "node scripts/check-chat.mjs --manager-board-position --artifacts .tasks/qa/T-0346",
+      checks: [
+        "Restored the same anchor in an older page across repeated project switches.",
+        "Preserved the anchor through invalidation and prepending.",
+        "Restored independent positions for Dialogue and Goal activity.",
+        "Restored manual scroll to the top and the end with a new reply on a different board.",
+        "Preserved both drafts and the pin state. Removed the cached composer on project close.",
+      ],
+    }, null, 2));
+    console.log("Manager board position Chromium checks passed: " + results.length + " configurations");
+    return;
+  }
+
   if (process.argv.includes("--dialogue-parity")) {
     window.webContents.debugger.attach();
     await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
