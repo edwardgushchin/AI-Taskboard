@@ -1,4 +1,5 @@
 {
+  "ui.image_save_as": "Save as",
   "ui.manager_history_pending": "History could not be saved",
   "ui.manager_history_save_failed": "The message was accepted, but the dialogue history could not be saved. Retry saving from the queue.",
   "ui.manager_recovery_unknown": "The turn has no confirmed result.",

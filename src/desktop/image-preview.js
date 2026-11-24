@@ -64,7 +64,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   controlLabelForIcon(close, () => t("ui.close_preview_c54f8606"));
   const original = button("1:1", () => { fitted = false; resize(1); }, "quiet");
   controlLabelForIcon(original, () => t("ui.actual_size_bff05f3a"));
-  const save = button(() => t("ui.save_7eea8139"), async () => {
+  async function saveImage() {
     const file = files[displayedIndex];
     const selection = request;
     const result = await source.save(file);
@@ -72,7 +72,65 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
       status.textContent = boardError(result.error);
       status.hidden = false;
     }
-  }, "quiet");
+  }
+  const save = button(() => t("ui.save_7eea8139"), saveImage, "quiet");
+
+  const menu = element("div", undefined, "app-menu-popup image-preview-menu");
+  menu.popover = "auto";
+  menu.setAttribute("role", "menu");
+  bindLocalized(menu, "aria-label", () => t("ui.image_0ef98c9b"), true);
+  const copy = button(() => t("ui.copy_47162712"), async () => {
+    menu.hidePopover();
+    const selection = request;
+    const canvas = element("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    try {
+      canvas.getContext("2d").drawImage(image, 0, 0);
+      const png = new Promise((resolve, reject) => {
+        canvas.toBlob(blob => {
+          if (blob) resolve(blob);
+          else reject(new Error("Image encoding failed"));
+        });
+      });
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    } catch {
+      if (dialog.open && selection === request) {
+        status.textContent = t("ui.copy_failed_retry_eeb3cc51");
+        status.hidden = false;
+      }
+    } finally {
+      canvas.width = canvas.height = 0;
+    }
+  });
+  const saveAs = button(() => t("ui.image_save_as"), () => {
+    menu.hidePopover();
+    return saveImage();
+  });
+  for (const item of [copy, saveAs]) {
+    item.className = "app-menu-item";
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = -1;
+  }
+  menu.append(copy, saveAs);
+  menu.addEventListener("keydown", event => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End", "Tab"].includes(event.key)) return;
+    if (event.key === "Tab") {
+      menu.hidePopover();
+      return;
+    }
+    event.preventDefault();
+    const first = event.key === "Home" || (event.key !== "End" && document.activeElement === saveAs);
+    (first ? copy : saveAs).focus();
+  });
+  stage.addEventListener("contextmenu", event => {
+    if (event.target !== image || image.hidden) return;
+    event.preventDefault();
+    if (!menu.matches(":popover-open")) menu.showPopover({ source: viewport });
+    menu.style.left = Math.max(0, Math.min(event.clientX, innerWidth - menu.offsetWidth)) + "px";
+    menu.style.top = Math.max(0, Math.min(event.clientY, innerHeight - menu.offsetHeight)) + "px";
+    copy.focus();
+  });
   const move = delta => show((index + delta + files.length) % files.length);
   header.append(title);
   const navigation = [];
@@ -97,7 +155,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   toolbar.append(zoomOut, scaleLabel, zoomIn, button(() => t("ui.fit_9a002f36"), fit, "quiet"), original, save);
   stage.append(image);
   viewport.append(stage);
-  dialog.append(header, viewport, status, ...navigation, toolbar);
+  dialog.append(header, viewport, status, ...navigation, toolbar, menu);
 
   viewport.addEventListener("wheel", event => {
     event.preventDefault();
@@ -154,6 +212,7 @@ function openImagePreview(taskId, files, initialIndex, initialSrc, source = {
   }
 
   function show(at, cached) {
+    if (menu.matches(":popover-open")) menu.hidePopover();
     const selection = ++request;
     index = at;
     const entry = load(at, cached);

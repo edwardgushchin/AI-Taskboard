@@ -1,4 +1,5 @@
 {
+  "ui.image_save_as": "Сохранить как",
   "ui.manager_history_pending": "История не записалась",
   "ui.manager_history_save_failed": "Реплика принята, но история диалога не записалась. Повторите сохранение из очереди.",
   "ui.manager_recovery_unknown": "Итог хода не подтверждён.",
