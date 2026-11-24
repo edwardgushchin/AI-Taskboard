@@ -1903,22 +1903,47 @@ test("board settings can be read while an unrelated command holds the board lock
 
 test("board agent defaults apply to new and unset roles while explicit choices keep priority", t => {
   const root = fixture(t);
-  cli(root, ["init"]);
-  const roles = {
+  const initial = { provider: "codex", model: "gpt-6.2-sol", effort: "medium" };
+  const expected = {
+    boardType: "agent",
+    archiveAfterDays: 90,
+    integrationMode: "merge",
+    reviewMode: "reviewer",
+    codexDailyResetTime: "09:00",
+    manager: initial,
+    executor: initial,
+    reviewer: initial,
+    taskLimits: { executor: 2, reviewer: 1 },
+  };
+  assert.deepEqual(cli(root, ["init"]).settings, expected);
+  assert.deepEqual(cli(root, ["settings"]), expected);
+  for (const invalid of ["2x", "1e1", "0x2"]) {
+    cli(root, ["settings"], { taskLimits: { executor: invalid } }, "INVALID_INPUT");
+  }
+  const editedLimits = { executor: 0, reviewer: 3 };
+  assert.deepEqual(cli(root, ["settings"], { taskLimits: editedLimits }).taskLimits, editedLimits);
+  assert.deepEqual(cli(root, ["settings"], { taskLimits: expected.taskLimits }), expected);
+  const legacyRoles = {
     manager: { provider: "codex", model: "gpt-6.2-sol", effort: "medium" },
     executor: { provider: "codex", model: "gpt-6.1-sol", effort: "high" },
     reviewer: { provider: "codex", model: "gpt-6.1-terra", effort: "high" },
   };
-  assert.deepEqual(cli(root, ["settings"]), {
-    boardType: "agent", archiveAfterDays: 90, integrationMode: "merge", reviewMode: "reviewer", ...roles,
-  });
   const path = join(root, ".tasks", "board.json");
   const index = JSON.parse(readFileSync(path, "utf8"));
+  index.settings = { ...expected, ...legacyRoles, taskLimits: { executor: 0, reviewer: 4 }, codexDailyTokens: 20000 };
+  const explicit = JSON.stringify(index);
+  writeFileSync(path, explicit);
+  assert.deepEqual(cli(root, ["init"]).settings, index.settings);
+  assert.deepEqual(cli(root, ["list"]).settings, index.settings);
+  assert.equal(readFileSync(path, "utf8"), explicit);
   index.settings = { archiveAfterDays: 90, integrationMode: "merge", manager: null,
     reviewer: { model: "gpt-6.1-sol", effort: "xhigh" } };
-  writeFileSync(path, JSON.stringify(index));
-  assert.deepEqual(cli(root, ["settings"]), { ...index.settings, executor: roles.executor });
-  assert.deepEqual(cli(root, ["list"]).settings, { ...index.settings, executor: roles.executor });
+  const inherited = JSON.stringify(index);
+  writeFileSync(path, inherited);
+  const effective = { ...index.settings, codexDailyResetTime: "09:00", executor: legacyRoles.executor };
+  assert.deepEqual(cli(root, ["init"]).settings, effective);
+  assert.deepEqual(cli(root, ["list"]).settings, effective);
+  assert.equal(readFileSync(path, "utf8"), inherited);
 });
 
 test("normal commands enforce task state, criteria, and revisions", t => {
@@ -2875,7 +2900,7 @@ test("watch streams compact cards and sees new messages without a revision chang
     cli(root, ["settings"], { name: "   " });
     assert.deepEqual((await frame()).data.settings, initial.settings);
     assert.equal(initial.settings.showCardPreviews, undefined);
-    assert.equal(initial.settings.taskLimits, undefined);
+    assert.deepEqual(initial.settings.taskLimits, { executor: 2, reviewer: 1 });
     const taskLimits = { executor: 0, reviewer: 2 };
     cli(root, ["settings"], { taskLimits });
     assert.deepEqual((await frame()).data.settings.taskLimits, taskLimits);
@@ -2885,6 +2910,8 @@ test("watch streams compact cards and sees new messages without a revision chang
     assert.deepEqual(cli(root, ["list"]).settings.taskLimits, taskLimits);
     cli(root, ["settings"], { taskLimits: {} });
     assert.equal((await frame()).data.settings.taskLimits, undefined);
+    cli(root, ["settings"], { taskLimits: initial.settings.taskLimits });
+    assert.deepEqual((await frame()).data.settings.taskLimits, initial.settings.taskLimits);
     cli(root, ["settings"], { showCardPreviews: false });
     assert.deepEqual((await frame()).data.settings, { ...initial.settings, showCardPreviews: false });
     cli(root, ["settings"], { showCardPreviews: "false" }, "INVALID_INPUT");
