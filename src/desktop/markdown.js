@@ -128,8 +128,20 @@ function createChatMarkdown() {
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   const quotedBoardReference = /^#(?<board>[^\s\0][^\r\n\0]*?)\/(?<foreignTask>T-\d{4,})$/u;
+  const shortTaskReference = String.raw`#?T-\d{4,}`;
+  const references = [
+    // Punctuation attached to a short ID ends the reference before a nearby path.
+    String.raw`${shortTaskReference}(?=[,;:!?)]|\.(?![\p{L}\p{N}]))`,
+    String.raw`#(?<board>[^#\s\0][^#\r\n\0]*?)\/(?<foreignTask>T-\d{4,})`,
+    shortTaskReference,
+    String.raw`v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?`,
+    String.raw`[\da-fA-F]{64}|[\da-fA-F]{4,40}`,
+  ];
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
-    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:#?T-\d{4,}|#(?<board>[^#\s\0][^#\r\n\0]*?)\/(?<foreignTask>T-\d{4,})|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
+    const reference = new RegExp(
+      String.raw`(?<![\p{L}\p{N}_.\/%\\-])(?:${references.join("|")})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])`,
+      "gu",
+    );
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
       let inLink = false;

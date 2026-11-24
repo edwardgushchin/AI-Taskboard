@@ -49,6 +49,15 @@ test("chat task links accept separators in board names", () => {
   }
 });
 
+test("a board name can start with a task ID without consuming a neighboring path", () => {
+  const html = markdown.render("#T-0013 Свод/T-0014, а здесь #T-0013, путь План/Факт/T-0014.", { agent: true });
+  const links = [...html.matchAll(/<a class="chat-task-reference"[^>]*>/g)].map(match => match[0]);
+  assert.deepEqual(links, [
+    '<a class="chat-task-reference" href="#T-0013 Свод/T-0014" data-task="T-0014" data-task-board="T-0013 Свод">',
+    '<a class="chat-task-reference" href="#T-0013" data-task="T-0013">',
+  ]);
+});
+
 test("short commit references require explicit context in prose and inline code", () => {
   for (const env of [{}, { agent: true }, { agent: true, report: true }, { coordination: true }]) {
     for (const value of ["190cb97", "ABCDEF12", "abcd", "1".repeat(39)]) {

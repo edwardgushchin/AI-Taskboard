@@ -37,7 +37,7 @@ const boardName = "План/Факт";
 const task = "T-0001";
 const sourceTitle = "Карточка исходной доски";
 const targetTitle = "Карточка другой доски";
-const mixed = "Сверьте #T-0001, затем (#" + boardName + "/" + task + ").";
+const mixed = "Сверьте #T-0001, путь План/Факт/T-0002. Затем (#" + boardName + "/" + task + ").";
 const missing = "Проверка #Отсутствующая доска/T-0001.";
 const reply = [mixed, missing].join("\n\n");
 const results = [];
@@ -128,12 +128,12 @@ async function activate(window, selector, keyboard = false) {
   window.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...point });
 }
 
-async function expectCard(window, project, title, before, count) {
+async function expectCard(window, project, title, before, count, id = task) {
   await until(() => evaluateWith(window, (expectedId, expectedTitle) => {
     const sheet = document.querySelector("#sheet");
     return sheet.open && taskInSheet?.id === expectedId && taskInSheet.title === expectedTitle &&
       sheet.querySelector("#sheet-title").textContent.includes(expectedTitle);
-  }, task, title), title);
+  }, id, title), title);
   const after = await frame(window);
   assert.equal(after.project, project);
   assert.equal(activeSlot(after), activeSlot(before));
@@ -322,6 +322,27 @@ async function run() {
   await activate(other, boardLink(boardName), true);
   await expectCard(other, target, targetTitle, restored, 2);
   results.push("После восстановления исходного названия работает первоначальная ссылка на «План/Факт».");
+
+  const prefixedName = "T-0001 Свод";
+  const secondTitle = "Вторая карточка другой доски";
+  cli(target, ["settings"], { name: prefixedName });
+  const secondTask = cli(target, ["create"], plannedDraft({ title: secondTitle })).id;
+  assert.equal(secondTask, "T-0002");
+  confirmFixtureDraft(target, secondTask);
+  const prefixedReference = "#" + prefixedName + "/" + secondTask;
+  persist(source, "Открой вторую карточку", item("Открой " + prefixedReference + "."));
+  await open(other, source);
+  await openChat(other);
+  const prefixedLink = boardLink(prefixedName);
+  await until(
+    () => evaluateWith(other, selector => Boolean(document.querySelector(selector)), prefixedLink),
+    "полная ссылка на доску с номером в начале имени",
+  );
+  const titled = await frame(other);
+  await activate(other, prefixedLink, true);
+  await expectCard(other, target, secondTitle, titled, 2, secondTask);
+  await capture(other, "prefixed-card.png");
+  results.push("Ссылка на «T-0001 Свод» с Enter открыла T-0002. Короткая T-0001 рядом с обычным путём в сохранённом ответе открыла исходную карточку.");
 
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
   const version = execFileSync(process.env.TASKBOARD_CHECK_NODE, ["--version"], { encoding: "utf8", windowsHide: true }).trim();
