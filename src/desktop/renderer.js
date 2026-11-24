@@ -2319,7 +2319,7 @@ function draftComposer() {
   goalPending.setAttribute("role", "status");
   goalPending.hidden = true;
   const goalActions = element("div", undefined, "board-goal-actions");
-  const saveGoal = button("", () => changeGoal("edit", goalText.value.trim()), "quiet");
+  const saveGoal = button("", () => changeGoal("edit", goalText.value), "quiet");
   const pauseGoal = button("", () => changeGoal("pause"), "quiet");
   const resumeGoal = button("", async () => {
     if (!currentGoal || resumeGoal.hidden || resumeGoal.disabled) return;
@@ -2367,7 +2367,7 @@ function draftComposer() {
     bindLocalized(goalPending, "textContent", () => t(clearingGoal
       ? "ui.waiting_for_the_codex_chat_to_become_available_ddb2e85f"
       : goalResumeWaiting ? "ui.waiting_for_goal_context" : "ui.starting_39fd3c7e"));
-    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value.trim() === currentGoal.objective;
+    saveGoal.disabled = changingGoal || !goalText.value.trim() || goalText.value === currentGoal.objective;
     pauseGoal.disabled = clearGoal.disabled = changingGoal;
   };
   const showGoal = goal => {
@@ -2412,7 +2412,7 @@ function draftComposer() {
     try {
       const result = await api.boardGoal(kind, objective);
       if (!result.ok) throw new Error(boardError(result.error));
-      if (kind === "edit" && goalText.value.trim() === objective) goalText.value = result.data?.objective ?? "";
+      if (kind === "edit" && goalText.value === objective) goalText.value = result.data?.objective ?? "";
       if (revision === goalRevision) editor.updateGoal(result.data);
     } catch (error) {
       goalError.textContent = error.message;
@@ -3378,7 +3378,25 @@ function draftComposer() {
       }
       const container = element("div", undefined, "chat-run");
       renderRunActivity(container, turn.items.filter(item => !liveIds.has(item.id)), true, turn.durationMs, undefined,
-        { dialogue: true, seenMessages: messages, markdownCache });
+        { dialogue: true, seenMessages: messages, markdownCache, managerIncomplete: Boolean(turn.recovery) });
+      if (turn.recovery && !(turn.outcome?.status === "running" && (active || managerBusy))) {
+        const status = element("div", undefined, "manager-recovery");
+        status.append(element("span", turn.outcome?.reason || (() => t("ui.manager_recovery_unknown"))));
+        const recover = button(() => t("ui.manager_recovery_action"), async () => {
+          recover.disabled = true;
+          try {
+            await queueStorage("recover", undefined, turn.recovery);
+            await editor.refreshQueue();
+          } catch (error) {
+            if (!disposed) message(error.message);
+          } finally {
+            if (!disposed) recover.disabled = false;
+          }
+        }, "quiet");
+        status.append(recover);
+        container.append(status);
+        container.hidden = false;
+      }
       rememberMessages(container, messages);
       if (!container.hidden) {
         historyRuns.set(container, turn);
@@ -3489,7 +3507,9 @@ function draftComposer() {
         const canInstall = () => !disposed && !reloadAfterHistory &&
           generation === historyGeneration && canBrowseHistory();
         // A large saved reply can monopolize the renderer while the user starts typing.
-        const prepared = active ? undefined : await prepareRecentHistory(result.data.turns, canInstall);
+        const turns = result.data.turns;
+        const needsLiveState = active || turns.some(turn => turn.recovery);
+        const prepared = needsLiveState ? undefined : await prepareRecentHistory(turns, canInstall);
         if (!canInstall()) {
           if (!disposed && generation !== historyGeneration && canBrowseHistory()) reloadAfterHistory = true;
           return;
@@ -3502,7 +3522,7 @@ function draftComposer() {
           historyGeneration++;
           olderNodes.length = 0;
           olderPages.length = 0;
-          recentTurns = result.data.turns;
+          recentTurns = turns;
           recentCursor = olderCursor = result.data.nextCursor;
           seenMessages.clear();
           const next = prepared ?? renderHistoryPage(recentTurns);
@@ -3680,7 +3700,7 @@ function draftComposer() {
   input.addEventListener("input", syncAction);
   for (const event of ["input", "select", "click", "compositionend"]) input.addEventListener(event, syncMentions);
   input.addEventListener("blur", closeMentions);
-  const renderTurn = (turn, items, completed) => {
+  const renderTurn = (turn, items, completed, managerIncomplete = false) => {
     turn.items = items;
     const timeline = turn.deliveries.size ? [...items] : items;
     // A delivery can replace the local bubble, but must follow activity already shown at send time.
@@ -3700,7 +3720,8 @@ function draftComposer() {
     }
     turn.lastItem = timeline.at(-1)?.id;
     renderActivity(turn.container, completed ? timeline :
-      timeline.filter(item => item.type !== "reasoning" || item.status !== "inProgress"), completed);
+      timeline.filter(item => item.type !== "reasoning" || item.status !== "inProgress"), completed,
+      { dialogue: true, seenMessages, managerIncomplete });
   };
   function runningLabel(running) {
     let status = thinkingLabel();
@@ -3762,8 +3783,8 @@ function draftComposer() {
     }).catch(() => {});
   }
   const pasteFiles = submitted => Promise.all(submitted.map(file => api.filePayload(file)));
-  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId) => {
-    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId);
+  const queueStorage = async (action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences) => {
+    const result = await api.boardQueue(project, action, id, draft, goal, attachments, reviewModeQuestionId, quotedReferences);
     if (!result.ok) throw new Error(boardError(result.error));
     return result.data;
   };
@@ -3839,22 +3860,27 @@ function draftComposer() {
       for (const job of [...queued]) {
         if (job.id && !ids.has(job.id) && !job.sending && !job.editing) removeWork(job);
       }
-      for (const { id, draft, goal, files, failed = false, inFlight } of jobs) {
+      for (const { id, draft, quotedReferences, goal, files, failed = false, inFlight, recovery, historyPending } of jobs) {
         if (active?.id === id) continue;
         const job = queued.find(job => job.id === id);
         if (!job) {
-          enqueue(id, draft, goal, files.map(file => file.link ? { ...file, size: file.link.size } : new File([file.bytes], file.name, { type: file.type })), failed, inFlight);
+          const submitted = files.map(file => file.link
+            ? { ...file, size: file.link.size }
+            : new File([file.bytes], file.name, { type: file.type }));
+          enqueue(id, draft, goal, submitted, failed, inFlight, quotedReferences, recovery, historyPending);
           continue;
         }
         const changedFlight = job.inFlight !== inFlight;
+        const changedHistory = Boolean(job.historyPending) !== Boolean(historyPending);
         job.inFlight = inFlight;
+        job.historyPending = historyPending;
         if (!job.editing && !job.sending) {
-          if (draft !== job.draft) {
+          if (draft !== job.draft || quotedReferences !== job.quotedReferences) {
             job.draft = draft;
-            job.request = draft.trim();
+            job.quotedReferences = quotedReferences;
             updateQueuedPreview(job);
           }
-          if (failed !== job.failed || changedFlight) {
+          if (failed !== job.failed || changedFlight || changedHistory) {
             job.failed = failed;
             renderQueuedActions(job);
           }
@@ -3891,7 +3917,9 @@ function draftComposer() {
       status.append(element("span", () => t("ui.sending_15dba7c5")));
       return;
     }
-    if (job.failed) status.append(element("span", () => t("ui.not_sent_28bb3764"), "board-queued-failed"));
+    if (job.failed) {
+      status.append(element("span", () => t(job.historyPending ? "ui.manager_history_pending" : "ui.not_sent_28bb3764"), "board-queued-failed"));
+    }
     if (job.failed) status.append(button(() => t("ui.retry_553b2066"), async () => {
       await loadHistory()?.catch(() => {});
       if (!queued.includes(job)) return;
@@ -3901,8 +3929,10 @@ function draftComposer() {
       renderQueuedActions(job);
       sendNext();
     }, "quiet"));
-    status.append(button(() => t("ui.edit_086d59cf"), () => editQueuedMessage(job), "quiet"));
-    if (!job.goal) status.append(button(() => t("ui.send_now_84358b1c"), () => sendQueuedNow(job), "quiet"));
+    if (!job.recovery && !job.historyPending) {
+      status.append(button(() => t("ui.edit_086d59cf"), () => editQueuedMessage(job), "quiet"));
+      if (!job.goal) status.append(button(() => t("ui.send_now_84358b1c"), () => sendQueuedNow(job), "quiet"));
+    }
     const remove = button("", async () => {
       if (!queued.includes(job) || job.sending || job.editing) return;
       job.sending = true;
@@ -3950,7 +3980,6 @@ function draftComposer() {
           validate();
         }
         job.draft = edit.value;
-        job.request = edit.value.trim();
         updateQueuedPreview(job);
       }
       job.preview.hidden = false;
@@ -3962,7 +3991,9 @@ function draftComposer() {
     };
     const saveButton = button(() => t("ui.save_7eea8139"), () => finish(true), "quiet");
     const cancel = button(() => t("ui.cancel_4c6dcc32"), () => finish(false), "quiet");
-    const validate = () => { saveButton.disabled = !edit.value.trim() && (job.goal || !job.submitted.length); };
+    const validate = () => {
+      saveButton.disabled = !edit.value.trim() && !job.quotedReferences && (job.goal || !job.submitted.length);
+    };
     edit.addEventListener("input", validate);
     edit.addEventListener("keydown", event => {
       if (event.isComposing) return;
@@ -4149,12 +4180,14 @@ function draftComposer() {
     queued.splice(queued.indexOf(next), 1);
     const { request, goal, submitted } = next;
     next.row?.remove();
-    const entry = next.entry ?? chatMessage("user", request, next.messageFiles, true, false, next.id);
+    const entry = next.recovery || next.historyPending ? undefined :
+      next.entry ?? chatMessage("user", request, next.messageFiles, true, false, next.id);
     const turn = beginTurn(next.id, entry);
     const { container, thinking } = turn;
     let accepted = false;
     let deferred = false;
     let orderChanged = false;
+    let persistedError = false;
     void (async () => {
       void loadHistory()?.catch(() => {});
       const pasted = await pasteFiles(submitted);
@@ -4173,8 +4206,9 @@ function draftComposer() {
       if (!result.ok) throw new Error(boardError(result.error));
       const { answer, error, items = [], keepQueued } = result.data;
       accepted = !keepQueued;
+      persistedError = accepted && Boolean(error);
       dialogueViewport.update(() => {
-        renderTurn(turn, items, true);
+        renderTurn(turn, items, true, Boolean(error));
         updateUnreadMessages();
         if (answer && !container.querySelector(".chat-run-final")) chatMessage("agent", answer, [], true, true, undefined, items.findLast(item => item.type === "agentMessage")?.at);
         if (error) chatMessage("agent", error, [], true);
@@ -4197,7 +4231,7 @@ function draftComposer() {
       editor.updateManagerRun(managerRun);
       if (accepted) {
         releaseSubmittedPreviews(submitted);
-        if (loadingHistory || !container.childElementCount || (historyInvalidated && atEndOfHistory()) ||
+        if (next.recovery || next.historyPending || persistedError || loadingHistory || !container.childElementCount || (historyInvalidated && atEndOfHistory()) ||
             log.childElementCount - olderNodes.length - 2 > 120) {
           editor.invalidateHistory();
         }
@@ -4207,9 +4241,9 @@ function draftComposer() {
       next.failed = !deferred;
       queued.unshift(next);
       renderQueuedActions(next);
-      entry.remove();
+      entry?.remove();
       queue.prepend(next.row);
-      if (orderChanged) editor.refreshQueue();
+      if (orderChanged || !deferred) editor.refreshQueue();
       else sendNext();
     });
   }
@@ -4217,7 +4251,7 @@ function draftComposer() {
     event.preventDefault();
     if (dictation || savingQueuedMessage || !hasDraft()) return;
     const text = input.value;
-    const draft = quoteMessage(text, quotes);
+    const quotedReferences = quoteMessage("", quotes);
     const goal = goalMode;
     const submitted = [...files];
     const replies = log.querySelectorAll(".board-manager-message[data-message-id]");
@@ -4230,7 +4264,7 @@ function draftComposer() {
     quoteDraft.sync();
     try {
       await restoreQueue();
-      id = await queueStorage("add", undefined, draft, goal, await pasteFiles(submitted), reviewModeQuestionId);
+      id = await queueStorage("add", undefined, text, goal, await pasteFiles(submitted), reviewModeQuestionId, quotedReferences);
     } catch (error) {
       if (!disposed) message(error.message);
       return;
@@ -4253,7 +4287,7 @@ function draftComposer() {
     attachments.hidden = !files.length;
     if (goalMode === goal) setGoalMode(false);
     if (active?.id !== id && !queued.some(job => job.id === id)) {
-      enqueue(id, draft, goal, submitted);
+      enqueue(id, text, goal, submitted, false, false, quotedReferences);
     }
     openChat();
     showWork(goal);
@@ -4261,12 +4295,13 @@ function draftComposer() {
     syncAction();
   });
   function updateQueuedPreview(job) {
+    const message = [job.draft, job.quotedReferences].filter(Boolean).join("\n\n");
+    job.request = job.goal ? message : message.trim();
     job.preview.textContent = job.request.replace(/\s+/g, " ") || job.messageFiles.map(file => file.name).join(", ");
     job.preview.title = job.preview.textContent.slice(0, 180);
     if (job.handle) controlLabelForIcon(job.handle, () => t("ui.reorder_queued_message", { message: job.preview.title }));
   }
-  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false) {
-    const request = draft.trim();
+  function enqueue(id, draft, goal, submitted, failed = false, inFlight = false, quotedReferences, recovery, historyPending) {
     const messageFiles = submitted.map(file => {
       if (!previewSource(file)) return { name: file.name, size: file.size, link: file.link };
       const url = URL.createObjectURL(file);
@@ -4294,7 +4329,8 @@ function draftComposer() {
     const status = element("div", undefined, "board-queued-status");
     row.append(preview, status);
     queue.append(row);
-    const job = { id, row, preview, status, handle, draft, request, goal, submitted, messageFiles, failed, inFlight };
+    const job = { id, row, preview, status, handle, draft, quotedReferences, goal, submitted, messageFiles,
+      failed, inFlight, recovery, historyPending };
     queued.push(job);
     if (handle) {
       handle.addEventListener("dragstart", event => {

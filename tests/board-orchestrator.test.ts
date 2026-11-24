@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, hash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
@@ -31,8 +31,8 @@ import { commitFileHashes, inspectProjectPath, projectSha256 } from "../src/desk
 import { readReviewReports, saveReviewReports } from "../src/desktop/review-history.ts";
 import { reviewerActivity, withReviewerChat } from "../src/desktop/reviewer-chat.ts";
 import {
-  goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread, managerWorkItems,
-  readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+  completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread, managerWorkItems,
+  readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
   saveManagerHistory, sendGoalMessage,
 } from "../src/desktop/manager-history.ts";
 import { backgroundGoalHistory } from "../src/desktop/goal-history-background.ts";
@@ -111,6 +111,7 @@ function fixture(t: TestContext) {
     update: (goal: BoardGoal | null) => void; activity: (items: RunActivity[]) => void; settings?: ChatSettings | null;
     enableNotifications: (steer?: (text: string, images: string[]) => Promise<void>) => void; endTurn: () => void;
     finishTurn?: () => boolean;
+    acceptTurn?: (thread: string, turn: string) => void; retrying?: (reason: string) => void;
     role?: string; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean> };
   type Reply = (action: RunAction, prompt: string, images: string[], id?: string, context?: any,
     waiting?: (waiting: boolean) => void, signal?: AbortSignal, goal?: GoalRequest) => Promise<{ text: string } | { interrupted: true }>;
@@ -122,6 +123,9 @@ function fixture(t: TestContext) {
   const chatBinding = join(project, ".tasks", "manager-conversation.json");
   const idleGoalActions: BoardGoalAction[] = [];
   let providerHistoryReads = 0;
+  let savedTurn: { items: { type: string; phase: string; text: string }[] } | undefined;
+  let savedTurnId: string | undefined;
+  const managerTurnReads: string[] = [];
   let legacyHistory: (cursor: string | null) => ReturnType<typeof readBoardHistory> = async () => {
     throw new Error("Codex history unavailable.");
   };
@@ -169,9 +173,13 @@ function fixture(t: TestContext) {
     reviewModeReplyTarget, setReviewModeFromChat,
     reviewsAcceptanceRepair, usesIndependentReviewer, defaultBoardAgents, reviewVerifier,
     existsSync, storageDirectory, readdirSync, rmSync, hash, randomUUID, readJson, writeJson, saveReviewReports, withReviewerChat, reviewerActivity,
-    backgroundGoalHistory, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerUnread,
-    managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerView,
+    backgroundGoalHistory, completedManagerAnswer, goalActivityItems, goalMessages, hasGoalHistory, hasManagerMessage, managerChatItems, managerHistoryFile, managerUnread,
+    managerWorkItems, readDialogueReference, readManagerHistory, readManagerMessages, readManagerProviderHistory, readManagerRecovery, readManagerView,
     saveManagerHistory, sendGoalMessage, goalActionTools, runGoalAction,
+    readManagerTurn: async (_profile: string, _project: string, reference: { turnId?: string }) => {
+      managerTurnReads.push(reference.turnId ?? "");
+      return !savedTurnId || savedTurnId === reference.turnId ? savedTurn : undefined;
+    },
     send() {},
     notifyRunChange() {},
     tokenUsageQueue: () => ({
@@ -221,7 +229,9 @@ function fixture(t: TestContext) {
       if (clearGoalError) throw new Error(clearGoalError);
       if (action.kind === "edit") {
         const { goal } = readJson(binding) as { goal: BoardGoal };
-        return { ...goal, objective: action.objective };
+        const updated = { ...goal, objective: action.objective };
+        action.commit?.(updated, randomUUID());
+        return updated;
       }
       return null;
     },
@@ -245,7 +255,9 @@ function fixture(t: TestContext) {
     replyToBoard: async (_profile: string, cwd: string, prompt: string, images: string[], action: RunAction,
       _tools: unknown, instructions: string, _signal: AbortSignal,
       session: { id?: string; title: string; save: (id: string) => void; attachmentContext?: string; mcpTools: { name: string; description: string }[];
-        role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
+        role?: "manager" | "reviewer"; separateTurn?: boolean; readOnly?: boolean; recovery?: boolean;
+        access?: ManagerAccess; confirmApproval?: (details: string) => Promise<boolean>;
+        onTurnAccepted?: (thread: string, turn: string) => void; onProviderRetry?: (reason: string) => void;
         onWaiting: (waiting: boolean) => void; onTurnEnded: () => void; goal?: string; resumeGoal?: boolean; onGoalSet: () => void;
         finishGoalTurn?: () => boolean;
         onControl: (control: { steer: (text: string, images: string[], id?: string) => Promise<void>; interrupt: () => Promise<void> }) => void;
@@ -284,7 +296,13 @@ function fixture(t: TestContext) {
         "task_set_milestone", "tag_set_color", "github_read",
       ];
       const mode = boardReviewMode((await callCli(project, ["settings"], undefined, false)).data);
-      assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
+      if (session.recovery) {
+        assert.equal(session.readOnly, true);
+        assert.equal(session.separateTurn, true);
+        assert.deepEqual(Array.from(_tools as { name: string }[], tool => tool.name).sort(), ["board_list", "task_show"]);
+        assert.equal(session.mcpTools.length, 0);
+      } else {
+        assert.deepEqual(Array.from(session.mcpTools, tool => tool.name).sort(),
         [...expectedTools.filter(name => (name !== "task_accept" || (mode !== "human" && mode !== "reviewer-human")) && (!instructions.includes("This turn repairs") || (!name.startsWith("project_git_") && !["task_start", "task_start_batch", "task_accept", "task_request_changes"].includes(name)))),
         ...(!manualTurn && !cleanupTurn && !instructions.includes("This turn repairs") ? ["task_return_to_draft"] : []),
         ...(!manualTurn && !cleanupTurn && !reviewTurn && !instructions.includes("This turn repairs") && !prompt.startsWith("AI Taskboard queue:") ? ["board_set_auto_mode"] : []),
@@ -295,12 +313,13 @@ function fixture(t: TestContext) {
             : ["goal_read", "goal_send", "goal_edit"])
           : []),
         ...(!reviewTurn && !cleanupTurn && !instructions.includes("This turn repairs") && !session.goal && !session.resumeGoal &&
-          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update"] : []),
+          !prompt.startsWith("AI Taskboard queue:") ? ["app_check_updates", "app_install_update", "board_import_project_rules"] : []),
         ...(!reviewTurn && !manualTurn && !cleanupTurn && !session.goal && !session.resumeGoal &&
           !instructions.includes("This turn repairs") && session.role === "manager" && !prompt.startsWith("AI Taskboard queue:") ?
           ["task_set_review_mode"] : []),
         ...(reviewTurn && mode === "reviewer" ? ["manager_ack", "task_cancel", "task_start"] : [])].sort());
-      if (reviewTurn) {
+      }
+      if (reviewTurn && !session.recovery) {
         assert.doesNotMatch(instructions, /manager_inbox|task_cleanup_status/);
         assert.equal(session.attachmentContext, undefined);
         assert.equal(session.separateTurn, true);
@@ -311,14 +330,23 @@ function fixture(t: TestContext) {
       if (!session.id) session.save(newThread);
       return respond(action, prompt, images, session.id, session.attachmentContext && JSON.parse(session.attachmentContext),
         session.onWaiting, _signal, { objective: session.goal, resume: session.resumeGoal, accepted: session.onGoalSet, delivered: session.onMessage,
-          controls: session.onGoalControl, update: session.onGoal, activity: session.onActivity,
+          controls: control => session.onGoalControl(async action => {
+            const updated = await control(action);
+            if (action.kind === "edit" && updated) action.commit?.(updated, randomUUID());
+            return updated;
+          }), update: session.onGoal, activity: session.onActivity,
           role: session.role, settings: session.settings, endTurn: session.onTurnEnded, access: session.access,
           confirmApproval: session.confirmApproval, finishTurn: session.finishGoalTurn,
+          acceptTurn: session.onTurnAccepted, retrying: session.onProviderRetry,
           enableNotifications: steer => session.onControl({
             steer: async (text, images, id) => {
               if (steer) await steer(text, images);
               else managerNotifications.push(text);
-              if (id) session.onMessage(id);
+              if (id) {
+                const user = { text, files: [] };
+                session.onActivity([{ id, title: "", text, type: "userMessage", status: "completed", userMessage: user } as RunActivity]);
+                session.onMessage(id);
+              }
             }, interrupt: async () => {},
           }) });
     },
@@ -401,6 +429,11 @@ function fixture(t: TestContext) {
     stop: () => handlers.get("board:stopOrchestrator")!({ sender }),
     history: (cursor?: string, view?: string) => handlers.get("board:history")!({ sender }, project, cursor, view),
     setLegacyHistory: (reader: typeof legacyHistory) => { legacyHistory = reader; },
+    setSavedTurn: (turn: typeof savedTurn, id?: string) => {
+      savedTurn = turn;
+      savedTurnId = id;
+    },
+    managerTurnReads,
     markRead: (ids: string[], board = project) => handlers.get("board:readManagerMessages")!({ sender }, board, ids),
     providerHistoryReads: () => providerHistoryReads,
     pendingQuestion: () => runtime.managerQuestion(project)?.view,
@@ -2181,6 +2214,180 @@ test("dialogue results filter coordination and do not add it to the goal log", a
   assert.equal(readManagerHistory(f.project)!.turns.flatMap(turn => turn.items).filter(item => item.messages?.length).length, 9);
 });
 
+test("manager recovery uses the selected saved reply and protects applied changes", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const text = "Create a draft for caching";
+  const { data: id } = await f.queue("add", undefined, text, false, []);
+  const result = await f.run(text, async (act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    session!.acceptTurn!(f.dialogueId, "original-turn");
+    assert.equal((await f.queue("list")).data.length, 0);
+    const created = await act("task_create", plannedDraft({ title: "Cache", tags: ["Performance"] }));
+    assert.equal(created.ok, true, created.error?.message);
+    session!.retrying!("Selected model is at capacity.");
+    throw new Error("Codex did not respond in time.");
+  }, [], false, id);
+  assert.equal(result.ok, true, result.error?.message);
+  const readTurns = () => readManagerHistory(f.project, null, "chat")!.turns;
+  const [original] = readTurns();
+  assert.equal(original.outcome?.status, "interrupted");
+  assert.match(original.outcome?.reason ?? "", /did not respond in time.*at capacity/s);
+  assert.ok(original.recovery);
+  for (const invalid of ["../" + original.recovery, original.recovery + ".json"]) {
+    assert.equal((await f.queue("recover", undefined, invalid)).data, null);
+  }
+  const requested = await f.queue("recover", undefined, original.recovery);
+  assert.equal((await f.queue("recover", undefined, original.recovery)).data, requested.data);
+  const retried = await f.run(text, async (act, prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    assert.equal(prompt, text);
+    const listed = await act("board_list", {});
+    assert.equal(listed.data.tasks.length, 1);
+    const blocked = await act("task_create", { title: "Cache", tags: ["Performance"] });
+    assert.equal(blocked.error.code, "RECOVERY_READ_ONLY");
+    session!.acceptTurn!(f.dialogueId, "recovery-turn");
+    return { text: "The draft already exists." };
+  }, [], false, requested.data);
+  assert.equal(retried.data?.answer, "The draft already exists.", retried.error?.message ?? retried.data?.error);
+  const [restored] = readTurns();
+  assert.equal(readTurns().length, 1);
+  assert.deepEqual(restored.messages, original.messages);
+  assert.equal(restored.items.filter(item => item.phase === "final_answer").length, 1);
+  assert.equal(restored.outcome?.status, "completed");
+  assert.equal(restored.recovery, undefined);
+  assert.equal((await f.cli(["list", "--compact"])).data.tasks.length, 1);
+});
+
+test("manager recovers a provider final after losing the connection", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const text = "Give me the board summary";
+  const { data: id } = await f.queue("add", undefined, text, false, []);
+  const result = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    session!.acceptTurn!(f.dialogueId, "original-turn");
+    f.setSavedTurn({ items: [{ type: "agentMessage", phase: "final_answer", text: "The summary is ready." }] });
+    throw new Error("Connection closed.");
+  }, [], false, id);
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(result.data.answer, "The summary is ready.");
+  const { turns } = readManagerHistory(f.project, null, "chat")!;
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].messages.length, 1);
+  assert.equal(turns[0].items.length, 1);
+  assert.equal(turns[0].outcome?.status, "completed");
+  assert.equal(turns[0].recovery, undefined);
+});
+
+test("an accepted manager message remains durable when writing history fails", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const text = "Keep this dialogue message";
+  const { data: id } = await f.queue("add", undefined, text, false, []);
+  const history = join(f.project, ".tasks", "manager-chat");
+  const sent = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    await writeFile(history, "Block creation of the history directory.");
+    session!.acceptTurn!(f.dialogueId, "original-turn");
+    const [queued] = (await f.queue("list")).data;
+    assert.equal(queued.id, id);
+    assert.equal(queued.failed, true);
+    throw new Error("Connection closed.");
+  }, [], false, id);
+  assert.equal(sent.ok, true, sent.error?.message);
+  assert.equal(sent.data.keepQueued, true);
+  assert.match(sent.data.error, /Connection closed/);
+
+  await f.queue("retry", id);
+  const failed = await f.run(text, async () => assert.fail("Do not resend an accepted message"), [], false, id);
+  assert.equal(failed.error.code, "BOARD_QUEUE_FAILED");
+  assert.equal((await f.queue("list")).data[0].id, id);
+
+  rmSync(history);
+  await f.queue("retry", id);
+  const saved = await f.run(text, async () => assert.fail("Retry only the history write"), [], false, id);
+  assert.equal(saved.ok, true, saved.error?.message);
+  assert.equal((await f.queue("list")).data.length, 0);
+  const [turn] = readManagerHistory(f.project, null, "chat")!.turns;
+  assert.deepEqual(turn.messages.map(message => message.text), [text]);
+  assert.equal(turn.outcome?.status, "interrupted");
+  assert.match(turn.outcome?.reason ?? "", /Connection closed/);
+  assert.ok(turn.recovery);
+});
+
+test("an interrupted manager turn preserves its outcome when the running state was already saved", async t => {
+  const f = fixture(t);
+  await f.cli(["init"]);
+  const text = "Keep the reason for this interruption";
+  const { data: id } = await f.queue("add", undefined, text, false, []);
+  const root = join(f.project, ".tasks");
+  const history = join(root, "manager-chat");
+  const backup = join(root, "manager-chat-saved");
+  let recovery: string | undefined;
+  const result = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+    session!.acceptTurn!(f.dialogueId, "original-turn");
+    assert.equal((await f.queue("list")).data.length, 0);
+    const [running] = readManagerHistory(f.project, null, "chat")!.turns;
+    assert.equal(running.outcome?.status, "running");
+    recovery = running.recovery;
+    await rename(history, backup);
+    await writeFile(history, "Block only the final history write.");
+    throw new Error("Connection closed after saving the running state.");
+  }, [], false, id);
+  assert.equal(result.data.keepQueued, true);
+  assert.match(result.data.error, /Connection closed after saving the running state/);
+  const [queued] = (await f.queue("list")).data;
+  assert.equal(queued.id, id);
+  assert.equal(queued.historyPending, true);
+  assert.equal(queued.failed, true);
+
+  rmSync(history);
+  await rename(backup, history);
+  assert.ok(recovery);
+  assert.equal((await f.queue("recover", undefined, recovery)).data, id);
+  const saved = await f.run(text, async () => assert.fail("Recover the saved outcome without a provider request"), [], false, id);
+  assert.equal(saved.ok, true, saved.error?.message);
+  assert.equal((await f.queue("list")).data.length, 0);
+  const { turns } = readManagerHistory(f.project, null, "chat")!;
+  assert.equal(turns.length, 1);
+  assert.deepEqual(turns[0].messages.map(message => message.text), [text]);
+  assert.equal(turns[0].outcome?.status, "interrupted");
+  assert.match(turns[0].outcome?.reason ?? "", /Connection closed after saving the running state/);
+});
+
+for (const savedTurnId of ["original-turn", "recovery-turn"]) {
+  test("an interrupted recovery restores the late answer from " + savedTurnId, async t => {
+    const f = fixture(t);
+    await f.cli(["init"]);
+    const text = "Recover the original answer";
+    const { data: id } = await f.queue("add", undefined, text, false, []);
+    const first = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+      session!.acceptTurn!(f.dialogueId, "original-turn");
+      throw new Error("Original connection closed.");
+    }, [], false, id);
+    assert.match(first.data.error, /Original connection closed/);
+    const [original] = readManagerHistory(f.project, null, "chat")!.turns;
+    const retry = await f.queue("recover", undefined, original.recovery);
+    const interrupted = await f.run(text, async (_act, _prompt, _images, _thread, _context, _waiting, _signal, session) => {
+      session!.acceptTurn!(f.dialogueId, "recovery-turn");
+      throw new Error("Recovery connection closed.");
+    }, [], false, retry.data);
+    assert.match(interrupted.data.error, /Recovery connection closed/);
+    const [pending] = readManagerHistory(f.project, null, "chat")!.turns;
+    assert.equal(pending.recovery, original.recovery);
+
+    const answer = "Saved answer restored from " + savedTurnId;
+    f.setSavedTurn({ items: [{ type: "agentMessage", phase: "final_answer", text: answer }] }, savedTurnId);
+    const recover = await f.queue("recover", undefined, pending.recovery);
+    const restored = await f.run(text, async () => assert.fail("Use the original saved answer"), [], false, recover.data);
+    assert.equal(restored.data.answer, answer);
+    const expected = ["original-turn", "original-turn", "recovery-turn", "original-turn"];
+    if (savedTurnId === "recovery-turn") expected.push("recovery-turn");
+    assert.deepEqual(f.managerTurnReads, expected);
+    const { turns } = readManagerHistory(f.project, null, "chat")!;
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].messages.length, 1);
+    assert.equal(turns[0].items.filter(item => item.phase === "final_answer").length, 1);
+});
+}
+
 test("an interrupted manager request preserves the durable queue until Codex records the message", async t => {
   const f = fixture(t);
   await f.cli(["init"]);
@@ -2188,6 +2395,7 @@ test("an interrupted manager request preserves the durable queue until Codex rec
   const { data: id } = await f.queue("add", undefined, "Исходный текст", false, attachments);
   assert.equal((await f.queue("edit", id, "Новый текст")).ok, true);
   const result = await f.run("Новый текст", async () => ({ interrupted: true }), attachments, false, id);
+  assert.equal(result.ok, true, result.error?.message);
   assert.equal(result.data.keepQueued, true);
   const [saved] = (await f.queue("list")).data;
   assert.equal(saved.id, id);
@@ -2335,16 +2543,18 @@ test("send now steers the active manager with attachments and releases its execu
     assert.equal(f.boardListeners.size, 1);
     const id = "00000000-0000-4000-8000-000000000002";
     const attachments = [file("new.png", "image/png", "bytes")];
-    assert.equal((await f.queue("add", id, "Черновик", false, attachments)).ok, true);
+    const quotedReferences = "Quote 1:\n```\nКонтекст.\n```";
+    assert.equal((await f.queue("add", id, "Черновик", false, attachments, undefined, quotedReferences)).ok, true);
     assert.equal((await f.queue("edit", id, "Send this first")).ok, true);
     const [queued] = (await f.queue("list")).data;
     assert.equal(queued.draft, "Send this first");
+    assert.equal(queued.quotedReferences, quotedReferences);
     assert.equal(new TextDecoder().decode(queued.files[0].bytes), "bytes");
     assert.equal((await f.sendNow("Send this first", attachments, id)).ok, true);
     assert.equal((await f.queue("list")).data.length, 0);
     assert.equal(sent.length, 1);
     assert.deepEqual(JSON.parse(sent[0].text).latestUserMessage, {
-      text: "Send this first", attachments: [{ id: 2, name: "new.png", imageIndex: 1 }],
+      text: "Send this first", quotedReferences, attachments: [{ id: 2, name: "new.png", imageIndex: 1 }],
     });
     assert.match(sent[0].images[0], /^data:image\/png;base64,/);
   } finally {
@@ -3647,12 +3857,22 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   const save = (objective: string, id = goalId) => writeJson(f.binding, {
     provider: "codex", id: f.threadId, goalId: id, history: "local", goal: { objective, status: "paused" },
   });
-  const edit = async (authorization: string, objective: string, expectedObjective: string, id = goalId) => {
+  const edit = async (authorization: string, objective: string, expectedObjective: string, id = goalId, quotedReferences?: string | null) => {
     let response: any;
-    const run = await f.run(authorization, async act => {
+    let queuedId: string | undefined;
+    if (quotedReferences !== undefined) {
+      const queued = await f.queue("add", undefined, authorization, false, [], undefined, quotedReferences ?? undefined);
+      assert.equal(queued.ok, true, JSON.stringify(queued));
+      queuedId = queued.data;
+    }
+    const run = await f.run(authorization, async (act, prompt, _images, _thread, context) => {
+      if (quotedReferences) {
+        assert.equal(prompt, authorization);
+        assert.equal(context?.quotedReferences, quotedReferences);
+      }
       response = await act("goal_edit", { goalId: id, expectedObjective, objective, authorization });
       return { text: response.ok ? response.data.objective : response.error.message };
-    });
+    }, [], false, queuedId);
     assert.equal(run.ok, true, JSON.stringify(run));
     return response;
   };
@@ -3680,7 +3900,6 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
     "Замени текст цели на: Сделай формулировку понятной.",
     "Замени текст цели на:\n«Перепиши цель простыми словами»",
     "Replace the goal with: Make the wording easier to understand, please.",
-    "Замени текст цели на:\n\nQuote 1:\n```\nПерепиши текст справки.\n```",
     "Уточни цель: сделай формулировку более понятной, пожалуйста",
     "Уточни цель в части Linux: сделай текст читабельным",
     "Уточни цель: перепиши её более простыми словами",
@@ -3723,9 +3942,13 @@ test("dialogue edits the selected paused goal and rejects missing, stale and una
   assert.equal((await edit(replace, replacement, original)).error.code, "GOAL_CHANGED");
   assert.equal((await edit(replace, replacement, refined, randomUUID())).error.code, "GOAL_CHANGED");
   assert.deepEqual((await edit(replace, replacement, refined)).data, { objective: replacement, status: "paused" });
-  const multiline = replacement + "\n\nПроверь ссылки и примеры, пожалуйста.";
-  const replaceEnglish = "Replace the goal with:\n" + multiline + "\n\nQuote 1:\n```\nКонтекст обсуждения.\n```";
-  const result = await edit(replaceEnglish, "Обновить справку.", replacement);
+  const quote = "Quote 1:\n```\nПерепиши текст справки.\n```";
+  assert.equal((await edit("Замени текст цели на:", replacement, replacement, goalId, quote)).error.code, "USER_DIRECTION_REQUIRED");
+  const multiline = replacement + "\n\n" + quote + "\n\nПроверь ссылки и примеры, пожалуйста.\n\t  ";
+  const replaceEnglish = "Replace the goal with:\n" + multiline;
+  const ambiguous = await edit(replaceEnglish, "Обновить справку.", replacement, goalId, null);
+  assert.equal(ambiguous.error.code, "USER_DIRECTION_REQUIRED");
+  const result = await edit(replaceEnglish, "Обновить справку.", replacement, goalId, quote);
   assert.deepEqual(result.data, { objective: multiline, status: "paused" });
   const finalObjective = multiline + "\nПроверить журнал ошибок.";
   const explicitEnglish = "Add a check of the error log to the goal, please.";

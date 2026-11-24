@@ -62,7 +62,11 @@ export function syncTaskStatusNotices(project: string, language: string | boolea
   }, 0);
 }
 
-type Message = NonNullable<BoardActivity["userMessage"]> & { clientId?: string; at?: string };
+type Message = Omit<NonNullable<BoardActivity["userMessage"]>, "files"> & {
+  clientId?: string; at?: string;
+  files: { name: string; url?: string; link?: import("../cli/attachment-links.ts").FileLink }[];
+};
+type ProviderTurn = { threadId: string; clientId: string; turnId?: string };
 type Run = {
   message?: Message;
   items: BoardActivity[];
@@ -70,8 +74,12 @@ type Run = {
   durationMs?: number;
   lane?: "chat" | "work" | "notice";
   goalId?: string;
+  outcome?: { status: "running" | "completed" | "interrupted"; reason?: string };
+  provider?: ProviderTurn;
+  recoveryProviders?: ProviderTurn[];
 };
-type Turn = { messages: Message[]; items: BoardActivity[]; durationMs?: number; lane?: Run["lane"]; goalId?: string };
+type Turn = { messages: Message[]; items: BoardActivity[]; durationMs?: number; lane?: Run["lane"]; goalId?: string;
+  outcome?: Run["outcome"]; recovery?: string };
 // Status sync writes unscoped notices. Goal notices record exchanges with the owner.
 const isStatusNotice = ({ lane, goalId }: Pick<Run, "lane" | "goalId">) => lane === "notice" && !goalId;
 const cursorPrefix = "local:";
@@ -269,12 +277,35 @@ export function hasManagerMessage(project: string, id: string, created: number) 
   });
 }
 
+export function readManagerRecovery(project: string, file: string) {
+  if (!filePattern.test(file)) return;
+  const folder = join(project, ".tasks", "manager-chat");
+  if (!exists(folder)) return;
+  directory(folder);
+  const path = join(folder, file);
+  if (!exists(path)) return;
+  const run = readJson(path) as Run;
+  const latest = displayTurns(run, file).at(-1);
+  if (!latest?.recovery || !run.message || !latest.messages[0]) return;
+  return { ...run, originalMessage: run.message, message: latest.messages[0],
+    startedAt: Number(file.slice(0, 13)), id: file.slice(14, -5) };
+}
+
+export function completedManagerAnswer(items: BoardActivity[]) {
+  return items.findLast(item => item.status === "completed" &&
+    ((item.type === "agentMessage" && item.phase === "final_answer" && item.text.trim()) || item.generatedImage?.file));
+}
+
+export function managerHistoryFile(startedAt: number, id: string) {
+  return String(startedAt).padStart(13, "0") + "-" + id + ".json";
+}
+
 export function saveManagerHistory(project: string, startedAt: number, id: string, run: Run) {
   if (!codexThreadPattern.test(id)) throw new Error("Invalid manager history ID.");
   const board = join(project, ".tasks");
   directory(board);
   const folder = join(board, "manager-chat");
-  const file = String(startedAt).padStart(13, "0") + "-" + id + ".json";
+  const file = managerHistoryFile(startedAt, id);
   return withRuntimeLock(board, () => {
     directory(folder, true);
     const path = join(folder, file);
@@ -297,7 +328,7 @@ export function saveManagerHistory(project: string, startedAt: number, id: strin
   });
 }
 
-function displayTurns({ message, items, durationMs, lane, goalId }: Run): Turn[] {
+function displayTurns({ message, items, durationMs, lane, goalId, outcome }: Run, file?: string): Turn[] {
   const turns: Turn[] = [];
   const scope = { ...(lane ? { lane } : {}), ...(goalId ? { goalId } : {}) };
   let current: Turn = { messages: message ? [message] : [], items: [], ...scope };
@@ -310,7 +341,15 @@ function displayTurns({ message, items, durationMs, lane, goalId }: Run): Turn[]
     current = { messages: [{ ...item.userMessage, clientId: item.id,
       ...(item.at ? { at: item.userMessage.at ?? item.at } : {}) }], items: [], ...scope };
   }
-  if (current.messages.length || current.items.length) turns.push({ ...current, durationMs });
+  if (current.messages.length || current.items.length) {
+    if (lane === "chat" && message) {
+      const completed = outcome?.status === "completed" || Boolean(completedManagerAnswer(current.items));
+      turns.push({ ...current, durationMs, outcome: completed ? { status: "completed" } : outcome,
+        recovery: completed ? undefined : file });
+    } else {
+      turns.push({ ...current, durationMs });
+    }
+  }
   return turns;
 }
 
@@ -586,7 +625,7 @@ export function readManagerHistory(project: string, cursor: string | null = null
       consumed++;
       continue;
     }
-    const turns = managerHistoryForView(displayTurns(run), view);
+    const turns = managerHistoryForView(displayTurns(run, name), view);
     if (view !== "chat" || turns.some(turn => turn.messages.length || turn.items.length)) {
       // An inline image can exceed the page budget after Base64 encoding.
       // Keep the first conversation together even if goal notices started the page.
