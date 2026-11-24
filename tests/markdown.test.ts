@@ -13,6 +13,22 @@ const source = ["source-files.cjs", "markdown.js"].map(name =>
   readFileSync(new URL("../src/desktop/" + name, import.meta.url), "utf8")).join("\n");
 const markdown = runInNewContext(source + ";chatMarkdown", { window: { markdownit: MarkdownIt } }) as ReturnType<typeof MarkdownIt>;
 
+test("chat task links keep board names, task IDs and adjacent punctuation separate", () => {
+  for (const env of [{}, { agent: true }, { agent: true, report: true }]) {
+    const text = "Здесь #T-0013, там (#Полевые работы/T-0013), затем `#Говновоз/T-0013`.";
+    const html = markdown.render(text, env);
+    assert.match(html, /href="#T-0013" data-task="T-0013">[^]*?<\/i>T-0013<\/a>,/);
+    assert.match(html, /\(<a [^>]+data-task="T-0013" data-task-board="Полевые работы">[^]*?<\/i>Полевые работы\/T-0013<\/a>\),/);
+    assert.match(html, /data-task-board="Говновоз">[^]*?<\/i>Говновоз\/T-0013<\/a>\./);
+
+    for (const invalid of ["#Полевые работы/T-0013abc", "#Полевые работы/T-0013.5",
+      "#Полевые работы/T-00e3", "#Полевые работы/T-0013/extra", "#T-0013abc"]) {
+      assert.doesNotMatch(markdown.render(invalid, env), /data-task=/, invalid);
+    }
+    assert.doesNotMatch(markdown.render("[#Полевые работы/T-0013](https://example.com)", env), /data-task=/);
+  }
+});
+
 test("short commit references require explicit context in prose and inline code", () => {
   for (const env of [{}, { agent: true }, { agent: true, report: true }, { coordination: true }]) {
     for (const value of ["190cb97", "ABCDEF12", "abcd", "1".repeat(39)]) {

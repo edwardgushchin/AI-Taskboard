@@ -4556,6 +4556,15 @@ function taskBriefSections(task) {
   section(() => t("ui.acceptance_criteria_7e3779c2"), criteria);
 }
 
+async function showBoardTask(board, id) {
+  const result = await api.followBoardReference(frame.project, board);
+  if (!result.ok) {
+    notice(boardError(result.error));
+  } else if (frame.project === result.data.project) {
+    await showTask(id);
+  }
+}
+
 async function showTask(id, dialogue = false) {
   const request = ++taskSheetRequest;
   const project = frame.project;

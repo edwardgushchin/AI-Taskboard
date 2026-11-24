@@ -127,7 +127,7 @@ if (chatMarkdown) {
   const digest = /(?<![\p{L}\p{N}_.%/\\-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\p{L}\p{N}_%/\\-]|\.[\p{L}\p{N}])/u;
   const reportReferences = new RegExp(digest.source + "|" + agentReferences.source, "gu");
   chatMarkdown.core.ruler.after("local_markdown_links", "chat_references", state => {
-    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:T-\d{4,}|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
+    const reference = /(?<![\p{L}\p{N}_.\/%\\-])(?:#(?<board>[^#\/\\\s][^#\/\\\r\n]*?)\/(?<foreignTask>T-\d{4,})|#?T-\d{4,}|v?\d+\.\d+\.\d+(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?|[\da-fA-F]{64}|[\da-fA-F]{4,40})(?![\p{L}\p{N}_\/%\\-]|\.[\p{L}\p{N}])/gu;
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
       let inLink = false;
@@ -149,9 +149,11 @@ if (chatMarkdown) {
             text.content = token.content.slice(cursor, match.index);
             parts.push(text);
           }
-          const type = /^T-/.test(value) ? "chat_task" : fullDigest.test(value) || shortCommit.test(value) ? "code_inline" : "chat_version";
+          const id = match.groups.foreignTask ?? (/^#?T-/.test(value) ? value.replace(/^#/, "") : undefined);
+          const type = id ? "chat_task" : fullDigest.test(value) || shortCommit.test(value) ? "code_inline" : "chat_version";
           const part = new state.Token(type, type === "code_inline" ? "code" : "", 0);
-          part.content = value;
+          part.content = id ?? value;
+          if (match.groups.board) part.meta = { board: match.groups.board };
           parts.push(part);
           cursor = match.index + value.length;
         }
@@ -166,12 +168,15 @@ if (chatMarkdown) {
     }
   });
   chatMarkdown.renderer.rules.chat_task = (tokens, index) => {
-    const id = chatMarkdown.utils.escapeHtml(tokens[index].content);
-    return `<a class="chat-task-reference" href="#${id}" data-task="${id}"><i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>${id}</a>`;
+    const { content: id, meta } = tokens[index];
+    const escape = chatMarkdown.utils.escapeHtml;
+    const label = meta ? meta.board + "/" + id : id;
+    const board = meta ? ' data-task-board="' + escape(meta.board) + '"' : "";
+    return `<a class="chat-task-reference" href="#${escape(label)}" data-task="${id}"${board}><i class="icon codicon codicon-symbol-number" aria-hidden="true"></i>${escape(label)}</a>`;
   };
   chatMarkdown.renderer.rules.chat_version = (tokens, index) =>
     `<span class="chat-version"><i class="icon codicon codicon-milestone" aria-hidden="true"></i>${chatMarkdown.utils.escapeHtml(tokens[index].content)}</span>`;
-  chatMarkdown.core.ruler.after("local_markdown_links", "agent_inline_code", state => {
+  chatMarkdown.core.ruler.after("chat_references", "agent_inline_code", state => {
     if (!state.env.agent) return;
     for (const block of state.tokens) {
       if (block.type !== "inline") continue;
@@ -503,7 +508,9 @@ function chatText(text, context = { taskId: taskInSheet?.id }) {
     if (!link) return;
     event.preventDefault();
     const href = link.getAttribute("href");
-    if (link.dataset.task) {
+    if (link.dataset.taskBoard) {
+      void protect(() => showBoardTask(link.dataset.taskBoard, link.dataset.task))();
+    } else if (link.dataset.task) {
       void protect(() => showTask(link.dataset.task))();
     } else if (localDocumentLink(href)) {
       void protect(() => openMarkdownPreview(href, context))();
