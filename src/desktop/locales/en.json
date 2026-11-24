@@ -1,4 +1,8 @@
 {
+  "ui.manager_history_pending": "History could not be saved",
+  "ui.manager_history_save_failed": "The message was accepted, but the dialogue history could not be saved. Retry saving from the queue.",
+  "ui.manager_recovery_unknown": "The turn has no confirmed result.",
+  "ui.manager_recovery_action": "Recover reply",
   "review_mode.card_question": "Which card?",
   "review_mode.mode_question": "Which review mode?",
   "review_mode.saved": "{id} now uses the “{mode}” review mode.",

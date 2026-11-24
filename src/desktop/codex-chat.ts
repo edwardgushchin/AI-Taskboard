@@ -532,7 +532,7 @@ export async function replyToBoard(
 ) {
   const worklog = boardWorklog(project, "manager");
   let providerAction: ReturnType<typeof providerActions> | undefined;
-  const dispatch: RunAction = (name, args, toolSignal) => name === "provider_tools" || name === "task_tool_grant" || name === "task_tool_revoke"
+  const dispatch: RunAction = (name, args, toolSignal) => !session.recovery && (name === "provider_tools" || name === "task_tool_grant" || name === "task_tool_revoke")
     ? providerAction?.(name, args) ?? Promise.resolve(cliFailure("PROVIDER_TOOLS_UNAVAILABLE", "Wait for the provider session to initialize."))
     : runAction(name, args, toolSignal);
   const dialogue = !session.goal && !session.resumeGoal && !session.iterativeGoal && !session.separateTurn;
@@ -592,6 +592,7 @@ interface BoardSession {
   finishGoalTurn?: () => boolean;
   separateTurn?: boolean;
   readOnly?: boolean;
+  recovery?: boolean;
   onGoalSet?: () => void;
   onGoalCommit?: GoalCommit;
   messageId?: string;
@@ -599,6 +600,8 @@ interface BoardSession {
   onGoal?: (goal: BoardGoal | null) => void;
   onGoalControl?: (control: (action: BoardGoalAction) => Promise<BoardGoal | null>) => void;
   onTurnStarting?: () => void;
+  onTurnAccepted?: (threadId: string, turnId: string) => void;
+  onProviderRetry?: (reason: string) => void;
   onTurnRejected?: () => void;
   onTurnEnded?: () => void;
   onTokenUsage?: (report: TokenUsageReport) => Promise<void>;
@@ -691,6 +694,11 @@ export function readTaskRunHistory(profile: string, project: string, threadId: s
     } while (cursor);
     return Object.fromEntries(runs.map(run => [run.index, runLog(run.items)]));
   }, async () => undefined);
+}
+
+export function readManagerTurn(profile: string, project: string, reference: { threadId: string; clientId: string; turnId?: string }) {
+  return withServer(profile, project, ({ request }) => findQueuedTurn(request, reference.threadId, reference),
+    undefined, AbortSignal.timeout(5000), { providerTools: false });
 }
 
 export function readBoardHistory(profile: string, project: string, threadId: string, cursor: string | null = null) {
@@ -991,6 +999,10 @@ function reply(profile: string, project: string, prompt: string, images: string[
       }
       tokens.queue(tokens.observe(message), onTokenUsage);
       if (data?.threadId !== thread.id) return;
+      if (message.method === "error" && session?.onProviderRetry) {
+        const retry = message.params as { willRetry?: boolean; error?: { message?: string } };
+        if (retry.willRetry && retry.error?.message) session.onProviderRetry(retry.error.message);
+      }
       const itemMethod = message.method;
       const activityItem: BoardActivity | undefined = itemMethod?.startsWith("item/") && (session || onActivity) ?
         (session ? boardActivity : runActivity)(activity, itemMethod, message.params as Record<string, unknown>, new Date().toISOString()) : undefined;
@@ -1121,6 +1133,7 @@ function reply(profile: string, project: string, prompt: string, images: string[
           throw error;
         });
         turn = response.turn;
+        session?.onTurnAccepted?.(thread.id, turn.id);
         if (launchChange) {
           try {
             if (!currentGoal) throw new Error("Codex cleared the goal before confirming its launch.");
@@ -1294,7 +1307,8 @@ function reply(profile: string, project: string, prompt: string, images: string[
     return { success: result.ok, contentItems: [{ type: "inputText", text: content.text },
       ...(content.pngBase64 ? [{ type: "inputImage", imageUrl: "data:image/png;base64," + content.pngBase64 }] : [])] };
   }, signal, {
-    mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session), providerTools: Boolean(session),
+    mcp: options.mcp, research, fullAccess, webSearch: options.webSearch ?? Boolean(session && !session.recovery),
+    providerTools: Boolean(session && !session.recovery),
   }).catch(error => {
     if (threadId && (session?.goal || session?.resumeGoal || session?.iterativeGoal)) {
       return recoverAfterGoalFailure(profile, project, threadId, error);
