@@ -311,7 +311,9 @@ export class CodexTokenUsage {
     if (found) {
       const report = recovered.completeTurn(threadId, { ...turn, status, completedAt }) ?? recovered.finish(true);
       for (const record of report?.records ?? []) {
-        if (record.dailyTerminal && observedAt === undefined && checkpoint) {
+        if (!record.dailyTerminal) {
+          record.dailyRecoveryPending = true;
+        } else if (observedAt === undefined && checkpoint) {
           record.dailyTokens = checkpoint.tokens;
         } else if (checkpointTokens !== undefined && record.dailyTokens != null) {
           record.dailyTokens = checkpointTokens;

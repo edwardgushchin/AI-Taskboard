@@ -82,6 +82,28 @@ function provider() {
   });
 }
 
+function writeHistoryFragment(at, resolved = false) {
+  const total = { total_tokens: 35, input_tokens: 30, output_tokens: 5 };
+  const last = { total_tokens: 7, input_tokens: 2, output_tokens: 5 };
+  if (resolved) {
+    total.cached_input_tokens = 10;
+    last.cached_input_tokens = 0;
+  }
+  const events = [
+    { type: "session_meta", payload: { id: threads.history } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    {
+      type: "event_msg",
+      timestamp: new Date(at).toISOString(),
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: total, last_token_usage: last },
+      },
+    },
+  ];
+  writeFileSync(fragmentPath, events.map(event => JSON.stringify(event)).join("\n") + "\n");
+}
+
 const clockPath = join(scratch, "clock.json");
 if (seed) {
   init(projectPath);
@@ -89,14 +111,11 @@ if (seed) {
   mkdirSync(profile);
   writeFileSync(providerPath, "(" + provider.toString() + ")();\n");
   writeFileSync(historyPath, "{}");
-  writeFileSync(fragmentPath, [
-    { type: "session_meta", payload: { id: threads.history } },
-    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
-  ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
   // Keep the fixture near 09:00 regardless of the wall clock.
   const beforeReset = new Date();
   beforeReset.setHours(8, 59, 59, 0);
   writeFileSync(clockPath, JSON.stringify(beforeReset.getTime()));
+  writeHistoryFragment(beforeReset.getTime() - 500);
 }
 
 const project = realpathSync(projectPath);
@@ -189,12 +208,23 @@ function collect(name, tokens, at) {
   const usage = new CodexTokenUsage(writer.observe, writer.recover);
   usage.track(threadId, "fixture", true);
   usage.begin(threadId, turnId);
-  const total = { totalTokens: tokens + 10, inputTokens: tokens + 5, cachedInputTokens: 10, outputTokens: 5 };
+  const total = {
+    totalTokens: tokens + 10,
+    inputTokens: tokens + 5,
+    cachedInputTokens: 10,
+    outputTokens: 5,
+    reasoningOutputTokens: 0,
+    cacheWriteInputTokens: 0,
+  };
+  usageSample(usage, name, total, total, at);
+  return usage;
+}
+
+function usageSample(usage, name, total, last, at) {
   usage.observe({
     method: "thread/tokenUsage/updated",
-    params: { threadId, turnId, tokenUsage: { total, last: total } },
+    params: { threadId: threads[name], turnId, tokenUsage: { total, last } },
   }, at);
-  return usage;
 }
 
 function terminal(usage, name, status, at) {
@@ -205,8 +235,11 @@ function terminal(usage, name, status, at) {
 }
 
 async function checkpoint(name, amount, at, status) {
-  const usage = collect(name, amount, at);
+  const usage = collect(name, amount, status ? at - 1000 : at);
   if (status) {
+    const total = { totalTokens: amount + 16, inputTokens: amount + 10, outputTokens: 6 };
+    const last = { totalTokens: 6, inputTokens: 5, outputTokens: 1 };
+    usageSample(usage, name, total, last, at - 500);
     const report = terminal(usage, name, status, at);
     assert.equal(report.records[0].incomplete, true, name + " partial provider counters");
     await usage.save(report, writer);
@@ -272,6 +305,7 @@ async function check() {
   for (const minute of [0, 1, 2, 3, 4]) await poll(watch, after + minute * 60_000);
   assert.equal(row("history").recovery_pending, 0);
   assert.equal(row("history").completed, before);
+  assert.equal(row("history").tokens, 18);
   assert.equal(row("unknown").completed, null);
   assert.equal(row("active").completed, null);
   const reads = name => records().filter(event => event.method === "thread/read" && event.threadId === threads[name]).length;
@@ -286,6 +320,19 @@ async function check() {
   assert.equal(row("unknown").completed, null);
   assert.equal(row("active").recovery_pending, 0);
   assert.equal(row("active").completed, after);
+
+  writeHistoryFragment(before - 500, true);
+  const restoreHistory = new CodexTokenUsage(writer.observe, writer.recover);
+  const lateHistory = await restoreHistory.recoverRollout(
+    fragmentPath, threads.history, historicalTurn("interrupted", before),
+  );
+  assert.ok(lateHistory);
+  await restoreHistory.save(lateHistory, writer);
+  await writer(lateHistory);
+  assert.equal(row("history").recovery_pending, 0);
+  assert.equal(row("history").completed, before);
+  assert.equal(row("history").tokens, 25);
+  assertBudget(project, before, 119_050);
 
   const rollout = join(scratch, "old-rollout.jsonl");
   const event = payload => ({ type: "event_msg", timestamp: localDay(oldAt), payload });
@@ -303,7 +350,7 @@ async function check() {
   assert.equal(hooks.usageForBoard(project).flush(), true);
   assert.equal(row("old").recovery_pending, 0);
   assertBudget(project, oldAt, 42);
-  assertBudget(project, before, 119_043);
+  assertBudget(project, before, 119_050);
   assertBudget(project, after, 0);
   assertBudget(other, before, 0);
 
@@ -316,7 +363,7 @@ async function check() {
   await until(() => !hooks.subscriptions.has(project) && !hooks.boardUsage.has(project), "watch and usage released");
   const reopened = hooks.createWindow([project], project);
   await reopened.ready;
-  assertBudget(project, before, 119_043);
+  assertBudget(project, before, 119_050);
   const reopenedWatch = hooks.subscriptions.get(project);
   assert.notEqual(reopenedWatch, watch);
   const previousReads = records().length;
@@ -336,11 +383,12 @@ async function check() {
   const lines = [
     "# Windows Electron — сверка расходов Codex",
     "",
-    "- Живые interrupted и failed закрыты с частичными счётчиками. Повтор события и отчёта не изменил 94 059 и 14.",
-    "- После перезапуска потерянное событие восстановлено из истории при наличии фрагмента журнала без счётчиков. Неизвестный исход сохранил 24 929 без времени завершения и опрошен один раз за первые пять циклов. Поздний статус закрыл его без подстановки времени.",
+    "- Живые interrupted и failed закрыты после полного замера и следующего замера без счётчика чтения из кэша. Разбивка помечена неполной. Повтор события и отчёта не изменил 94 059 и 14.",
+    "- После перезапуска исход восстановлен из истории при наличии датированного неполного token_count. Сверка закрылась с 18 токенами. Поздний полный замер и его повтор дали 25 токенов с прежней датой окончания.",
+    "- Неизвестный исход сохранил 24 929 без времени завершения и опрошен один раз за первые пять циклов. Поздний статус закрыл его без подстановки времени.",
     "- Длительный активный ход опрашивался повторно. После поступления истории его сверка закрылась с датой из истории.",
     "- Старый ход не попал в фоновый поиск. Поздний отчёт довёл его начисление с 30 до 42, сохранив историческую дату.",
-    "- До сброса учтено 119 043, после сброса 0. Другая доска сохранила нулевой расход.",
+    "- До сброса учтено 119 043, после позднего уточнения 119 050. В новом периоде и на другой доске расход остался нулевым.",
     "- Два окна разделяли одного наблюдателя. После закрытия и повторного открытия наблюдатель и кэш удалены оба раза, процессы тестового App Server завершились.",
     "",
     "## Технические детали",

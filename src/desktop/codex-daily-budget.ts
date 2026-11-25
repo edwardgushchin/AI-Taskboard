@@ -387,8 +387,11 @@ export class BoardCodexUsage {
       const old = this.readTurn(key)!;
       const turn = this.pending.get(key) ?? { ...old, increments: [] };
       const wasClosed = turn.recoveryPending === false;
-      const recoveryPending = final.recoveryPending && !wasClosed;
-      const at = final.recoveryPending && wasClosed
+      // A terminal report may lack part of the breakdown. The ledger already
+      // has the confirmed charge and can keep its checkpoint for late samples.
+      const terminalWithCharge = final.terminal && turn.tokens > 0;
+      const recoveryPending = final.recoveryPending && !wasClosed && !terminalWithCharge;
+      const at = final.recoveryPending && wasClosed && !final.terminal
         ? turn.completedAt
         : final.at ?? turn.completedAt;
       const increases = at !== undefined && final.tokens > turn.tokens;

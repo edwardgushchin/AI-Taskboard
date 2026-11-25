@@ -53,7 +53,7 @@ function report(turnId: string, completedAt: number, dailyTokens: number | null,
 }
 
 for (const status of ["interrupted", "failed"]) {
-  test(`${status} closes live usage and accepts only a late difference outside the search window`, t => {
+  test(`${status} closes live usage after a missing cache count and accepts only a late difference`, t => {
     const project = mkdtempSync(join(tmpdir(), "codex-budget-terminal-"));
     t.after(() => rmSync(project, { recursive: true, force: true }));
     mkdirSync(join(project, ".tasks"));
@@ -67,6 +67,11 @@ for (const status of ["interrupted", "failed"]) {
     collector.observe({
       method: "thread/tokenUsage/updated",
       params: { threadId: "thread", turnId: "turn", tokenUsage: { total: first, last: first } },
+    }, ended - 2000);
+    const partial = { ...first, totalTokens: 101_000, cachedInputTokens: null };
+    collector.observe({
+      method: "thread/tokenUsage/updated",
+      params: { threadId: "thread", turnId: "turn", tokenUsage: { total: partial, last: partial } },
     }, ended - 1000);
     const notification = {
       method: "turn/completed",
@@ -74,7 +79,7 @@ for (const status of ["interrupted", "failed"]) {
     };
     const final = collector.observe(notification, ended)!;
     assert.equal(final.records[0].incomplete, true);
-    assert.equal(final.records[0].dailyTokens, 94_059);
+    assert.equal(final.records[0].dailyTokens, null);
     ledger.reconcile(final);
     ledger.reconcile(collector.observe(notification, ended)!);
     const reopened = new BoardCodexUsage(project);
@@ -117,11 +122,19 @@ test("history can close an unknown 24929-token charge without inventing a time",
   writeFileSync(path, [
     { type: "session_meta", payload: { id: "thread" } },
     { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+    {
+      type: "event_msg",
+      timestamp: new Date(at + 1000).toISOString(),
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: { total_tokens: 25_100 }, last_token_usage: { total_tokens: 100 } },
+      },
+    },
   ].map(event => JSON.stringify(event)).join("\n") + "\n");
   const final = (await use.recoverRollout(path, "thread", terminal))!;
   assert.equal(final.records[0].completedAt, undefined);
   assert.equal(final.records[0].incomplete, true);
-  assert.equal(final.records[0].dailyTokens, 24_929);
+  assert.equal(final.records[0].dailyTokens, null);
   reopened.reconcile(final);
   reopened.reconcile(final);
   assert.deepEqual(new BoardCodexUsage(project).unresolved(at), []);
