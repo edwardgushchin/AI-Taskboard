@@ -8,8 +8,8 @@ import { CodexQuotaExceeded, CodexRpcRejection, dailyBudgetInterruption, watchCo
 import { archiveAcceptedCodexChats, rememberTaskCodexThread } from "./codex-task-archive.ts";
 import { confirmedQuota, consumeCodexReset, providerLimitSource, readCodexLimits, type QuotaWait } from "./provider-limits.ts";
 import { BoardCodexUsage, type CodexBudgetRole } from "./codex-daily-budget.ts";
-import type { ConfirmedTurnUsage, UsageWriter } from "./codex-token-usage.ts";
-import { CodexTokenUsage } from "./codex-token-usage.ts";
+import type { ConfirmedTurnUsage, TurnUsageStatus, UsageWriter } from "./codex-token-usage.ts";
+import { CodexTokenUsage, isTerminalUsageStatus } from "./codex-token-usage.ts";
 import localization from "./localization.cjs";
 import { BackupService } from "./backup-service.ts";
 import { activeRunSummary, observeActiveRuns, enableSharedRuns } from "./active-runs.ts";
@@ -117,7 +117,7 @@ interface WindowState {
 }
 
 interface BoardWatch {
-  usageRecovery?: { nextAt: number; cursor: number; running: boolean };
+  usageRecovery?: { nextAt: number; cursor: number; running: boolean; retryAt: Map<string, number> };
   lastBudget?: string;
   unreadMigration?: AbortController;
   unreadMigrationNeeded?: boolean;
@@ -1237,30 +1237,51 @@ function recoverBoardUsage(watch: BoardWatch) {
   const { project, settings } = watch.board;
   if (settings.codexDailyTokens === undefined || closingProjects.has(project)) return;
   const now = Date.now();
-  const recovery = watch.usageRecovery ??= { nextAt: 0, cursor: 0, running: false };
+  const recovery = watch.usageRecovery ??= { nextAt: 0, cursor: 0, running: false, retryAt: new Map() };
   if (recovery.running || recovery.nextAt > now) return;
   recovery.nextAt = now + 60_000;
   recovery.running = true;
   void Promise.resolve().then(async () => {
     if (subscriptions.get(project) !== watch || closingProjects.has(project)) return;
-    const unresolved = usageForBoard(project).unresolved(now);
+    const keyFor = ({ threadId, turnId }: { threadId: string; turnId: string }) =>
+      JSON.stringify([threadId, turnId]);
+    const charges = usageForBoard(project).unresolved(now);
+    const keys = new Set(charges.map(keyFor));
+    for (const key of recovery.retryAt.keys()) {
+      if (!keys.has(key)) recovery.retryAt.delete(key);
+    }
+    const unresolved = charges.filter(charge => (recovery.retryAt.get(keyFor(charge)) ?? 0) <= now);
     if (!unresolved.length) return;
     const charge = unresolved[recovery.cursor++ % unresolved.length];
+    const key = keyFor(charge);
+    recovery.retryAt.set(key, now + 15 * 60_000);
     const client = await configuredCodex(app.getPath("userData"));
     if (!client) return;
-    const { thread } = await withAccountServer(client, rpc => rpc.request<{
-      thread: { id: string; path?: string | null };
-    }>("thread/read", { threadId: charge.threadId, includeTurns: false }));
+    const { thread, turn } = await withAccountServer(client, async rpc => {
+      const { thread } = await rpc.request<{
+        thread: { id: string; path?: string | null; status?: { type: string } };
+      }>(
+        "thread/read", { threadId: charge.threadId, includeTurns: false });
+      if (thread.id !== charge.threadId) return { thread };
+      const page = await rpc.request<{ data: TurnUsageStatus[] }>("thread/turns/list", {
+        threadId: charge.threadId, limit: 50, sortDirection: "desc", itemsView: "notLoaded",
+      }).catch(() => undefined);
+      return { thread, turn: page?.data?.find(turn => turn.id === charge.turnId) };
+    });
     if (thread.id !== charge.threadId || subscriptions.get(project) !== watch || closingProjects.has(project)) return;
     const write = usageWriter(project, async report => saveDailyUsage(project, charge.role ?? "manager", report, charge.task));
     const usage = new CodexTokenUsage(sample => {
       if (subscriptions.get(project) === watch && !closingProjects.has(project)) write.observe?.(sample);
     }, write.recover);
-    const report = await usage.recoverRollout(thread.path, charge.threadId, {
-      id: charge.turnId,
-      status: charge.completedAt === undefined ? "inProgress" : "completed",
-      completedAt: charge.completedAt === undefined ? undefined : charge.completedAt / 1000,
-    });
+    const status = turn ?? { id: charge.turnId };
+    const rollout = await usage.recoverRollout(thread.path, charge.threadId, status);
+    // An unfinished row in persisted history may be left over from a crash.
+    if (thread.status?.type === "active" && turn?.status === "inProgress" &&
+        !rollout?.records.some(record => record.dailyTerminal)) {
+      recovery.retryAt.delete(key);
+    }
+    if (!rollout && isTerminalUsageStatus(status.status)) usage.track(charge.threadId, null, true);
+    const report = rollout ?? (isTerminalUsageStatus(status.status) ? usage.recover(charge.threadId, status) : undefined);
     if (report && subscriptions.get(project) === watch && !closingProjects.has(project)) await write(report);
   }).catch(() => {
     // A missing provider or rollout can be temporary. Revisit the journal
