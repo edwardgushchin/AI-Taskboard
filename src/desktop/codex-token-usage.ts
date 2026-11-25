@@ -12,7 +12,6 @@ type ThreadUsage = {
   incomplete: boolean;
   finished: boolean;
   completedAt?: number;
-  dailyRecoveryPending?: boolean;
   totalUncertain?: boolean;
   cacheUncertain?: boolean;
   cacheGap?: { entry: TokenUsageRecord; before: number | null | undefined };
@@ -20,7 +19,11 @@ type ThreadUsage = {
   recovered?: boolean;
 };
 
-type TurnUsageStatus = { id: string; status?: string; completedAt?: number | null };
+export type TurnUsageStatus = { id: string; status?: string; completedAt?: number | null };
+
+export function isTerminalUsageStatus(status: string | undefined) {
+  return status === "completed" || status === "interrupted" || status === "failed";
+}
 
 export type ConfirmedTurnUsage = {
   threadId: string;
@@ -151,7 +154,6 @@ export class CodexTokenUsage {
     thread.incomplete = false;
     thread.finished = false;
     thread.completedAt = undefined;
-    thread.dailyRecoveryPending = undefined;
     thread.totalUncertain = false;
     thread.cacheUncertain = false;
     thread.cacheGap = undefined;
@@ -182,7 +184,14 @@ export class CodexTokenUsage {
       thread.totalUncertain = true;
       thread.incomplete = true;
     }
-    return this.completeTurn(threadId, turn) ?? this.snapshot();
+    const report = this.completeTurn(threadId, turn) ?? this.snapshot();
+    // History can confirm the end without another token event or a timestamp.
+    if (!alreadyTracked && isTerminalUsageStatus(turn.status)) {
+      const checkpoint = this.recoverConfirmed?.(threadId, turn.id);
+      const record = report?.records.find(entry => entry.threadId === threadId && entry.turnId === turn.id);
+      if (record && checkpoint) record.dailyTokens = checkpoint.tokens;
+    }
+    return report;
   }
 
   async recoverRollout(path: string | null | undefined, threadId: string, turn: TurnUsageStatus) {
@@ -229,9 +238,9 @@ export class CodexTokenUsage {
     let active: string | undefined;
     let firstTurn: string | undefined;
     let found = false;
-    let finished = false;
+    let status = turn.status;
     let completedAt = turn.completedAt;
-    let observedAt = 0;
+    let observedAt: number | undefined;
     try {
       for await (const line of lines) {
         const { type, timestamp, payload } = JSON.parse(line) as {
@@ -263,12 +272,19 @@ export class CodexTokenUsage {
             }
           }
         }
-        if (event === "task_complete" && id === active) {
+        const terminalEvent = event === "task_complete" || event === "turn_aborted";
+        if (id && terminalEvent && (id === active || id === turn.id && !found)) {
           active = undefined;
           const at = Date.parse(timestamp ?? "");
-          if (id === turn.id && Number.isFinite(at)) {
-            completedAt ??= at / 1000;
-            finished = true;
+          if (id === turn.id) {
+            if (!found) {
+              found = true;
+              recovered.begin(threadId, id);
+            }
+            if (Number.isFinite(at)) completedAt ??= at / 1000;
+            if (!isTerminalUsageStatus(turn.status)) {
+              status = event === "turn_aborted" ? "interrupted" : "completed";
+            }
           }
         }
         if (event !== "token_count" || !active || !payload?.info) continue;
@@ -278,7 +294,7 @@ export class CodexTokenUsage {
           continue;
         }
         const at = Date.parse(timestamp ?? "");
-        if (!Number.isFinite(at) || at < observedAt) continue;
+        if (!Number.isFinite(at) || observedAt !== undefined && at < observedAt) continue;
         observedAt = at;
         recovered.observe({
           method: "thread/tokenUsage/updated",
@@ -293,13 +309,15 @@ export class CodexTokenUsage {
       input.destroy();
     }
     if (found) {
-      const status = turn.status === "inProgress" && finished ? "completed" : turn.status;
       const report = recovered.completeTurn(threadId, { ...turn, status, completedAt }) ?? recovered.finish(true);
       for (const record of report?.records ?? []) {
-        if (checkpointTokens !== undefined && record.dailyTokens != null) {
+        if (!record.dailyTerminal) {
+          record.dailyRecoveryPending = true;
+        } else if (observedAt === undefined && checkpoint) {
+          record.dailyTokens = checkpoint.tokens;
+        } else if (checkpointTokens !== undefined && record.dailyTokens != null) {
           record.dailyTokens = checkpointTokens;
         }
-        if (!finished) record.dailyRecoveryPending = true;
       }
       return report;
     }
@@ -307,13 +325,16 @@ export class CodexTokenUsage {
 
   completeTurn(threadId: string, turn: TurnUsageStatus, observedAt?: number): TokenUsageReport | undefined {
     const thread = this.threads.get(threadId);
-    if (!thread || thread.turnId !== turn.id || turn.status === "inProgress") return;
+    if (!thread || thread.turnId !== turn.id || !isTerminalUsageStatus(turn.status)) return;
     thread.finished = true;
-    thread.dailyRecoveryPending = turn.status !== "completed";
+    if (turn.status === "interrupted" || turn.status === "failed") {
+      thread.incomplete = true;
+      this.entry(threadId, thread).incomplete = true;
+    }
     const ended = turn.completedAt;
     thread.completedAt ??= typeof ended === "number" && ended > 0 && ended < 8.64e12
       ? Math.trunc(ended * 1000) : observedAt;
-    if (thread.completedAt !== undefined) this.completeRecords(threadId, thread, thread.completedAt);
+    this.completeRecords(threadId, thread, thread.completedAt);
     return this.snapshot();
   }
 
@@ -324,14 +345,14 @@ export class CodexTokenUsage {
     return this.records.get(key)!;
   }
 
-  private completeRecords(threadId: string, thread: ThreadUsage, at: number): void {
+  private completeRecords(threadId: string, thread: ThreadUsage, at?: number): void {
     for (const entry of this.records.values()) {
       if (entry.threadId !== threadId || entry.turnId !== thread.turnId) continue;
       entry.completedAt ??= at;
       entry.dailyTokens = thread.totalUncertain || thread.cacheUncertain || thread.cacheGap
         ? null : uncachedTokens(entry);
       entry.dailyTokensExcludeCache = true;
-      entry.dailyRecoveryPending = thread.dailyRecoveryPending ? true : undefined;
+      entry.dailyTerminal = thread.finished ? true : undefined;
     }
   }
 
@@ -403,7 +424,7 @@ export class CodexTokenUsage {
       this.entry(threadId, thread).incomplete = true;
       if (message.method === "error") return this.snapshot();
     }
-    if (message.method === "turn/completed" && data.turn?.id) return this.completeTurn(threadId, data.turn, Date.now());
+    if (message.method === "turn/completed" && data.turn?.id) return this.completeTurn(threadId, data.turn, observedAt);
     if (message.method !== "thread/tokenUsage/updated" || !data.turnId) return;
     // Child turns can start before their discovery event reaches the parent.
     if (!thread.turnId && threadId !== this.root) this.begin(threadId, data.turnId);
@@ -437,7 +458,7 @@ export class CodexTokenUsage {
       }
     }
     thread.previous = total;
-    if (thread.completedAt !== undefined) {
+    if (thread.finished || thread.completedAt !== undefined) {
       this.completeRecords(threadId, thread, thread.completedAt);
     }
     entry.incomplete = thread.incomplete || thread.model === null || tokenFields.some(key => entry[key] === null);

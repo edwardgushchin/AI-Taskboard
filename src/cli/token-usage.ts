@@ -15,6 +15,7 @@ export type TokenUsageRecord = ModelTokenUsage & {
   dailyTokens?: number | null;
   dailyTokensExcludeCache?: true;
   dailyRecoveryPending?: true;
+  dailyTerminal?: true;
 };
 const taskUsageRoles = ["executor", "discussion", "reviewer"] as const;
 export type TaskUsageRole = typeof taskUsageRoles[number];
@@ -41,6 +42,7 @@ export function parseTokenUsage(value: unknown): TokenUsageRecord {
   }
   if (entry.dailyTokensExcludeCache === true) result.dailyTokensExcludeCache = true;
   if (entry.dailyRecoveryPending === true) result.dailyRecoveryPending = true;
+  if (entry.dailyTerminal === true) result.dailyTerminal = true;
   if (tokenFields.some(key => result[key] === null) && !result.incomplete ||
       result.inputTokens !== null && [result.cachedInputTokens, result.cacheWriteInputTokens].some(value => value !== null && value > result.inputTokens!) ||
       result.outputTokens !== null && result.reasoningOutputTokens !== null && result.reasoningOutputTokens > result.outputTokens) {

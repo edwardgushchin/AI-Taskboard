@@ -339,7 +339,7 @@ export class BoardCodexUsage {
       ? this.refineTime(key, Math.min(tokens, previous), observedAt)
       : false;
     const previousCounters = known?.counters;
-    const updatesCounters = counters && (known?.completedAt === undefined || known.recoveryPending !== false) &&
+    const updatesCounters = counters &&
       (counters.totalTokens ?? -1) >= (previousCounters?.totalTokens ?? 0) &&
       (counters.cachedInputTokens ?? -1) >= (previousCounters?.cachedInputTokens ?? 0) &&
       (counters.totalTokens !== previousCounters?.totalTokens ||
@@ -366,11 +366,11 @@ export class BoardCodexUsage {
   }
 
   reconcile(report: TokenUsageReport): TokenUsageReport {
-    const completed = new Map<string, { at: number; tokens: number; recoveryPending: boolean }>();
+    const completed = new Map<string, { at?: number; tokens: number; recoveryPending: boolean; terminal?: true }>();
     const records = report.records.filter(record => {
       const key = JSON.stringify([record.threadId, record.turnId]);
       if (!this.readTurn(key)) return true;
-      if (record.completedAt !== undefined) {
+      if (record.completedAt !== undefined || record.dailyTerminal) {
         const group = completed.get(key) ?? { at: record.completedAt, tokens: 0, recoveryPending: false };
         if (record.dailyTokensExcludeCache && record.dailyTokens != null) {
           group.tokens += record.dailyTokens;
@@ -378,6 +378,7 @@ export class BoardCodexUsage {
           group.recoveryPending = true;
         }
         group.recoveryPending ||= record.dailyRecoveryPending === true;
+        group.terminal ??= record.dailyTerminal;
         completed.set(key, group);
       }
       return false;
@@ -385,19 +386,27 @@ export class BoardCodexUsage {
     for (const [key, final] of completed) {
       const old = this.readTurn(key)!;
       const turn = this.pending.get(key) ?? { ...old, increments: [] };
-      const recoveryPending = final.recoveryPending && !(turn.completedAt !== undefined && turn.recoveryPending === false);
-      if (turn.completedAt === final.at && final.tokens <= turn.tokens && turn.recoveryPending === recoveryPending) continue;
-      turn.completedAt = final.at;
+      const wasClosed = turn.recoveryPending === false;
+      // A complete checkpoint confirms the recorded amount even at zero.
+      const knownSpend = turn.tokens > 0 || (turn.counters !== undefined && uncachedTokens(turn.counters) !== null);
+      const recoveryPending = final.recoveryPending && !wasClosed && !(final.terminal && knownSpend);
+      const at = final.recoveryPending && wasClosed && !final.terminal
+        ? turn.completedAt
+        : final.at ?? turn.completedAt;
+      const increases = at !== undefined && final.tokens > turn.tokens;
+      if (turn.completedAt === at && !increases && turn.recoveryPending === recoveryPending) continue;
+      turn.completedAt = at;
       turn.recoveryPending = recoveryPending;
-      if (!recoveryPending) {
+      if (!recoveryPending && !wasClosed && !final.terminal) {
+        // Older reports do not opt in to retaining a checkpoint after completion.
         turn.counters = undefined;
         turn.counterTokens = undefined;
       } else if (turn.counters) {
         // An older row stored the paired amount in tokens. Preserve it before applying the report.
         turn.counterTokens ??= turn.tokens;
       }
-      if (final.tokens > turn.tokens) {
-        turn.increments.push({ at: final.at, tokens: final.tokens - turn.tokens });
+      if (increases) {
+        turn.increments.push({ at, tokens: final.tokens - turn.tokens });
         turn.tokens = final.tokens;
       }
       this.pending.set(key, turn);
