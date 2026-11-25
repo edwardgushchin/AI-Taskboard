@@ -230,42 +230,68 @@ export class ApplicationUpdates {
   }
 }
 
+const networkWaitMs = 300_000;
+
 async function download(url: string, limit: number, signal: AbortSignal, target?: string, progress?: (value: Progress) => void) {
-  const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]) });
-  if (!response.ok || !response.body) {
-    throw new Error(`Download failed: HTTP ${response.status}`);
+  const request = new AbortController();
+  const requestSignal = AbortSignal.any([signal, request.signal]);
+
+  async function waitForNetwork<T>(read: () => Promise<T>, timeoutMessage: string): Promise<T> {
+    requestSignal.throwIfAborted();
+    const timer = setTimeout(() => request.abort(new Error(timeoutMessage)), networkWaitMs);
+    try {
+      return await read();
+    } catch (error) {
+      requestSignal.throwIfAborted();
+      throw new Error("The network connection failed while downloading the update.", { cause: error });
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  const file = target ? await open(target, "wx") : undefined;
-  const hash = createHash("sha256");
-  const chunks: Buffer[] = [];
-  let length = 0;
-  const contentLength = response.headers.get("content-length");
-  const size = contentLength && /^\d+$/.test(contentLength) ? Number(contentLength) : 0;
-  const total = Number.isSafeInteger(size) && size > 0 && size <= limit && !response.headers.has("content-encoding")
-    ? size : undefined;
-  let lastReport = -Infinity;
-  progress?.({ received: length, total });
+
   try {
-    for await (const chunk of response.body) {
-      length += chunk.length;
-      if (length > limit) {
-        throw new Error("Release asset is too large.");
+    const response = await waitForNetwork(() => fetch(url, { signal: requestSignal }),
+      "The update server did not respond within 5 minutes.");
+    if (!response.ok || !response.body) {
+      throw new Error(`Download failed: HTTP ${response.status}`);
+    }
+    const contentLength = response.headers.get("content-length");
+    const size = contentLength && /^\d+$/.test(contentLength) ? Number(contentLength) : 0;
+    const total = Number.isSafeInteger(size) && size > 0 && size <= limit && !response.headers.has("content-encoding")
+      ? size : undefined;
+    const file = target ? await open(target, "wx") : undefined;
+    const reader = response.body.getReader();
+    const hash = createHash("sha256");
+    const chunks: Buffer[] = [];
+    let length = 0;
+    let lastReport = -Infinity;
+    try {
+      progress?.({ received: length, total });
+      for (;;) {
+        const { value: chunk, done } = await waitForNetwork(() => reader.read(),
+          "No update data was received for 5 minutes.");
+        if (done) break;
+        length += chunk.length;
+        if (length > limit) throw new Error("Release asset is too large.");
+        hash.update(chunk);
+        if (file) {
+          await file.writeFile(chunk);
+        } else {
+          chunks.push(Buffer.from(chunk));
+        }
+        if (progress && performance.now() - lastReport >= 100) {
+          lastReport = performance.now();
+          progress({ received: length, total });
+        }
       }
-      hash.update(chunk);
-      if (file) {
-        await file.writeFile(chunk);
-      } else {
-        chunks.push(Buffer.from(chunk));
-      }
-      if (progress && performance.now() - lastReport >= 100) {
-        lastReport = performance.now();
-        progress({ received: length, total });
-      }
+      return { digest: hash.digest("hex"), text: Buffer.concat(chunks).toString("utf8") };
+    } finally {
+      reader.releaseLock();
+      await file?.close();
     }
   } finally {
-    await file?.close();
+    request.abort();
   }
-  return { digest: hash.digest("hex"), text: Buffer.concat(chunks).toString("utf8") };
 }
 
 export function manifestChecksum(manifest: string, name: string) {

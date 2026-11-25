@@ -15,8 +15,11 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const outputOption = process.argv.indexOf("--artifacts");
 const pollScenario = process.argv.includes("--poll");
 const idleScenario = process.argv.includes("--idle");
-assert.ok(!(pollScenario && idleScenario), "Choose only one install scenario.");
-const reportName = idleScenario ? "idle-update-check.txt" : pollScenario ? "update-poll-report.json" : "update-install-report.json";
+const slowScenario = process.argv.includes("--slow");
+assert.ok([pollScenario, idleScenario, slowScenario].filter(Boolean).length <= 1, "Choose only one install scenario.");
+const reportName = slowScenario ? "windows-slow-update.json"
+    : idleScenario ? "idle-update-check.txt"
+    : pollScenario ? "update-poll-report.json" : "update-install-report.json";
 assert.ok(outputOption >= 0, "Supply --artifacts with a review directory.");
 const artifacts = resolve(process.argv[outputOption + 1]);
 mkdirSync(artifacts, { recursive: true });
@@ -53,6 +56,12 @@ if (!process.env.TASKBOARD_UPDATE_QA_SCRATCH) {
 }
 const scratch = process.env.TASKBOARD_UPDATE_QA_SCRATCH;
 assert.equal(dirname(scratch), resolve(tmpdir()));
+if (slowScenario) {
+    const scopedTemp = join(scratch, "runtime-temp");
+    mkdirSync(scopedTemp);
+    process.env.TEMP = scopedTemp;
+    process.env.TMP = scopedTemp;
+}
 const project = join(scratch, "source");
 const installDirectory = join(scratch, "Installed client with spaces");
 const profile = join(scratch, "Profile with spaces");
@@ -62,6 +71,7 @@ const oldVersion = "0.1.0-alpha";
 const newVersion = "0.1.1-alpha";
 const newerVersion = "0.1.2-alpha";
 const nativeProgressRevision = "8a16179f152576e2d50c12c19da42d936c0f0211";
+const absoluteDeadlineRevision = "e665ebc45362bdf59ab0abac2a2eecc4537eb037";
 const record = { startedAt: new Date().toISOString(), platform: process.platform, arch: process.arch,
     node: process.version, oldVersion, newVersion, checks: [], packages: [], sourceHashes: {} };
 record.sourceHashesLF = {};
@@ -76,6 +86,11 @@ if (idleScenario) {
 if (pollScenario) {
     record.seams[3] = "The initial poll uses its production 5-second delay. QA advances the recurring interval from 60 minutes to 1 second; update UI actions, installation and restart run unchanged.";
     record.command = "node scripts/check-update-install.mjs --poll --artifacts " + process.argv[outputOption + 1];
+}
+if (slowScenario) {
+    record.seams[0] = "QA routes official asset URLs to loopback HTTP; production fetch, streaming, verifying, IPC, renderer, NSIS, shutdown and restart run unchanged.";
+    record.seams[3] = "Only updater deadlines on the managed clock are advanced. The Electron input and loopback socket use real scheduling.";
+    record.command = "node scripts/check-update-install.mjs --slow --artifacts " + process.argv[outputOption + 1];
 }
 record.testedCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
 record.gitStatusBefore = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
@@ -113,6 +128,10 @@ function updateCachesFor(executable) {
         const path = join(tmpdir(), entry.name);
         return readJson(join(path, "update.json"))?.executable === executable ? [path] : [];
     });
+}
+
+function allUpdateCaches() {
+    return readdirSync(tmpdir()).filter(name => /^ai-taskboard-update-[a-zA-Z0-9]+$/.test(name));
 }
 
 async function withLockedInstaller(executable, action) {
@@ -217,6 +236,7 @@ function updateDialogState() {
         progress: progress.hidden ? null : { value: progress.value, max: progress.max },
         action: confirm.hidden ? null : { text: confirm.textContent, box: box(confirm) },
         later: { text: get("update-later").textContent, box: box(get("update-later")) },
+        cancel: get("update-cancel")?.hidden ? null : get("update-cancel")?.textContent,
         release: get("update-release").href,
     };
 }
@@ -673,7 +693,7 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
             view => !view.advertised && view.action?.text === "Обновить и перезапустить", second);
         assertOriginal(pinned);
         assert.equal(pinned.action?.text, "Обновить и перезапустить");
-        assert.equal(pinned.later.text, "Позже");
+        assert.equal(pinned.cancel, "Позже");
         assert.match(pinned.status, /проверен/);
     }
     await capture("confirm", "light");
@@ -682,15 +702,15 @@ async function checkPoll(mode, uninstaller, executable, child, before) {
     mode("normal", "newer");
     await waitForOffer(newerVersion);
     const lockedLaterCache = await withLockedInstaller(executable, async cache => {
-        await click("update-later");
+        await click("update-cancel");
         const refusal = await waitState("Later exposes deletion failure",
-            view => view.open && view.later.text === "Позже" && view.action === null && /EPERM|EBUSY|ENOTEMPTY/i.test(view.status));
+            view => view.open && view.cancel === "Позже" && view.action === null && /EPERM|EBUSY|ENOTEMPTY/i.test(view.status));
         assertOriginal(refusal);
         assert.equal(child.exitCode, null);
         assert.ok(existsSync(cache));
         record.cleanupLater = refusal.status;
     });
-    await click("update-later");
+    await click("update-cancel");
     await waitState("Later closes after the lock is released", view => !view.open);
     assert.equal(existsSync(lockedLaterCache), false);
     assert.equal(child.exitCode, null);
@@ -860,6 +880,255 @@ async function checkIdleUpdate(ask, mode, executable, originalPid) {
     note("The update window downloaded one installer and confirmed restart after the reviewer released its lease.");
 }
 
+async function checkSlowUpdate(mode, executable, before) {
+    const run = code => command({ action: "execute", code });
+    const click = elementId => command({ action: "click", elementId });
+    const escape = () => command({ action: "key", key: "Escape" });
+    const view = () => run("(" + updateDialogState.toString() + ")()");
+    const viewWhen = (label, predicate) => until(async () => {
+        const state = await view();
+        return predicate(state) && state;
+    }, label, 10000);
+    const asset = (options = {}) => command({ action: "asset", ...options });
+    const sendChunk = async (advance = 0) => {
+        const { sent } = await asset({ send: "chunk", advance });
+        await until(() => {
+            const [cache] = allUpdateCaches();
+            if (!cache) return false;
+            const path = join(tmpdir(), cache, `ai-taskboard-${newVersion}-windows-${process.arch}.exe`);
+            return existsSync(path) && statSync(path).size === sent;
+        }, "HTTP chunk fully written to the partial installer", 10000);
+        return sent;
+    };
+    const drained = () => until(async () => {
+        const state = await asset();
+        return state.deadlines === 0 && state.sent === null && allUpdateCaches().length === 0;
+    }, "HTTP request, file cache and deadline released", 10000);
+    const open = async () => {
+        await click("app-settings");
+        await click("settings-menu-update");
+        return viewWhen("dialog opened from update indicator", state => state.open);
+    };
+    const closed = () => viewWhen("dialog closed", state => !state.open);
+    const progressing = (previous = 0) => viewWhen("partial byte count advanced",
+        state => state.open && state.progress?.value > previous && state.progress.value < state.progress.max);
+    const begin = async value => {
+        const { installers } = await asset();
+        mode(value);
+        await click("update-action");
+        await until(async () => {
+            const state = await asset();
+            return state.installers === installers + 1 && state.sent === 0 && state.deadlines === 1;
+        }, "one HTTP request is waiting for installer data", 10000);
+        return installers + 1;
+    };
+    const failed = async reason => {
+        const state = await viewWhen(reason, state => state.open && state.status.includes(reason));
+        assert.equal(state.action.text, "Повторить загрузку");
+        await drained();
+        return state.status;
+    };
+    const ready = () => viewWhen("verified package and explicit restart", state =>
+        state.open && state.action?.text === "Обновить и перезапустить");
+
+    mode("manual");
+    await command({ action: "baseline" });
+    await until(async () => (await asset()).sent === 0, "baseline HTTP installer request", 10000);
+    await sendChunk();
+    const legacyFirst = await until(() => {
+        const progress = readJson(join(control, "baseline-progress.json"));
+        return progress?.received > 0 && progress.received;
+    }, "baseline first progress");
+    await sendChunk(150001);
+    const legacySecond = await until(() => {
+        const progress = readJson(join(control, "baseline-progress.json"));
+        return progress?.received > legacyFirst && progress.received;
+    }, "baseline second progress");
+    await asset({ advance: 150001 });
+    const legacyError = await until(() => readJson(join(control, "baseline-result.json")), "baseline timeout");
+    assert.deepEqual(legacyError, { name: "TimeoutError", message: "The operation was aborted due to timeout" });
+    await drained();
+    record.baseline = { ...record.baseline, bytes: [legacyFirst, legacySecond], elapsedMs: 300002, ...legacyError, cleaned: true };
+    note("Baseline download advanced twice on loopback HTTP, then failed at managed 300002 ms with the original TimeoutError.");
+
+    await until(async () => (await view()).advertised, "NSIS update badge");
+    await open();
+    await begin("no-response");
+    await asset({ advance: 300001 });
+    const noResponse = await failed("The update server did not respond within 5 minutes.");
+
+    await begin("manual");
+    await sendChunk();
+    const stalledBytes = (await progressing()).progress.value;
+    await asset({ advance: 300001 });
+    const noData = await failed("No update data was received for 5 minutes.");
+
+    const brokenRequest = await begin("manual");
+    await sendChunk();
+    await progressing();
+    await escape();
+    await closed();
+    await asset({ send: "break" });
+    await drained();
+    await open();
+    const disconnected = await failed("The network connection failed while downloading the update.");
+    assert.equal((await asset()).installers, brokenRequest);
+    note("No headers, partial-body timeout and socket break reported distinct errors. The background socket failure remained visible after reopening, and each failed request released its deadline and partial files.");
+
+    mode("corrupt");
+    await click("update-action");
+    const wrongDigest = await failed("Installer SHA-256 does not match the release manifest.");
+
+    await begin("manual");
+    await sendChunk();
+    await progressing();
+    await click("update-cancel");
+    await drained();
+    if (!(await view()).open) await open();
+    await viewWhen("explicit cancellation restored the download action", state => state.open && state.action?.text === "Обновить");
+    assert.equal(child.exitCode, null);
+
+    await begin("manual");
+    await sendChunk();
+    await progressing();
+    await escape();
+    await closed();
+    await command({ action: "quit" });
+    await until(() => child.exitCode !== null, "normal exit with background transfer");
+    assert.equal(child.exitCode, 0);
+    assert.deepEqual(allUpdateCaches(), []);
+    rmSync(join(control, "command.json"), { force: true });
+    const relaunched = await launchInstalledClient(executable);
+    assert.notEqual(relaunched.pid, before.pid);
+    assert.equal(relaunched.version, oldVersion);
+    await until(async () => (await view()).advertised, "update badge after normal exit");
+    await open();
+
+    const epoch = (await asset()).time;
+    const retry = await begin("manual");
+    await sendChunk();
+    const first = (await progressing()).progress.value;
+    await click("update-later");
+    await closed();
+    await sendChunk(150001);
+    await open();
+    const second = (await progressing(first)).progress.value;
+    await escape();
+    await closed();
+    await sendChunk(150001);
+    await open();
+    const third = await progressing(second);
+    const elapsedMs = (await asset()).time - epoch;
+    assert.equal(elapsedMs, 300002);
+    assert.equal((await asset()).installers, retry);
+    assert.equal((await asset()).deadlines, 1);
+    assert.deepEqual(third.viewport, { width: 1280, height: 800 });
+    await command({ action: "capture-poll", name: "update-slow-progress.png" });
+
+    const finish = await command({ action: "finish-and-close" });
+    assert.equal(finish, true);
+    await closed();
+    await until(async () => (await asset()).deadlines === 0 && updateCachesFor(executable).length === 1, "completed package and cleared deadline");
+    await open();
+    await ready();
+    await escape();
+    await closed();
+    await open();
+    const verified = await ready();
+    await command({ action: "capture-poll", name: "update-slow-verified.png" });
+    const [cache] = updateCachesFor(executable);
+    const { installer, digest } = readJson(join(cache, "update.json"));
+    assert.equal(digest, record.packages[1].sha256);
+    assert.equal(sha(readFileSync(installer)), digest);
+    assert.equal((await asset()).installers, retry);
+    assert.equal(child.exitCode, null);
+    assert.equal(readJson(join(control, "ready.json")).pid, relaunched.pid);
+    record.slowTransfer = {
+        elapsedMs, bytes: [first, second, third.progress.value], totalBytes: third.progress.max, installerRequests: 1,
+        stalledBytes, errors: { noResponse, noData, disconnected, wrongDigest },
+        cancellationCleaned: true, backgroundQuitCleaned: true, deadlineCountAfterReady: 0,
+        verifiedStatus: verified.status, installerSha256: digest, processBeforeConfirm: relaunched.pid,
+    };
+    note("Button and Escape hid the same transfer. After managed 300002 ms bytes still advanced. Closing at completion and Escape with an already verified package both preserved it. SHA-256 matched and the old PID stayed alive until the confirmation action.");
+    await command({ action: "approve-restart", duplicate: true });
+}
+
+async function controlledAssetServer(createServer, fixture, readFileSync, network, installerName) {
+    let time = 0;
+    const deadlines = new Map();
+    const nativeSetTimeout = globalThis.setTimeout;
+    const nativeClearTimeout = globalThis.clearTimeout;
+    const nativeAbortTimeout = AbortSignal.timeout;
+    globalThis.setTimeout = (callback, ms, ...args) => {
+        if (ms !== 300000) return nativeSetTimeout(callback, ms, ...args);
+        const handle = {};
+        deadlines.set(handle, { at: time + ms, run: () => callback(...args) });
+        return handle;
+    };
+    globalThis.clearTimeout = handle => {
+        if (!deadlines.delete(handle)) nativeClearTimeout(handle);
+    };
+    AbortSignal.timeout = ms => {
+        if (ms !== 300000) return nativeAbortTimeout(ms);
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")), ms);
+        return controller.signal;
+    };
+
+    let transfer;
+    const server = createServer((request, response) => {
+        const value = fixture();
+        if (request.url.endsWith("/SHA256SUMS")) {
+            response.end(value.digest + "  " + installerName + "\n");
+            return;
+        }
+        const source = readFileSync(value.installer);
+        const bytes = value.mode === "corrupt" ? Buffer.concat([source, Buffer.from("corrupt")]) : source;
+        if (value.mode === "normal" || value.mode === "corrupt") {
+            response.end(bytes);
+            return;
+        }
+        const current = { response, bytes, offset: 0 };
+        transfer = current;
+        response.on("close", () => {
+            if (transfer === current) transfer = undefined;
+        });
+        if (value.mode !== "no-response") response.setHeader("content-length", bytes.length);
+    });
+    await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+    });
+    server.unref();
+    const fetch = globalThis.fetch;
+    return {
+        fetch: (url, options) => fetch("http://127.0.0.1:" + server.address().port + new URL(url).pathname, options),
+        advance(ms) {
+            time += ms;
+            for (const [handle, deadline] of deadlines) {
+                if (deadline.at <= time) {
+                    deadlines.delete(handle);
+                    deadline.run();
+                }
+            }
+        },
+        send(action) {
+            if (!transfer) throw new Error("No HTTP body is being transferred");
+            const { response, bytes, offset } = transfer;
+            if (action === "break") {
+                response.destroy();
+            } else if (action === "finish") {
+                response.end(bytes.subarray(offset));
+            } else {
+                const next = Math.min(bytes.length, offset + Math.ceil(bytes.length / 8));
+                transfer.offset = next;
+                response.write(bytes.subarray(offset, next));
+            }
+        },
+        state: () => ({ time, deadlines: deadlines.size, sent: transfer?.offset ?? null, installers: network.installers }),
+    };
+}
+
 try {
     mkdirSync(project);
     mkdirSync(profile);
@@ -883,6 +1152,12 @@ try {
     record.sourceHashes["scripts/check-update-install.mjs"] = sha(checkSource);
     record.sourceHashesLF["scripts/check-update-install.mjs"] = sha(checkSource.toString("utf8").replaceAll("\r\n", "\n"));
     let legacyProgressCss = "";
+    if (slowScenario) {
+        const path = "src/desktop/installation-updates.ts";
+        const baseline = execFileSync("git", ["show", absoluteDeadlineRevision + ":" + path], { cwd: root });
+        writeFileSync(join(project, "src/desktop/qa-update-baseline.ts"), baseline);
+        record.baseline = { revision: absoluteDeadlineRevision, blobSha256: sha(baseline) };
+    }
     if (pollScenario) {
         const readLegacy = path => execFileSync("git", ["show", nativeProgressRevision + ":" + path], { cwd: root });
         const css = readLegacy("src/desktop/styles.css");
@@ -929,6 +1204,7 @@ try {
     const bootstrap = `import assert from 'node:assert/strict';
 import { app, BrowserWindow, dialog } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { trackProvider, trackActiveRun } from './src/desktop/active-runs.ts';
 import { registerRuntime, runtimeEntries, runtimeTransaction } from './src/desktop/board-runtime.ts';
@@ -952,11 +1228,13 @@ const fixture = () => JSON.parse(readFileSync(join(control, 'fixture.json'), 'ut
 let finishPreparedReply;
 let decideClose;
 const network = { releases: 0, manifests: 0, installers: 0, activeReleases: 0, peakReleases: 0 };
+const installerName = 'ai-taskboard-${newVersion}-windows-${process.arch}.exe';
+const managedAssets = ${slowScenario} ? await (${controlledAssetServer.toString()})(createServer, fixture, readFileSync, network, installerName) : undefined;
 const notes = ${JSON.stringify("## Новое в " + newVersion + "\n\n- Фоновая проверка выпусков\n- Прогресс загрузки пакета\n\n" +
     Array.from({ length: 32 }, (_, index) => "- Дополнение к выпуску " + (index + 1)).join("\n") +
     "\n\n<script>window.qaReleaseScriptExecuted = true</script>\n\n![Внешнее изображение](https://invalid.example/pixel.png)")};
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, options) => {
     const value = fixture();
     const address = String(url);
     if (address.startsWith('https://api.github.com/repos/edwardgushchin/AI-Taskboard/releases?')) {
@@ -984,10 +1262,12 @@ globalThis.fetch = async (url) => {
     assert.ok(address.startsWith(base), 'Unexpected update source: ' + address);
     if (address.endsWith('/SHA256SUMS')) {
         network.manifests++;
+        if (managedAssets) return managedAssets.fetch(address, options);
         return new Response(value.digest + '  ai-taskboard-${newVersion}-windows-${process.arch}.exe\\n');
     }
     assert.equal(address, base + 'ai-taskboard-${newVersion}-windows-${process.arch}.exe');
     network.installers++;
+    if (managedAssets) return managedAssets.fetch(address, options);
     if (value.mode === 'download-offline') {
         throw new TypeError('QA download offline');
     }
@@ -1248,6 +1528,28 @@ void (async () => {
             else if (command.action === 'network') {
                 result = network;
             }
+            else if (command.action === 'asset') {
+                if (command.advance) managedAssets.advance(command.advance);
+                if (command.send) managedAssets.send(command.send);
+                result = managedAssets.state();
+            }
+            else if (command.action === 'finish-and-close') {
+                const closing = evaluate('document.getElementById("update-later").click(); true');
+                managedAssets.send('finish');
+                result = await closing;
+            }
+            else if (command.action === 'baseline') {
+                const { prepareWindowsUpdate } = await import('./src/desktop/qa-update-baseline.ts');
+                void prepareWindowsUpdate({ tag: 'v${newVersion}', version: '${newVersion}' }, new AbortController().signal, {
+                    arch: process.arch, executable: process.execPath, profile: app.getPath('userData'), args: [],
+                    relaunch: () => assert.fail('Baseline must not start an installer'),
+                    progress: value => write('baseline-progress.json', value),
+                }).then(async prepared => {
+                    await prepared.cancel();
+                    write('baseline-result.json', { unexpectedSuccess: true });
+                }, error => write('baseline-result.json', { name: error.name, message: error.message }));
+                result = true;
+            }
             else if (command.action === 'new-window') {
                 const loaded = new Promise(resolve => app.once('browser-window-created', (_event, created) => {
                     created.webContents.once('did-finish-load', () => resolve(created));
@@ -1362,7 +1664,8 @@ void (async () => {
             }
             else if (command.action === 'approve-restart') {
                 write('reply.json', { id: command.id, result: true });
-                await evaluate('document.getElementById("update-action").click()');
+                await evaluate('document.getElementById("update-action").click()' +
+                    (command.duplicate ? '; document.getElementById("update-action").click()' : ''));
                 return;
             }
             else if (command.action === 'begin-held-install') {
@@ -1548,7 +1851,7 @@ void (async () => {
             config: { appId: "org.aitaskboard.updateqa." + productExecutable.slice(-8), productName: "AI Taskboard",
                 executableName: productExecutable, directories: { output }, electronVersion: require("electron/package.json").version,
                 electronDist: dirname(require("electron")), files: ["src/**/*", "qa-main.mjs"], npmRebuild: false,
-                ...(pollScenario || idleScenario ? { compression: "store" } : {}),
+                ...(pollScenario || idleScenario || slowScenario ? { compression: "store" } : {}),
                 win: { signExecutable: false }, nsis: { oneClick: false, perMachine: false, allowElevation: false,
                     createDesktopShortcut: false, createStartMenuShortcut: false, allowToChangeInstallationDirectory: true,
                     include: join(project, "installer.nsh") },
@@ -1592,7 +1895,9 @@ catch (error) {
         assert.equal(result.ok, true, JSON.stringify(result));
         return readJson(join(control, "tool.json"));
     };
-    if (pollScenario) {
+    if (slowScenario) {
+        await checkSlowUpdate(mode, executable, before);
+    } else if (pollScenario) {
         await checkPoll(mode, uninstaller, executable, child, before);
         await checkLockedQuit(executable, before.pid, mode);
         await command({ action: "approve-restart" });
@@ -1686,11 +1991,17 @@ catch (error) {
         return value?.version === newVersion && value;
     }, "updated client restart", 150000);
     assert.notEqual(after.pid, before.pid);
+    if (slowScenario) {
+        assert.notEqual(after.pid, record.slowTransfer.processBeforeConfirm);
+        await until(() => allUpdateCaches().length === 0, "real update helper removed its cache");
+        record.slowTransfer.duplicateConfirmationClicks = 2;
+        record.slowTransfer.updateRunnerCleaned = true;
+    }
     assert.equal(after.profile, profile);
     assert.equal(sha(readFileSync(join(profile, "profile-marker.txt"))), markerHash);
     const tabs = JSON.parse(readFileSync(join(profile, "project-tabs.json"), "utf8"));
     assert.deepEqual(tabs[0].projects, boards);
-    if (!pollScenario) await ask("Проверь обновления AI Taskboard после перезапуска");
+    if (!pollScenario && !slowScenario) await ask("Проверь обновления AI Taskboard после перезапуска");
     const frame = await command({ action: "frame" });
     assert.equal(frame.project, boards[0]);
     for (const board of [boards[1], boards[0]]) {
@@ -1701,7 +2012,7 @@ catch (error) {
     if (idleScenario) {
         record.captureAfter = await command({ action: "capture-about" });
         note("The native About dialog shows " + record.captureAfter.version + " after restart.");
-    } else if (!pollScenario) {
+    } else if (!pollScenario && !slowScenario) {
         record.captureAfter = await command({ action: "capture", name: "update-after.png" });
     }
     note("The verified package installed and one NSIS update restarted " + newVersion + ".");

@@ -108,9 +108,11 @@ function renderAppUpdate() {
   const release = byId("update-release");
   release.href = candidate.url;
   release.textContent = t("ui.open_release_b1c993b5");
-  const later = byId("update-later");
-  later.disabled = discarding;
-  later.textContent = t(ready || discarding || cleanupFailed ? "updates.later" : "updates.close");
+  byId("update-later").textContent = t("updates.close");
+  const cancel = byId("update-cancel");
+  cancel.hidden = !(downloading || ready || phase === "error" || discarding || cleanupFailed);
+  cancel.disabled = discarding;
+  cancel.textContent = t(downloading ? "ui.cancel_4c6dcc32" : "updates.later");
   const action = byId("update-action");
   action.hidden = !supported || downloading || discarding || cleanupFailed || phase === "installing";
   action.disabled = installing;
@@ -7102,23 +7104,22 @@ byId("update-release").addEventListener("click", event => {
   event.preventDefault();
   void api.openLink(event.currentTarget.href);
 });
-async function closeUpdateDialog(event) {
+function closeUpdateDialog(event) {
   event.preventDefault();
-  const { phase, candidate } = appUpdate;
-  if (phase === "discarding") return;
-  if (phase === "ready" || phase === "error" || phase === "cleanup-error") {
-    if (!await api.discardUpdate(candidate.version)) {
-      if (updateDialog.open) byId("update-later").focus();
-      return;
-    }
-  }
   updateDialog.close();
 }
-byId("update-later").addEventListener("click", event => {
-  void closeUpdateDialog(event).catch(error => notice(error.message));
-});
-updateDialog.addEventListener("cancel", event => {
-  void closeUpdateDialog(event).catch(error => notice(error.message));
+byId("update-later").addEventListener("click", closeUpdateDialog);
+updateDialog.addEventListener("cancel", closeUpdateDialog);
+byId("update-cancel").addEventListener("click", async () => {
+  try {
+    if (await api.discardUpdate(appUpdate.candidate.version)) {
+      updateDialog.close();
+    } else if (updateDialog.open) {
+      byId("update-later").focus();
+    }
+  } catch (error) {
+    notice(error.message);
+  }
 });
 byId("update-action").addEventListener("click", () => {
   const version = appUpdate.candidate.version;
