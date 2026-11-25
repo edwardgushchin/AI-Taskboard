@@ -387,10 +387,9 @@ export class BoardCodexUsage {
       const old = this.readTurn(key)!;
       const turn = this.pending.get(key) ?? { ...old, increments: [] };
       const wasClosed = turn.recoveryPending === false;
-      // A terminal report may lack part of the breakdown. The ledger already
-      // has the confirmed charge and can keep its checkpoint for late samples.
-      const terminalWithCharge = final.terminal && turn.tokens > 0;
-      const recoveryPending = final.recoveryPending && !wasClosed && !terminalWithCharge;
+      // A complete checkpoint confirms the recorded amount even at zero.
+      const knownSpend = turn.tokens > 0 || (turn.counters !== undefined && uncachedTokens(turn.counters) !== null);
+      const recoveryPending = final.recoveryPending && !wasClosed && !(final.terminal && knownSpend);
       const at = final.recoveryPending && wasClosed && !final.terminal
         ? turn.completedAt
         : final.at ?? turn.completedAt;

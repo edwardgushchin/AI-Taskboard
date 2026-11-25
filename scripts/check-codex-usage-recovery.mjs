@@ -21,13 +21,14 @@ const profile = join(scratch, "profile");
 const providerPath = join(scratch, "fixture.cjs");
 const historyPath = join(scratch, "history.json");
 const fragmentPath = join(scratch, "history-fragment.jsonl");
+const zeroFragmentPath = join(scratch, "zero-history-fragment.jsonl");
 const observationsPath = join(scratch, "observations.jsonl");
 const seed = process.argv.includes("--seed");
 const projectPath = join(scratch, "board");
 const limits = { codexDailyTokens: 200_000, codexDailyResetTime: "09:00", reviewMode: "human", autoMode: false };
 const turnId = "fixture-turn";
 const threads = Object.fromEntries(
-  ["interrupted", "failed", "history", "unknown", "active", "old"].map(
+  ["interrupted", "failed", "history", "unknown", "active", "old", "zeroInterrupted", "zeroFailed", "zeroHistory"].map(
     (name, index) => [name, "12345678-0000-4000-8000-" + String(index + 1).padStart(12, "0")],
   ),
 );
@@ -57,7 +58,8 @@ function init(project) {
 function provider() {
   const { appendFileSync, readFileSync } = require("node:fs");
   const { createInterface } = require("node:readline");
-  const [historyPath, observationsPath, fragmentThread, fragmentPath] = process.argv.slice(2);
+  const [historyPath, observationsPath, fragments] = process.argv.slice(2);
+  const fragmentPaths = JSON.parse(fragments);
   let threadId;
   createInterface({ input: process.stdin }).on("line", line => {
     const { method, id, params } = JSON.parse(line);
@@ -70,7 +72,7 @@ function provider() {
       result = { thread: {
         id: threadId,
         status: { type: active ? "active" : "idle" },
-        path: threadId === fragmentThread ? fragmentPath : null,
+        path: fragmentPaths[threadId] ?? null,
       } };
     }
     if (method === "thread/turns/list") {
@@ -82,15 +84,16 @@ function provider() {
   });
 }
 
-function writeHistoryFragment(at, resolved = false) {
-  const total = { total_tokens: 35, input_tokens: 30, output_tokens: 5 };
+function writeHistoryFragment(name, at, resolved = false) {
+  const initial = name === "zeroHistory" ? 10 : 28;
+  const total = { total_tokens: initial + 7, input_tokens: initial + 2, output_tokens: 5 };
   const last = { total_tokens: 7, input_tokens: 2, output_tokens: 5 };
   if (resolved) {
     total.cached_input_tokens = 10;
     last.cached_input_tokens = 0;
   }
   const events = [
-    { type: "session_meta", payload: { id: threads.history } },
+    { type: "session_meta", payload: { id: threads[name] } },
     { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
     {
       type: "event_msg",
@@ -101,7 +104,8 @@ function writeHistoryFragment(at, resolved = false) {
       },
     },
   ];
-  writeFileSync(fragmentPath, events.map(event => JSON.stringify(event)).join("\n") + "\n");
+  const file = name === "zeroHistory" ? zeroFragmentPath : fragmentPath;
+  writeFileSync(file, events.map(event => JSON.stringify(event)).join("\n") + "\n");
 }
 
 const clockPath = join(scratch, "clock.json");
@@ -115,7 +119,8 @@ if (seed) {
   const beforeReset = new Date();
   beforeReset.setHours(8, 59, 59, 0);
   writeFileSync(clockPath, JSON.stringify(beforeReset.getTime()));
-  writeHistoryFragment(beforeReset.getTime() - 500);
+  writeHistoryFragment("history", beforeReset.getTime() - 500);
+  writeHistoryFragment("zeroHistory", beforeReset.getTime() - 500);
 }
 
 const project = realpathSync(projectPath);
@@ -131,7 +136,11 @@ app.setPath("userData", profile);
 app.requestSingleInstanceLock = () => true;
 globalThis.usageCheckClock = () => clock;
 globalThis.usageCheckClient = {
-  path: node, args: [providerPath, historyPath, observationsPath, threads.history, fragmentPath],
+  path: node,
+  args: [
+    providerPath, historyPath, observationsPath,
+    JSON.stringify({ [threads.history]: fragmentPath, [threads.zeroHistory]: zeroFragmentPath }),
+  ],
 };
 
 const source = new URL("../src/desktop/main.ts", import.meta.url);
@@ -208,11 +217,12 @@ function collect(name, tokens, at) {
   const usage = new CodexTokenUsage(writer.observe, writer.recover);
   usage.track(threadId, "fixture", true);
   usage.begin(threadId, turnId);
+  const output = Math.min(tokens, 5);
   const total = {
     totalTokens: tokens + 10,
-    inputTokens: tokens + 5,
+    inputTokens: tokens + 10 - output,
     cachedInputTokens: 10,
-    outputTokens: 5,
+    outputTokens: output,
     reasoningOutputTokens: 0,
     cacheWriteInputTokens: 0,
   };
@@ -221,7 +231,7 @@ function collect(name, tokens, at) {
 }
 
 function usageSample(usage, name, total, last, at) {
-  usage.observe({
+  return usage.observe({
     method: "thread/tokenUsage/updated",
     params: { threadId: threads[name], turnId, tokenUsage: { total, last } },
   }, at);
@@ -237,11 +247,17 @@ function terminal(usage, name, status, at) {
 async function checkpoint(name, amount, at, status) {
   const usage = collect(name, amount, status ? at - 1000 : at);
   if (status) {
-    const total = { totalTokens: amount + 16, inputTokens: amount + 10, outputTokens: 6 };
+    const initialOutput = Math.min(amount, 5);
+    const total = {
+      totalTokens: amount + 16,
+      inputTokens: amount + 15 - initialOutput,
+      outputTokens: initialOutput + 1,
+    };
     const last = { totalTokens: 6, inputTokens: 5, outputTokens: 1 };
     usageSample(usage, name, total, last, at - 500);
     const report = terminal(usage, name, status, at);
     assert.equal(report.records[0].incomplete, true, name + " partial provider counters");
+    assert.equal(report.records[0].dailyTokens, null);
     await usage.save(report, writer);
     await usage.save(terminal(usage, name, status, at), writer);
     await writer(report);
@@ -271,10 +287,21 @@ async function check() {
     await checkpoint("unknown", 24_929, before);
     await checkpoint("active", 23, before);
     await checkpoint("old", 30, oldAt);
+    await checkpoint("zeroInterrupted", 0, before, "interrupted");
+    await checkpoint("zeroFailed", 0, before, "failed");
+    await checkpoint("zeroHistory", 0, before);
     assert.equal(hooks.usageForBoard(project).flush(), true);
     const immediate = Object.fromEntries(["interrupted", "failed"].map(name => [name, row(name).recovery_pending]));
     console.log("Live terminal state:", immediate);
     assert.deepEqual(immediate, { interrupted: 0, failed: 0 });
+    const zeroImmediate = Object.fromEntries(
+      ["zeroInterrupted", "zeroFailed"].map(name => [name, row(name).recovery_pending]),
+    );
+    console.log("Live terminal state after confirmed zero:", zeroImmediate);
+    assert.deepEqual(zeroImmediate, { zeroInterrupted: 0, zeroFailed: 0 });
+    for (const name of ["zeroInterrupted", "zeroFailed", "zeroHistory"]) {
+      assert.equal(row(name).tokens, 0);
+    }
     assertBudget(project, before, 119_043);
     assertBudget(project, after, 0);
     assertBudget(project, oldAt, 30);
@@ -298,14 +325,18 @@ async function check() {
   });
   const configure = (unknown, active) => writeFileSync(historyPath, JSON.stringify({
     [threads.history]: [historicalTurn("interrupted", before)],
+    [threads.zeroHistory]: [historicalTurn("failed", before)],
     [threads.unknown]: unknown ? [historicalTurn("failed")] : [],
     [threads.active]: [historicalTurn(active ? "completed" : "inProgress", active ? after : undefined)],
   }));
   configure(false, false);
-  for (const minute of [0, 1, 2, 3, 4]) await poll(watch, after + minute * 60_000);
+  for (const minute of [0, 1, 2, 3, 4, 5]) await poll(watch, after + minute * 60_000);
   assert.equal(row("history").recovery_pending, 0);
   assert.equal(row("history").completed, before);
   assert.equal(row("history").tokens, 18);
+  assert.equal(row("zeroHistory").recovery_pending, 0);
+  assert.equal(row("zeroHistory").completed, before);
+  assert.equal(row("zeroHistory").tokens, 0);
   assert.equal(row("unknown").completed, null);
   assert.equal(row("active").completed, null);
   const reads = name => records().filter(event => event.method === "thread/read" && event.threadId === threads[name]).length;
@@ -321,18 +352,36 @@ async function check() {
   assert.equal(row("active").recovery_pending, 0);
   assert.equal(row("active").completed, after);
 
-  writeHistoryFragment(before - 500, true);
-  const restoreHistory = new CodexTokenUsage(writer.observe, writer.recover);
-  const lateHistory = await restoreHistory.recoverRollout(
-    fragmentPath, threads.history, historicalTurn("interrupted", before),
-  );
-  assert.ok(lateHistory);
-  await restoreHistory.save(lateHistory, writer);
-  await writer(lateHistory);
-  assert.equal(row("history").recovery_pending, 0);
-  assert.equal(row("history").completed, before);
-  assert.equal(row("history").tokens, 25);
-  assertBudget(project, before, 119_050);
+  for (const [name, file, status, tokens] of [
+    ["history", fragmentPath, "interrupted", 25],
+    ["zeroHistory", zeroFragmentPath, "failed", 7],
+  ]) {
+    writeHistoryFragment(name, before - 500, true);
+    const restoreHistory = new CodexTokenUsage(writer.observe, writer.recover);
+    const lateHistory = await restoreHistory.recoverRollout(file, threads[name], historicalTurn(status, before));
+    assert.ok(lateHistory);
+    await restoreHistory.save(lateHistory, writer);
+    await writer(lateHistory);
+    assert.equal(row(name).recovery_pending, 0);
+    assert.equal(row(name).completed, before);
+    assert.equal(row(name).tokens, tokens);
+  }
+
+  for (const [name, status] of [["zeroInterrupted", "interrupted"], ["zeroFailed", "failed"]]) {
+    const resumed = new CodexTokenUsage(writer.observe, writer.recover);
+    resumed.track(threads[name], "fixture", true);
+    resumed.recover(threads[name], historicalTurn(status, before));
+    const total = { totalTokens: 16, inputTokens: 15, cachedInputTokens: 12, outputTokens: 1 };
+    const last = { totalTokens: 6, inputTokens: 5, cachedInputTokens: 2, outputTokens: 1 };
+    const report = usageSample(resumed, name, total, last, after + 21 * 60_000);
+    assert.ok(report);
+    await resumed.save(report, writer);
+    await writer(report);
+    assert.equal(row(name).recovery_pending, 0);
+    assert.equal(row(name).completed, before);
+    assert.equal(row(name).tokens, 4);
+  }
+  assertBudget(project, before, 119_065);
 
   const rollout = join(scratch, "old-rollout.jsonl");
   const event = payload => ({ type: "event_msg", timestamp: localDay(oldAt), payload });
@@ -350,7 +399,7 @@ async function check() {
   assert.equal(hooks.usageForBoard(project).flush(), true);
   assert.equal(row("old").recovery_pending, 0);
   assertBudget(project, oldAt, 42);
-  assertBudget(project, before, 119_050);
+  assertBudget(project, before, 119_065);
   assertBudget(project, after, 0);
   assertBudget(other, before, 0);
 
@@ -363,7 +412,7 @@ async function check() {
   await until(() => !hooks.subscriptions.has(project) && !hooks.boardUsage.has(project), "watch and usage released");
   const reopened = hooks.createWindow([project], project);
   await reopened.ready;
-  assertBudget(project, before, 119_050);
+  assertBudget(project, before, 119_065);
   const reopenedWatch = hooks.subscriptions.get(project);
   assert.notEqual(reopenedWatch, watch);
   const previousReads = records().length;
@@ -385,10 +434,11 @@ async function check() {
     "",
     "- Живые interrupted и failed закрыты после полного замера и следующего замера без счётчика чтения из кэша. Разбивка помечена неполной. Повтор события и отчёта не изменил 94 059 и 14.",
     "- После перезапуска исход восстановлен из истории при наличии датированного неполного token_count. Сверка закрылась с 18 токенами. Поздний полный замер и его повтор дали 25 токенов с прежней датой окончания.",
-    "- Неизвестный исход сохранил 24 929 без времени завершения и опрошен один раз за первые пять циклов. Поздний статус закрыл его без подстановки времени.",
+    "- Подтверждённый ноль закрыл сверки живых interrupted и failed и хода с датированным неполным фрагментом истории. Достоверные поздние замеры и повторы начислили соответственно 4, 4 и 7 токенов с исходной датой.",
+    "- Неизвестный исход сохранил 24 929 без времени завершения и опрошен один раз за первые шесть циклов. Поздний статус закрыл его без подстановки времени.",
     "- Длительный активный ход опрашивался повторно. После поступления истории его сверка закрылась с датой из истории.",
     "- Старый ход не попал в фоновый поиск. Поздний отчёт довёл его начисление с 30 до 42, сохранив историческую дату.",
-    "- До сброса учтено 119 043, после позднего уточнения 119 050. В новом периоде и на другой доске расход остался нулевым.",
+    "- До сброса учтено 119 043, после поздних уточнений 119 065. В новом периоде и на другой доске расход остался нулевым.",
     "- Два окна разделяли одного наблюдателя. После закрытия и повторного открытия наблюдатель и кэш удалены оба раза, процессы тестового App Server завершились.",
     "",
     "## Технические детали",
