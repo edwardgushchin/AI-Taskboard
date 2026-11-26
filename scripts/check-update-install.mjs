@@ -140,15 +140,20 @@ async function withLockedInstaller(executable, action) {
     const [cache] = caches;
     const { installer } = readJson(join(cache, "update.json"));
     assert.equal(dirname(installer), cache);
+    await withFileSharingLock(installer, "Read", () => action(cache));
+    return cache;
+}
+
+async function withFileSharingLock(installer, share, action) {
     assert.ok(existsSync(installer));
-    heldCaches.add(cache);
+    heldCaches.add(dirname(installer));
     const nonce = randomUUID();
     const ready = join(control, "lock-ready-" + nonce);
     const release = join(control, "lock-release-" + nonce);
     const quote = value => "'" + value.replaceAll("'", "''") + "'";
     const source = [
         "$ErrorActionPreference = 'Stop'",
-        "$file = [IO.File]::Open(" + quote(installer) + ", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)",
+        "$file = [IO.File]::Open(" + quote(installer) + ", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::" + share + ")",
         "try {",
         "  [IO.File]::WriteAllText(" + quote(ready) + ", 'locked')",
         "  while (![IO.File]::Exists(" + quote(release) + ")) { Start-Sleep -Milliseconds 50 }",
@@ -165,8 +170,8 @@ async function withLockedInstaller(executable, action) {
             if (failed) throw failed;
             assert.equal(holder.exitCode, null, "File share lock must stay open");
             return existsSync(ready);
-        }, "Windows FileShare.Read lock", 10000);
-        await action(cache);
+        }, "Windows FileShare." + share + " lock", 10000);
+        return await action();
     } finally {
         writeFileSync(release, "release");
         try {
@@ -175,7 +180,6 @@ async function withLockedInstaller(executable, action) {
             if (!failed && holder.exitCode === null) holder.kill();
         }
     }
-    return cache;
 }
 async function command(input) {
     const id = ++seq;
@@ -885,10 +889,10 @@ async function checkSlowUpdate(mode, executable, before) {
     const click = elementId => command({ action: "click", elementId });
     const escape = () => command({ action: "key", key: "Escape" });
     const view = () => run("(" + updateDialogState.toString() + ")()");
-    const viewWhen = (label, predicate) => until(async () => {
+    const viewWhen = (label, predicate, timeout = 10000) => until(async () => {
         const state = await view();
         return predicate(state) && state;
-    }, label, 10000);
+    }, label, timeout);
     const asset = (options = {}) => command({ action: "asset", ...options });
     const sendChunk = async (advance = 0) => {
         const { sent } = await asset({ send: "chunk", advance });
@@ -910,6 +914,13 @@ async function checkSlowUpdate(mode, executable, before) {
         return viewWhen("dialog opened from update indicator", state => state.open);
     };
     const closed = () => viewWhen("dialog closed", state => !state.open);
+    const assertRunningClient = pid => {
+        assert.equal(child.pid, pid);
+        assert.equal(child.exitCode, null);
+        const current = readJson(join(control, "ready.json"));
+        assert.equal(current.pid, pid);
+        assert.equal(current.version, oldVersion);
+    };
     const progressing = (previous = 0) => viewWhen("partial byte count advanced",
         state => state.open && state.progress?.value > previous && state.progress.value < state.progress.max);
     const begin = async value => {
@@ -963,18 +974,6 @@ async function checkSlowUpdate(mode, executable, before) {
     await asset({ advance: 300001 });
     const noData = await failed("No update data was received for 5 minutes.");
 
-    const brokenRequest = await begin("manual");
-    await sendChunk();
-    await progressing();
-    await escape();
-    await closed();
-    await asset({ send: "break" });
-    await drained();
-    await open();
-    const disconnected = await failed("The network connection failed while downloading the update.");
-    assert.equal((await asset()).installers, brokenRequest);
-    note("No headers, partial-body timeout and socket break reported distinct errors. The background socket failure remained visible after reopening, and each failed request released its deadline and partial files.");
-
     mode("corrupt");
     await click("update-action");
     const wrongDigest = await failed("Installer SHA-256 does not match the release manifest.");
@@ -987,6 +986,55 @@ async function checkSlowUpdate(mode, executable, before) {
     if (!(await view()).open) await open();
     await viewWhen("explicit cancellation restored the download action", state => state.open && state.action?.text === "Обновить");
     assert.equal(child.exitCode, null);
+
+    const lockedRequest = await begin("manual");
+    const lockedBytes = await sendChunk();
+    await progressing();
+    const [partialCache] = allUpdateCaches();
+    const partialInstaller = join(tmpdir(), partialCache, `ai-taskboard-${newVersion}-windows-${process.arch}.exe`);
+    const lockedCancellation = await withFileSharingLock(partialInstaller, "ReadWrite", async () => {
+        const cancelStarted = Date.now();
+        const cancel = await run(`(() => {
+            const button = document.getElementById("update-cancel");
+            if (button.hidden || button.disabled) return null;
+            button.click();
+            return button.textContent;
+        })()`);
+        assert.equal(cancel, "Отмена");
+        let refused;
+        try {
+            refused = await viewWhen("cancel exposes the Windows sharing violation", state =>
+                state.open && state.action === null && state.cancel === "Позже" &&
+                state.status.startsWith("Не удалось удалить скачанный установщик."), 45000);
+        } catch (error) {
+            const { open, action, cancel, status } = await view();
+            const { phase, error: cleanupError } = await run("window.taskboard.updateState()");
+            record.lockedCancellationFailure = {
+                dialog: { open, action, cancel, status },
+                state: { phase, error: cleanupError },
+                asset: await asset(),
+                partialFileExists: existsSync(partialInstaller),
+            };
+            throw error;
+        }
+        const updateState = await run("window.taskboard.updateState()");
+        assert.equal(updateState.phase, "cleanup-error");
+        assert.ok(updateState.error);
+        assert.equal(statSync(partialInstaller).size, lockedBytes);
+        const stopped = await asset();
+        assert.equal(stopped.installers, lockedRequest);
+        assert.equal(stopped.deadlines, 0);
+        assert.equal(stopped.sent, null);
+        assertRunningClient(before.pid);
+        return { message: refused.status, elapsedMs: Date.now() - cancelStarted };
+    });
+    await click("update-cancel");
+    await drained();
+    await closed();
+    assertRunningClient(before.pid);
+    await open();
+    await viewWhen("retrying cancellation restored the download action", state => state.open && state.action?.text === "Обновить");
+    note("The real Windows file lock prevented removing the partial installer. Cancel displayed the sharing violation without closing the dialog or starting an installer. After releasing the lock, Later removed the partial file and restored Download.");
 
     await begin("manual");
     await sendChunk();
@@ -1004,8 +1052,24 @@ async function checkSlowUpdate(mode, executable, before) {
     await until(async () => (await view()).advertised, "update badge after normal exit");
     await open();
 
+    const brokenRequest = await begin("manual");
+    await sendChunk();
+    await progressing();
+    await escape();
+    await closed();
+    await asset({ send: "break" });
+    await drained();
+    assertRunningClient(relaunched.pid);
+    await open();
+    const disconnected = await failed("The network connection failed while downloading the update.");
+    assert.equal((await asset()).installers, brokenRequest);
+    assertRunningClient(relaunched.pid);
+    note("No headers, partial-body timeout and socket break reported distinct errors and released their deadlines and partial files. The socket failure stayed visible after reopening; Retry Download starts the successful attempt in that same client.");
+
     const epoch = (await asset()).time;
     const retry = await begin("manual");
+    assert.equal(retry, brokenRequest + 1);
+    assertRunningClient(relaunched.pid);
     await sendChunk();
     const first = (await progressing()).progress.value;
     await click("update-later");
@@ -1041,15 +1105,16 @@ async function checkSlowUpdate(mode, executable, before) {
     assert.equal(digest, record.packages[1].sha256);
     assert.equal(sha(readFileSync(installer)), digest);
     assert.equal((await asset()).installers, retry);
-    assert.equal(child.exitCode, null);
-    assert.equal(readJson(join(control, "ready.json")).pid, relaunched.pid);
+    assertRunningClient(relaunched.pid);
     record.slowTransfer = {
         elapsedMs, bytes: [first, second, third.progress.value], totalBytes: third.progress.max, installerRequests: 1,
         stalledBytes, errors: { noResponse, noData, disconnected, wrongDigest },
         cancellationCleaned: true, backgroundQuitCleaned: true, deadlineCountAfterReady: 0,
         verifiedStatus: verified.status, installerSha256: digest, processBeforeConfirm: relaunched.pid,
+        lockedCancellation: { ...lockedCancellation, partialBytes: lockedBytes, removedAfterRetry: true },
+        retryAfterBackgroundDisconnect: { failedRequest: brokenRequest, retryRequest: retry, clientPid: relaunched.pid },
     };
-    note("Button and Escape hid the same transfer. After managed 300002 ms bytes still advanced. Closing at completion and Escape with an already verified package both preserved it. SHA-256 matched and the old PID stayed alive until the confirmation action.");
+    note("Button and Escape hid the retry without starting another request. After managed 300002 ms bytes still advanced. Closing at completion and Escape with a verified package both preserved it. SHA-256 matched and the same PID that had shown the socket error stayed alive until confirmation.");
     await command({ action: "approve-restart", duplicate: true });
 }
 

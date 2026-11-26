@@ -23,11 +23,20 @@ type Transfer = {
   progress?: Progress;
   package?: PreparedUpdate;
   error?: string;
-  completion?: Promise<void>;
+  completion?: Promise<UpdateCleanupError | undefined>;
 };
 export interface PreparedUpdate {
   start: () => Promise<void>;
   cancel: () => Promise<void>;
+}
+
+class UpdateCleanupError extends Error {
+  readonly retry: () => Promise<void>;
+
+  constructor(cause: Error, retry: () => Promise<void>) {
+    super(cause.message, { cause });
+    this.retry = retry;
+  }
 }
 
 export class ApplicationUpdates {
@@ -120,6 +129,13 @@ export class ApplicationUpdates {
       transfer.package = prepared;
       if (transfer.phase !== "discarding") transfer.phase = "ready";
     } catch (error) {
+      if (error instanceof UpdateCleanupError) {
+        if (transfer.phase !== "discarding") {
+          transfer.phase = "cleanup-error";
+          transfer.error = error.message;
+        }
+        return error;
+      }
       if (transfer.phase !== "discarding") {
         transfer.phase = "error";
         transfer.error = (error as Error).message;
@@ -143,8 +159,13 @@ export class ApplicationUpdates {
     this.options.changed?.();
     if (downloading) transfer.controller.abort();
     try {
-      await transfer.completion;
-      await transfer.package?.cancel();
+      const cleanupError = await transfer.completion;
+      if (cleanupError) {
+        if (downloading) throw cleanupError;
+        await cleanupError.retry();
+      } else {
+        await transfer.package?.cancel();
+      }
       this.transfer = undefined;
     } catch (error) {
       transfer.phase = "cleanup-error";
@@ -364,7 +385,11 @@ export async function prepareWindowsUpdate(candidate: Candidate, signal: AbortSi
       },
     };
   } catch (error) {
-    await cancel();
+    try {
+      await cancel();
+    } catch (cleanupError) {
+      throw new UpdateCleanupError(cleanupError as Error, cancel);
+    }
     throw error;
   }
 }
