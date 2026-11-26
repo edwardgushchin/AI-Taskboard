@@ -146,6 +146,12 @@ node scripts/check-update-install.mjs --artifacts .tasks/qa/windows-update
 node scripts/check-update-install.mjs --poll --artifacts .tasks/qa/windows-update
 ```
 
+Для проверки медленной загрузки, сетевых сбоев и повторного открытия диалога запустите сценарий с локальным HTTP-сервером и управляемыми таймерами загрузчика.
+
+```powershell
+node scripts/check-update-install.mjs --slow --artifacts .tasks/qa/windows-slow-update
+```
+
 Чтобы проверить обновление простаивающей доски через окно и через менеджера, передайте `--idle`.
 
 ```powershell

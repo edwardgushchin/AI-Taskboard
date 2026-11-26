@@ -5272,7 +5272,7 @@ ipcMain.handle("app:discardUpdate", async (event, version: unknown) => {
   stateOf(event);
   const update = applicationUpdates.state;
   if (quitPending || update.candidate?.version !== version ||
-      !["ready", "error", "discarding", "cleanup-error"].includes(update.phase)) {
+      !["downloading", "ready", "error", "discarding", "cleanup-error"].includes(update.phase)) {
     return false;
   }
   try {
